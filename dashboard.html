@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Programming Game Dashboard</title>
+  <link rel="stylesheet" href="/dashboard.css" />
+</head>
+
+<body>
+  <div id="connectionBanner" class="connection-banner" role="alert" style="display:none;">
+    <span id="connectionMsg"></span>
+  </div>
+  <div class="wrap">
+    <h1>Programming Game Live Feed</h1>
+    <div class="sub">Connected heartbeat snapshots from your running bot.</div>
+    <div class="stats">
+      <div class="card">
+        <div class="label">Last Received</div>
+        <div id="receivedAt" class="value">-</div>
+      </div>
+      <div class="card">
+        <div class="label">Units Visible</div>
+        <div id="unitCount" class="value">0</div>
+      </div>
+      <div class="card">
+        <div class="label">Monsters Visible</div>
+        <div id="monsterCount" class="value">0</div>
+      </div>
+    </div>
+    <div class="control-panel">
+      <div class="card">
+        <div class="label">Recovery Mode</div>
+        <div id="recoveryMode" class="control-state">INACTIVE</div>
+        <div id="recoveryHint" class="sub" style="margin: 6px 0 6px;">Low HP threshold: 25% (0 HP)</div>
+        <div class="label" style="margin-bottom: 6px;">Low HP Threshold</div>
+        <div class="controls">
+          <input id="thresholdRange" type="range" min="1" max="95" step="1" value="25" />
+          <input id="thresholdInput" type="number" min="1" max="95" step="1" value="25" />
+          <button id="thresholdSave" type="button">Apply</button>
+        </div>
+        <div id="thresholdStatus" class="control-note">Threshold applies immediately.</div>
+      </div>
+      <div class="card">
+        <div class="label">Idle at Home</div>
+        <div id="idleAtHomeState" class="control-state status-ok">INACTIVE</div>
+        <div style="margin-top: 10px;">
+          <button id="idleAtHomeToggle" type="button" class="idle-toggle">Return to Home</button>
+        </div>
+        <div id="idleAtHomeStatus" class="control-note"></div>
+      </div>
+    </div>
+    <div class="player-section">
+      <div class="tab-bar" role="tablist" aria-label="Dashboard tabs">
+        <button class="tab-button active" data-tab="status" type="button">Status</button>
+        <button class="tab-button" data-tab="combat-skills" type="button">Combat Skills</button>
+        <button class="tab-button" data-tab="spellbook" type="button">Spellbook</button>
+        <button class="tab-button" data-tab="inventory" type="button">Inventory</button>
+        <button class="tab-button" data-tab="storage" type="button">Storage</button>
+      </div>
+      <div class="player-section-content">
+        <section class="tab-panel active" data-panel="status">
+          <div class="status-shell">
+            <div class="status-top">
+              <div class="status-center">
+                <div class="status-avatar">
+                  <div class="status-avatar-ring"></div>
+                </div>
+                <div id="playerName" class="status-name">-</div>
+                <div id="positionStat" class="status-position">-</div>
+                <div class="resource-stack">
+                  <div class="resource-item">
+                    <div class="meter">
+                      <div id="hpFill" class="fill hp"></div>
+                    </div>
+                    <div class="resource-meta"><span class="resource-name">HP</span><span id="hpText"
+                        class="resource-value">-</span></div>
+                  </div>
+                  <div class="resource-item">
+                    <div class="meter">
+                      <div id="mpFill" class="fill mp"></div>
+                    </div>
+                    <div class="resource-meta"><span class="resource-name">MP</span><span id="mpText"
+                        class="resource-value">-</span></div>
+                  </div>
+                  <div class="resource-item">
+                    <div class="meter">
+                      <div id="tpFill" class="fill tp"></div>
+                    </div>
+                    <div class="resource-meta"><span class="resource-name">TP</span><span id="tpText"
+                        class="resource-value">-</span></div>
+                  </div>
+                  <div class="resource-item">
+                    <div class="meter">
+                      <div id="caloriesFill" class="fill calories"></div>
+                    </div>
+                    <div class="resource-meta"><span class="resource-name">Calories</span><span id="caloriesText"
+                        class="resource-value">-</span></div>
+                  </div>
+                  <div class="resource-item">
+                    <div class="meter">
+                      <div id="weightFill" class="fill weight"></div>
+                    </div>
+                    <div class="resource-meta"><span class="resource-name">Weight</span><span id="weightText"
+                        class="resource-value">-</span></div>
+                  </div>
+                </div>
+              </div>
+              <div class="equipment-wrap">
+                <div id="equipmentGrid" class="equipment-grid"></div>
+
+              </div>
+            </div>
+          </div>
+        </section>
+        <section class="tab-panel" data-panel="combat-skills">
+          <div class="panel-inner">
+            <div id="combatSkillsList" class="list-section"></div>
+          </div>
+        </section>
+        <section class="tab-panel" data-panel="spellbook">
+          <div class="panel-inner">
+            <div id="spellbookList" class="spellbook-grid"></div>
+          </div>
+        </section>
+        <section class="tab-panel" data-panel="inventory">
+          <div class="panel-inner">
+            <div id="inventoryList" class="list-section"></div>
+          </div>
+        </section>
+        <section class="tab-panel" data-panel="storage">
+          <div class="panel-inner">
+            <div id="storageList" class="list-section"></div>
+          </div>
+        </section>
+      </div>
+    </div>
+    <div class="tab-bar world-tab-bar" role="tablist" aria-label="World tabs" style="margin-top: 16px;">
+      <button class="tab-button active" data-world-tab="upgrade-plans" type="button">Upgrade Plans</button>
+      <button class="tab-button" data-world-tab="world-npcs" type="button">NPCs</button>
+      <button class="tab-button" data-world-tab="world-mobs" type="button">Mobs</button>
+      <button class="tab-button" data-world-tab="world-objects" type="button">Objects</button>
+    </div>
+    <section class="tab-panel active" data-world-panel="upgrade-plans">
+      <div class="card">
+        <div class="label" style="margin-bottom: 10px;">Upgrade Plans</div>
+        <div id="upgradePlansList" class="world-list"></div>
+      </div>
+    </section>
+    <section class="tab-panel" data-world-panel="world-npcs">
+      <div class="card">
+        <div class="label" style="margin-bottom: 10px;">NPCs Seen</div>
+        <div id="npcsList" class="list-section"></div>
+      </div>
+    </section>
+    <section class="tab-panel" data-world-panel="world-mobs">
+      <div class="card">
+        <div class="label" style="margin-bottom: 10px;">Mobs Seen</div>
+        <div id="mobsList" class="list-section"></div>
+      </div>
+    </section>
+    <section class="tab-panel" data-world-panel="world-objects">
+      <div class="card">
+        <div class="label" style="margin-bottom: 10px;">World Objects</div>
+        <div id="objectsList" class="list-section"></div>
+      </div>
+    </section>
+    <div class="payload-split" style="margin-top: 16px; display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+      <div class="card">
+        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px;">
+          <div class="label" style="margin: 0;">Heartbeat Snapshot <span
+              style="font-weight:400;font-size:0.8em;opacity:0.6;">(static copy)</span></div>
+          <span id="snapshotTime" style="font-size:0.75em;opacity:0.5;"></span>
+        </div>
+        <pre id="outputSnapshot" style="margin: 0; min-height: 280px; overflow: auto;">No snapshot yet — click "Take Snapshot" on the live feed.</pre>
+      </div>
+      <div class="card">
+        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px;">
+          <div class="label" style="margin: 0;">Server Heartbeat <span
+              style="font-weight:400;font-size:0.8em;opacity:0.6;">(raw from server)</span></div>
+          <button id="snapshotBtn" type="button">Take Snapshot</button>
+        </div>
+        <pre id="outputRaw" style="margin: 0; min-height: 280px; overflow: auto;">Waiting for data...</pre>
+      </div>
+    </div>
+  </div>
+  <script src="/dashboard-client.js"></script>
+</body>
+
+</html>

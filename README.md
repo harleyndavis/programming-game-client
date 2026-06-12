@@ -22,6 +22,7 @@ touch .env
 # https://programming-game.com/dashboard
 npm install
 npm start
+# Open local dashboard: http://localhost:8787
 ```
 
 ## Playing the Game

@@ -1,0 +1,745 @@
+:root {
+  --bg: #0f172a;
+  --panel: #111827;
+  --text: #e5e7eb;
+  --muted: #9ca3af;
+  --accent: #22d3ee;
+}
+
+body {
+  margin: 0;
+  font-family: Consolas, Menlo, Monaco, "Courier New", monospace;
+  background: radial-gradient(circle at top, #1f2937, var(--bg) 60%);
+  color: var(--text);
+}
+
+.wrap {
+  max-width: 1024px;
+  margin: 0 auto;
+  padding: 20px;
+}
+
+h1 {
+  margin: 0 0 8px;
+  font-size: 24px;
+}
+
+.sub {
+  color: var(--muted);
+  margin-bottom: 16px;
+}
+
+.control-panel {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.control-state {
+  font-size: 20px;
+  color: var(--accent);
+}
+
+/* ── Player section container ───────────────────────────────── */
+
+.player-section {
+  background: color-mix(in srgb, var(--panel), black 15%);
+  border: 1px solid #374151;
+  border-radius: 10px;
+  margin-bottom: 16px;
+  overflow: hidden;
+}
+
+.player-section > .tab-bar {
+  margin: 0;
+  border-radius: 0;
+  border: none;
+  border-bottom: 1px solid #374151;
+  padding: 8px 8px 0;
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.player-section-content {
+  height: 400px;
+  overflow: hidden;
+}
+
+.player-section .tab-panel {
+  display: none;
+  height: 100%;
+  overflow-y: scroll;
+  margin-bottom: 0;
+}
+
+.player-section .tab-panel.active {
+  display: block;
+}
+
+.player-section .tab-panel::-webkit-scrollbar {
+  width: 6px;
+}
+.player-section .tab-panel::-webkit-scrollbar-track {
+  background: transparent;
+}
+.player-section .tab-panel::-webkit-scrollbar-thumb {
+  background: #374151;
+  border-radius: 3px;
+}
+
+/* panel-inner replaces .card inside player panels */
+.panel-inner {
+  padding: 12px;
+}
+
+/* ── Tab bar (shared, world tabs override columns) ───────────── */
+
+.tab-bar {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.tab-button {
+  appearance: none;
+  border: 1px solid #374151;
+  border-radius: 10px;
+  background: rgba(17, 24, 39, 0.65);
+  color: var(--muted);
+  padding: 10px 12px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.tab-button.active {
+  color: var(--text);
+  border-color: #38bdf8;
+  background: rgba(14, 165, 233, 0.2);
+}
+
+.player-section > .tab-bar .tab-button {
+  border-radius: 8px 8px 0 0;
+}
+
+.tab-panel {
+  display: none;
+  margin-bottom: 16px;
+}
+
+.tab-panel.active {
+  display: block;
+}
+
+/* ── Stats row ───────────────────────────────────────────────── */
+
+.stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.card {
+  background: color-mix(in srgb, var(--panel), black 15%);
+  border: 1px solid #374151;
+  border-radius: 10px;
+  padding: 12px;
+}
+
+.label {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.value {
+  font-size: 20px;
+  color: var(--accent);
+}
+
+.status-ok {
+  color: #22c55e;
+}
+
+.status-warn {
+  color: #f59e0b;
+}
+
+.row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+
+.row:last-child {
+  margin-bottom: 0;
+}
+
+/* ── Meters ──────────────────────────────────────────────────── */
+
+.meter {
+  height: 12px;
+  border-radius: 999px;
+  border: 1px solid #374151;
+  background: #0b1220;
+  overflow: hidden;
+}
+
+.fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, #22d3ee, #0ea5e9);
+  transition: width 200ms ease;
+}
+
+.fill.hp {
+  background: linear-gradient(90deg, #f97316, #ef4444);
+}
+
+.fill.mp {
+  background: linear-gradient(90deg, #22d3ee, #3b82f6);
+}
+
+.fill.tp {
+  background: linear-gradient(90deg, #84cc16, #22c55e);
+}
+
+.fill.calories {
+  background: linear-gradient(90deg, #f59e0b, #eab308);
+}
+
+.fill.weight {
+  background: linear-gradient(90deg, #8b5cf6, #22d3ee);
+}
+
+/* ── Controls ────────────────────────────────────────────────── */
+
+.controls {
+  margin-top: 4px;
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.controls input[type="range"] {
+  width: 100%;
+}
+
+.controls input[type="number"] {
+  width: 70px;
+  padding: 6px;
+  border-radius: 8px;
+  border: 1px solid #374151;
+  background: #0b1220;
+  color: var(--text);
+}
+
+.controls button {
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid #374151;
+  background: #0ea5e9;
+  color: #03121a;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.controls button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.idle-toggle {
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid #374151;
+  background: #1f2937;
+  color: var(--text);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 150ms, border-color 150ms, color 150ms;
+}
+
+.idle-toggle.active {
+  background: rgba(245, 158, 11, 0.2);
+  border-color: #f59e0b;
+  color: #f59e0b;
+}
+
+.control-note {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* ── Status panel ────────────────────────────────────────────── */
+
+.status-shell {
+  padding: 12px;
+}
+
+.status-top {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  align-items: center;
+  gap: 16px;
+  position: relative;
+}
+
+.status-top::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 8%;
+  height: 84%;
+  width: 1px;
+  background: #374151;
+  pointer-events: none;
+}
+
+.status-center {
+  justify-self: center;
+}
+
+.equipment-wrap {
+  justify-self: center;
+}
+
+.status-center {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  width: calc(42 * 8px);
+}
+
+.status-avatar {
+  display: flex;
+  justify-content: center;
+}
+
+.status-avatar-ring {
+  width: 74px;
+  height: 74px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, #e2a65d, #b9651d 70%);
+  border: 6px solid rgba(116, 69, 64, 0.92);
+  box-shadow: 0 14px 24px rgba(0, 0, 0, 0.45);
+}
+
+.status-name {
+  text-align: center;
+  font-size: 22px;
+}
+
+.status-position {
+  text-align: center;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+
+.resource-stack {
+  display: grid;
+  gap: 10px;
+  width: 100%;
+}
+
+.resource-item {
+  display: grid;
+  gap: 4px;
+}
+
+.resource-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.resource-name,
+.resource-value {
+  font-weight: 700;
+}
+
+/* ── Equipment grid (pixel-exact ARPG layout) ────────────────── */
+/*
+  42×42 unit square. --eq-u is the scale unit.
+  Columns: outer(10) gap(1) ring(4) gap(1) center(10) gap(1) ring(4) gap(1) outer(10) = 42u
+  Rows:    helm(10) gap(1) body(15) gap(1) legs(15) = 42u
+
+  Slot placements (grid line numbers, 0-gap-inclusive):
+    weapon/offhand  outer cols, rows 1-20  (10u×20u)
+    helm            center col, rows 1-10  (10u×10u)
+    body            center col, rows 12-26 (10u×15u)
+    legs            center col, rows 28-42 (10u×15u)
+    gloves/boots    outer cols, rows 24-33 (10u×10u, 3u gap after weapon)
+    ring1           inner-left col, rows 1-4   (4u×4u)
+    ring2           inner-right col, rows 1-4  (4u×4u)
+    amulet          inner-right col, rows 6-9  (4u×4u, 1u below ring2)
+*/
+
+.equipment-grid {
+  --eq-u: 8px;
+  display: grid;
+  grid-template-columns: repeat(42, var(--eq-u));
+  grid-template-rows: repeat(42, var(--eq-u));
+  gap: 0;
+  flex-shrink: 0;
+}
+
+.eq-weapon  { grid-column:  1 / 11; grid-row:  7 / 27; }
+.eq-ring1   { grid-column: 12 / 16; grid-row: 23 / 27; }
+.eq-helm    { grid-column: 17 / 27; grid-row:  1 / 11; }
+.eq-ring2   { grid-column: 28 / 32; grid-row: 23 / 27; }
+.eq-offhand { grid-column: 33 / 43; grid-row:  7 / 27; }
+.eq-chest   { grid-column: 17 / 27; grid-row: 12 / 27; }
+.eq-amulet  { grid-column: 28 / 32; grid-row: 12 / 16; }
+.eq-hands-wrap { grid-column:  1 / 16; grid-row: 28 / 43; display: flex; align-items: center; justify-content: center; }
+.eq-legs       { grid-column: 17 / 27; grid-row: 28 / 43; }
+.eq-feet-wrap  { grid-column: 28 / 43; grid-row: 28 / 43; display: flex; align-items: center; justify-content: center; }
+.eq-hands, .eq-feet { width: calc(10 * var(--eq-u)); height: calc(10 * var(--eq-u)); }
+
+.equipment-wrap { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+
+/* Slot overrides within the equipment grid */
+.equipment-grid .slot-item {
+  padding: 0;
+  gap: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  background: rgba(11, 18, 32, 0.75);
+  border: 2px solid #374151;
+}
+
+.equipment-grid .slot-icon {
+  width: calc(4 * var(--eq-u));
+  height: calc(4 * var(--eq-u));
+  font-size: calc(2 * var(--eq-u));
+  border-radius: 0;
+  background: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.equipment-grid .eq-weapon .slot-icon,
+.equipment-grid .eq-offhand .slot-icon {
+  width: calc(5 * var(--eq-u));
+  height: calc(5 * var(--eq-u));
+  font-size: calc(2.5 * var(--eq-u));
+}
+
+.equipment-grid .eq-ring1,
+.equipment-grid .eq-ring2,
+.equipment-grid .eq-amulet {
+  padding: 0;
+}
+
+.equipment-grid .eq-ring1 .slot-icon,
+.equipment-grid .eq-ring2 .slot-icon,
+.equipment-grid .eq-amulet .slot-icon {
+  width: calc(2 * var(--eq-u));
+  height: calc(2 * var(--eq-u));
+  font-size: calc(var(--eq-u));
+  border-radius: 3px;
+}
+
+.slot-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.slot-item {
+  display: grid;
+  justify-items: center;
+  gap: 6px;
+  padding: 10px 8px;
+  border-radius: 12px;
+  background: rgba(11, 18, 32, 0.55);
+  border: 1px solid #374151;
+}
+
+.slot-icon {
+  width: 42px;
+  height: 42px;
+  border-radius: 8px;
+  background: #050505;
+  color: white;
+  display: grid;
+  place-items: center;
+  font-size: 20px;
+  line-height: 1;
+}
+
+.slot-label {
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+/* ── List sections ───────────────────────────────────────────── */
+
+.list-section {
+  display: grid;
+  gap: 8px;
+}
+
+.list-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid #374151;
+  border-radius: 10px;
+  background: rgba(11, 18, 32, 0.6);
+}
+
+.list-title {
+  font-weight: 700;
+}
+
+.list-meta {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.spellbook-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.gear-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.gear-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid #374151;
+  border-radius: 10px;
+  background: rgba(11, 18, 32, 0.6);
+}
+
+.gear-slot,
+.list-meta {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.gear-value,
+.list-value {
+  color: var(--text);
+  text-align: right;
+}
+
+/* ── World tabs ──────────────────────────────────────────────── */
+
+.world-tab-bar {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.world-list {
+  display: grid;
+  gap: 8px;
+}
+
+.upgrade-entry {
+  padding: 12px 14px;
+  border: 1px solid #374151;
+  border-radius: 10px;
+  background: rgba(11, 18, 32, 0.6);
+  display: grid;
+  gap: 8px;
+}
+
+.upgrade-entry.completed {
+  opacity: 0.45;
+}
+
+.upgrade-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.upgrade-priority {
+  font-size: 11px;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  padding: 1px 6px;
+  white-space: nowrap;
+}
+
+.upgrade-name {
+  font-weight: 700;
+  flex: 1;
+}
+
+.upgrade-badge {
+  font-size: 11px;
+  color: var(--muted);
+  border: 1px solid #374151;
+  border-radius: 6px;
+  padding: 1px 6px;
+  white-space: nowrap;
+}
+
+.upgrade-status {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 6px;
+  white-space: nowrap;
+}
+
+.upgrade-status.done {
+  color: #22c55e;
+  border: 1px solid #22c55e;
+}
+
+.upgrade-status.pending {
+  color: var(--accent);
+  border: 1px solid var(--accent);
+}
+
+.upgrade-status.blocked {
+  color: #ef4444;
+  border: 1px solid #ef4444;
+}
+
+.upgrade-acq {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.upgrade-reqs {
+  display: grid;
+  gap: 5px;
+}
+
+.req-row {
+  display: grid;
+  grid-template-columns: 1fr 80px auto;
+  gap: 8px;
+  align-items: center;
+  font-size: 12px;
+}
+
+.req-name {
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.req-meter {
+  height: 7px;
+  border-radius: 999px;
+  border: 1px solid #374151;
+  background: #0b1220;
+  overflow: hidden;
+}
+
+.req-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #22d3ee, #0ea5e9);
+  transition: width 200ms ease;
+}
+
+.req-fill.complete {
+  background: linear-gradient(90deg, #22c55e, #16a34a);
+}
+
+.req-qty {
+  color: var(--muted);
+  text-align: right;
+  white-space: nowrap;
+}
+
+/* ── Snapshot button ─────────────────────────────────────────── */
+
+#snapshotBtn {
+  padding: 4px 10px;
+  border-radius: 8px;
+  border: 1px solid #374151;
+  background: #1e293b;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color 120ms, color 120ms;
+}
+
+#snapshotBtn:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+/* ── Connection banner ───────────────────────────────────────── */
+
+.connection-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 100;
+  background: #7c2d12;
+  border-bottom: 1px solid #ea580c;
+  color: #fed7aa;
+  font-size: 13px;
+  text-align: center;
+  padding: 8px 16px;
+}
+
+/* ── Responsive ──────────────────────────────────────────────── */
+
+@media (max-width: 760px) {
+  .tab-bar,
+  .world-tab-bar {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .stats {
+    grid-template-columns: 1fr;
+  }
+
+  .control-panel {
+    grid-template-columns: 1fr;
+  }
+
+  .gear-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .slot-grid,
+  .spellbook-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .status-top {
+    grid-template-columns: 1fr;
+    justify-items: center;
+  }
+
+  .status-top::after {
+    display: none;
+  }
+
+  .equipment-grid {
+    --eq-u: 5px;
+  }
+}

@@ -1,5 +1,33 @@
-package-lock.json
+# Dependencies
 node_modules/
+
+# Lockfiles
+package-lock.json
 pnpm-lock.yaml
 yarn.lock
+
+# Build output
+dist/
+build/
+out/
+*.js.map
+
+# TypeScript
+*.tsbuildinfo
+
+# Environment
 .env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
