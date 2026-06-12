@@ -662,10 +662,12 @@ const assertEnv = (key: string): string => {
 // ── Arena sticky target ───────────────────────────────────────────────────────
 let arenaStickyTargetId: string | null = null;
 let arenaStickyTargetLostTicks = 0;
+let wasInArena = false;
 
+const userId = assertEnv("USER_ID");
 connect({
   credentials: {
-    id: assertEnv("USER_ID"),
+    id: userId,
     key: assertEnv("API_KEY"),
   },
   onTick(heartbeat) {
@@ -673,6 +675,12 @@ connect({
     // The arena player is always at a separate HP from the overworld player,
     // and arena outcomes only affect leaderboards — resources spent here are free.
     if (heartbeat.inArena) {
+      // Reset sticky target when entering a new arena match.
+      if (!wasInArena) {
+        arenaStickyTargetId = null;
+        arenaStickyTargetLostTicks = 0;
+      }
+      wasInArena = true;
       const { player } = heartbeat;
       const arenaHp = isFiniteNumber(player.hp) ? player.hp : 0;
       const arenaPosition = isFinitePosition(player.position) ? player.position : { x: 0, y: 0 };
@@ -704,7 +712,7 @@ connect({
 
       // Nearest living unit — in the arena every unit in `units` is an opponent.
       const arenaTarget = Object.entries(heartbeat.units)
-        .filter(([, unit]) => isFinitePosition(unit.position) && (typeof unit.hp !== "number" || unit.hp > 0))
+        .filter(([id, unit]) => id !== userId && isFinitePosition(unit.position) && (typeof unit.hp !== "number" || unit.hp > 0))
         .map(([id, unit]) => ({ id, unit, distance: distanceBetween(arenaPosition, unit.position as { x: number; y: number }) }))
         .sort((a, b) => a.distance - b.distance)[0];
 
@@ -718,6 +726,7 @@ connect({
       return player.idle();
     }
 
+    wasInArena = false;
     const { player } = heartbeat;
     const playerHp = isFiniteNumber(player.hp) ? player.hp : 0;
     const playerPosition = isFinitePosition(player.position)
