@@ -4,10 +4,12 @@ import { UNIT_TYPE, NPC_TYPE, ClientSideUnit, ClientSideNPC, ClientSideMonster, 
 import { createDashboard } from "./dashboard";
 import { toDashboardSnapshot } from "./snapshot";
 import { UpgradePlanItem } from "./bot-types";
+import * as logger from "./src/logger";
 
 config({
   path: ".env",
 });
+
 
 const dashboard = createDashboard(Number(process.env.DASHBOARD_PORT ?? "8787"));
 
@@ -30,9 +32,10 @@ const HUNT_PASSES_TO_ESCALATE = 2;
 const HUNT_THREAT_RADIUS = 20;
 const FLEE_DROP_RADIUS = 12; // drop heaviest item to outrun a monster within this distance
 const HOME_CHORES_CLEAR_RADIUS = 15; // must be this close to home before declaring chores done
+const COINS_TO_KEEP = 200; // pocket change; rest goes to storage
 
 let recoveringAtHome = false;
-let idlingAtHome = true;
+let idlingAtHome = false;
 // Set when a home visit begins (recovery or manual idle); cleared only once
 // HP is full AND all pending tasks (equip, buy, sell) are finished.
 let finishingHomeChores = false;
@@ -80,12 +83,20 @@ const ENCUMBRANCE_THRESHOLD = 0.7;
 const getInventoryWeight = (
   inventory: Partial<Record<string, number>>,
   items: Record<string, { weight?: number }>,
+  equipment?: Record<string, string | null | undefined>,
 ): number => {
   let total = 0;
   for (const [itemId, qty] of Object.entries(inventory)) {
     if (typeof qty !== "number" || qty <= 0) continue;
     const w = items[itemId]?.weight;
     if (typeof w === "number") total += w * qty;
+  }
+  if (equipment) {
+    for (const itemId of Object.values(equipment)) {
+      if (!itemId) continue;
+      const w = items[itemId]?.weight;
+      if (typeof w === "number") total += w;
+    }
   }
   return total;
 };
@@ -506,6 +517,7 @@ type Decision =
   | { type: "equip"; item: string; slot: string }
   | { type: "craft"; recipeId: string }
   | { type: "drop"; item: string; amount: number }
+  | { type: "deposit"; items: Partial<Record<string, number>>; banker: ClientSideUnit }
   | { type: "attack"; targetId: string; distance: number }
   | { type: "explore"; to: { x: number; y: number } };
 
@@ -516,6 +528,8 @@ const decisionChanged = (prev: Decision | null, next: Decision): boolean => {
     return prev.targetId !== next.targetId;
   if (next.type === "sell" && prev.type === "sell")
     return prev.merchant.id !== next.merchant.id;
+  if (next.type === "deposit" && prev.type === "deposit")
+    return prev.banker.id !== next.banker.id || JSON.stringify(prev.items) !== JSON.stringify(next.items);
   if (next.type === "buy" && prev.type === "buy")
     return prev.merchant.id !== next.merchant.id || JSON.stringify(prev.items) !== JSON.stringify(next.items);
   if (next.type === "equip" && prev.type === "equip")
@@ -528,9 +542,7 @@ const decisionChanged = (prev: Decision | null, next: Decision): boolean => {
 };
 
 let lastDecision: Decision | null = null;
-let lastLoggedDecision: Decision | null = null;
 let decisionStableTicks = 0;
-const LOG_AFTER_STABLE_TICKS = 2;
 // Consecutive ticks where the server is idle while we expect movement
 let unexpectedIdleTicks = 0;
 const UNEXPECTED_IDLE_WARN_AFTER = 3;
@@ -544,6 +556,14 @@ const STICKY_TARGET_GRACE_TICKS = 3;
 let huntTier = 0;
 let huntIdleTicks = 0;
 const lastLoggedMerchants = new Set<string>();
+let pendingDepositItem: string | null = null;
+let lastDepositMessage = '';
+let depositInProgress = false;
+let depositCachedItems: Record<string, number> | null = null;
+let depositCachedBanker: ClientSideUnit | null = null;
+
+const RAW_EVENT_BUFFER_SIZE = 200;
+const rawEventBuffer: Array<{ ts: string; name: string; data: unknown }> = [];
 
 // ── Decision logic ────────────────────────────────────────────────────────────
 
@@ -574,6 +594,7 @@ const decide = (opts: {
   const { playerHp, maxHp, lowHpThreshold, playerPosition, nearbyMonster, isEncumbered, nearbyMerchant, toSell, heaviestInventoryItem, playerCalories, maxCalories, cheapestFood, isHunting, huntRadius, nearbyHuntTarget, nearbyThreat, upgradesPlan, gearToEquip, recipeToCraft, finishingHomeChores } = opts;
 
   if (playerHp <= 0) return { type: "respawn" };
+
   if (recoveringAtHome) {
     // While waiting to heal, equip better gear, craft upgrades, or buy from a nearby merchant.
     if (gearToEquip) return { type: "equip", item: gearToEquip.item, slot: gearToEquip.slot };
@@ -607,7 +628,7 @@ const decide = (opts: {
     if (nearbyHuntTarget) return { type: "attack", targetId: nearbyHuntTarget.unit.id, distance: nearbyHuntTarget.distance };
     return { type: "explore", to: huntPatrolTo(playerPosition, huntRadius) };
   }
-  // idlingAtHome / finishingHomeChores: equip, craft, buy, sell surplus; no combat or exploration.
+  // idlingAtHome / finishingHomeChores: equip, craft, buy, sell; no combat or exploration.
   if (idlingAtHome || finishingHomeChores) {
     if (gearToEquip) return { type: "equip", item: gearToEquip.item, slot: gearToEquip.slot };
     if (recipeToCraft) return { type: "craft", recipeId: recipeToCraft.recipe!.id };
@@ -615,7 +636,7 @@ const decide = (opts: {
       return { type: "buy", items: upgradesPlan[0].items, merchant: upgradesPlan[0].merchant };
     }
     if (nearbyMerchant && Object.keys(toSell).length > 0) {
-      return { type: "sell", items: toSell, merchant: nearbyMerchant };
+      // return { type: "sell", items: toSell, merchant: nearbyMerchant };
     }
     return { type: "return-home-idle" };
   }
@@ -631,7 +652,7 @@ dashboard.configureThreshold({
   },
   setThresholdPercent(nextPercent) {
     lowHpThresholdPercent = clampThresholdPercent(nextPercent);
-    console.log(`Low HP threshold set to ${lowHpThresholdPercent}%`);
+    logger.addExtra('thresholdChanged', lowHpThresholdPercent);
     return lowHpThresholdPercent;
   },
 });
@@ -642,8 +663,17 @@ dashboard.configureIdleAtHome({
   },
   setIdleAtHome(value) {
     idlingAtHome = value;
-    console.log(`Idle at home set to ${idlingAtHome}`);
+    logger.addExtra('idleAtHomeChanged', idlingAtHome);
     return idlingAtHome;
+  },
+});
+
+dashboard.configureDepositRequest({
+  getPendingItem() {
+    return pendingDepositItem;
+  },
+  setPendingItem(item) {
+    pendingDepositItem = item;
   },
 });
 
@@ -659,10 +689,47 @@ const assertEnv = (key: string): string => {
   return val;
 };
 
+// ── Pending death snapshots ───────────────────────────────────────────────────
+// Captured on the first dead tick; written just before the first alive tick so
+// recentTicks includes all the dead-wait ticks and the write happens exactly once.
+type PendingSnapshot = Omit<logger.DeathSnapshot, 'ts' | 'recentTicks'>;
+let pendingOverworldDeath: PendingSnapshot | null = null;
+let pendingArenaDeath: PendingSnapshot | null = null;
+
 // ── Arena sticky target ───────────────────────────────────────────────────────
 let arenaStickyTargetId: string | null = null;
 let arenaStickyTargetLostTicks = 0;
-let wasInArena = false;
+let prevArenaTimeRemaining = -1;
+let arenaMatchActive = false;
+let arenaMatchStartMs = 0;
+let lastArenaHp = 0;
+let lastArenaOpponents: Array<{ id: string; hp: number | null }> = [];
+
+// ── Crash recovery ───────────────────────────────────────────────────────────
+// If an uncaught exception fires, set this flag so the next tick returns a
+// move-home intent before the process exits, keeping the character out of
+// the open rather than freezing in place mid-hunt.
+let emergencyModeActive = false;
+
+const activateEmergencyMode = (label: string, reason: unknown, exitCode = 1) => {
+  if (emergencyModeActive) return;
+  emergencyModeActive = true;
+  logger.tick({ ctx: 'overworld', pos: { x: 0, y: 0 }, hp: 0, maxHp: 0, calories: 0, weight: 0, decision: `${label}: ${String(reason)}`, level: 'warn' });
+  // Release port 8787 immediately so PM2 can restart cleanly, then keep
+  // the process alive briefly so one onTick fires the move-home intent.
+  dashboard.stop();
+  setTimeout(() => process.exit(exitCode), 500);
+};
+
+process.on('uncaughtException', (err) => activateEmergencyMode('uncaughtException', err));
+process.on('unhandledRejection', (reason) => activateEmergencyMode('unhandledRejection', reason));
+process.on('SIGINT', () => activateEmergencyMode('SIGINT', 'process interrupted', 0));
+process.on('SIGTERM', () => activateEmergencyMode('SIGTERM', 'process terminated', 0));
+// PM2 sends a 'shutdown' IPC message when shutdown_with_message is enabled —
+// more reliable than signals on Windows.
+process.on('message', (msg: unknown) => {
+  if (msg === 'shutdown') activateEmergencyMode('shutdown', 'PM2 shutdown', 0);
+});
 
 const userId = assertEnv("USER_ID");
 connect({
@@ -670,28 +737,153 @@ connect({
     id: userId,
     key: assertEnv("API_KEY"),
   },
+  onEvent(_instance, _charId, eventName, evt: any) {
+    if (eventName === 'storageCharged' || eventName === 'storageEmptied' || eventName === 'deposited' || eventName === 'withdrew') {
+      rawEventBuffer.push({ ts: new Date().toISOString(), name: eventName, data: evt });
+      if (rawEventBuffer.length > RAW_EVENT_BUFFER_SIZE) rawEventBuffer.shift();
+    }
+    if (eventName === 'storageCharged') {
+      logger.addExtra('storageCharged', { coinsLeft: evt.coinsLeft, charged: evt.charged });
+    } else if (eventName === 'storageEmptied') {
+      logger.addExtra('storageEmptied', true);
+    } else if (eventName === 'deposited') {
+      logger.addExtra('deposited', evt.items);
+      depositInProgress = false;
+      depositCachedItems = null;
+      depositCachedBanker = null;
+      lastDepositMessage = 'Deposit confirmed';
+    } else if (eventName === 'withdrew') {
+      logger.addExtra('withdrew', evt.items);
+    }
+  },
   onTick(heartbeat) {
+    if (emergencyModeActive) {
+      return heartbeat.inArena ? heartbeat.player?.idle() : heartbeat.player.move(HOME_POSITION);
+    }
     // Arena ticks are isolated: they must not read or write overworld state.
     // The arena player is always at a separate HP from the overworld player,
     // and arena outcomes only affect leaderboards — resources spent here are free.
     if (heartbeat.inArena) {
-      // Reset sticky target when entering a new arena match.
-      if (!wasInArena) {
-        arenaStickyTargetId = null;
-        arenaStickyTargetLostTicks = 0;
-      }
-      wasInArena = true;
+      const arenaTimeRemaining = heartbeat.arenaTimeRemaining;
+      const prevTime = prevArenaTimeRemaining;
+      // Timer only decreases during a match. A jump means a new match started.
+      const isMatchEntry = arenaTimeRemaining > prevTime;
+      // Crosses from positive to ≤ 0 exactly once per match.
+      const isMatchEnd = !isMatchEntry && arenaTimeRemaining <= 0 && prevTime > 0;
+      prevArenaTimeRemaining = arenaTimeRemaining;
+
       const { player } = heartbeat;
       const arenaHp = isFiniteNumber(player.hp) ? player.hp : 0;
       const arenaPosition = isFinitePosition(player.position) ? player.position : { x: 0, y: 0 };
-
-      if (arenaHp <= 0) return player.respawn();
-
-      // Eat freely — arena doesn't count against real-world resources.
       const arenaMaxCalories = typeof heartbeat.constants?.maxCalories === "number" ? heartbeat.constants.maxCalories : 3_000;
       const arenaCalories = isFiniteNumber(player.calories) ? player.calories : arenaMaxCalories;
+      const arenaMaxHp =
+        typeof player.stats?.maxHp === "number" && player.stats.maxHp > 0
+          ? player.stats.maxHp
+          : Math.max(100, arenaHp);
+
+      const opponents = Object.entries(heartbeat.units)
+        .filter(([id]) => id !== player.id)
+        .map(([id, u]) => ({
+          id,
+          hp: typeof u.hp === 'number' ? u.hp : null,
+          pos: isFinitePosition(u.position) ? u.position : null,
+        }));
+
+      // Save match state for close-out outcome detection. Skip on entry ticks so
+      // the close-out at isMatchEntry reads the previous match's final values.
+      if (!isMatchEntry) {
+        lastArenaHp = arenaHp;
+        lastArenaOpponents = opponents;
+      }
+
+      const logArena = (
+        decision: string,
+        extras: Record<string, unknown> = {},
+        level: logger.LogLevel = 'info',
+      ) => {
+        logger.tick({
+          ctx: 'arena',
+          pos: arenaPosition,
+          hp: arenaHp,
+          maxHp: arenaMaxHp,
+          calories: arenaCalories,
+          weight: 0,
+          decision,
+          level,
+          opponents,
+          ...extras,
+        });
+      };
+
+      if (isMatchEntry) {
+        // Close out any previous match that never got an explicit exit log
+        // (server dropped ticks before timer hit 0). Derive outcome from the
+        // last known arena state rather than assuming.
+        if (arenaMatchActive) {
+          const closeOutcome =
+            lastArenaHp <= 0 ? 'lost' :
+              lastArenaOpponents.length > 0 && lastArenaOpponents.every(o => o.hp !== null && o.hp <= 0) ? 'won' :
+                'unknown';
+          logArena('matchExit', { outcome: closeOutcome, aliveAtExit: lastArenaHp > 0, reason: 'newMatchDetected' });
+        }
+        arenaMatchActive = true;
+        arenaMatchStartMs = Date.now();
+        arenaStickyTargetId = null;
+        arenaStickyTargetLostTicks = 0;
+        logArena('matchEntry', { timeRemaining: arenaTimeRemaining });
+      }
+
+      if (isMatchEnd) {
+        const nonSelfUnits = Object.entries(heartbeat.units).filter(([id]) => id !== player.id);
+        const allOpponentsDead = nonSelfUnits.length > 0 &&
+          nonSelfUnits.every(([, u]) => typeof u.hp === 'number' && u.hp <= 0);
+        const outcome = arenaHp <= 0 ? 'lost' : allOpponentsDead ? 'won' : 'drew';
+        logArena('matchExit', { outcome, aliveAtExit: arenaHp > 0, reason: 'timerExpired' });
+        arenaMatchActive = false;
+        return arenaHp <= 0 ? player.respawn() : player.idle();
+      }
+
+      // Timer has already expired — match is over, ticks still arriving before units clear.
+      if (arenaTimeRemaining <= 0) {
+        return player.idle();
+      }
+
+      if (arenaHp <= 0) {
+        if (arenaMatchActive) {
+          logArena('matchExit', { outcome: 'lost', aliveAtExit: false, reason: 'playerDied' });
+          arenaMatchActive = false;
+        }
+        if (pendingArenaDeath === null) {
+          pendingArenaDeath = {
+            ctx: 'arena',
+            hp: arenaHp,
+            pos: arenaPosition,
+            calories: arenaCalories,
+            weight: 0,
+            equipment: (player.equipment ?? {}) as Record<string, string | null | undefined>,
+            inventory: (player.inventory ?? {}) as Partial<Record<string, number>>,
+            statusEffects: Object.keys(player.statusEffects ?? {}),
+            lastDecision: lastDecision?.type ?? null,
+            nearbyMonsters: Object.values(heartbeat.units)
+              .filter(u => u.type === UNIT_TYPE.monster && isFinitePosition(u.position))
+              .map(u => ({ id: u.id, hp: typeof u.hp === 'number' ? u.hp : undefined, distance: distanceBetween(arenaPosition, u.position as { x: number; y: number }) })),
+            nearbyNpcs: [],
+            causeOfDeath: 'combat',
+          };
+        }
+        return player.respawn();
+      }
+
+      if (pendingArenaDeath !== null) {
+        logger.writeDeathSnapshot(pendingArenaDeath);
+        pendingArenaDeath = null;
+      }
+
+      // Eat freely — arena doesn't count against real-world resources.
       const arenaFood = findCheapestFood(player.inventory ?? {}, heartbeat.items);
       if (arenaFood !== null && arenaMaxCalories - arenaCalories >= arenaFood.calories) {
+        logArena('eat', { food: arenaFood.item });
         return player.eat(arenaFood.item as any);
       }
 
@@ -710,23 +902,60 @@ connect({
         }
       }
 
-      // Nearest living unit — in the arena every unit in `units` is an opponent.
+      // Nearest living unit — exclude self by player.id (the actual server-side unit key),
+      // not userId (the credential ID), which may differ.
       const arenaTarget = Object.entries(heartbeat.units)
-        .filter(([id, unit]) => id !== userId && isFinitePosition(unit.position) && (typeof unit.hp !== "number" || unit.hp > 0))
+        .filter(([id, unit]) => id !== player.id && isFinitePosition(unit.position) && (typeof unit.hp !== "number" || unit.hp > 0))
         .map(([id, unit]) => ({ id, unit, distance: distanceBetween(arenaPosition, unit.position as { x: number; y: number }) }))
         .sort((a, b) => a.distance - b.distance)[0];
 
       if (arenaTarget) {
+        const prevStickyId = arenaStickyTargetId;
         if (!arenaStickyTargetId) arenaStickyTargetId = arenaTarget.id;
         const attackUnit = arenaStickyTargetId ? heartbeat.units[arenaStickyTargetId] ?? arenaTarget.unit : arenaTarget.unit;
+        if ((attackUnit as any)?.id === player.id) {
+          arenaStickyTargetId = null;
+          logArena('idle', { selfAttackPrevented: true }, 'warn');
+          return player.idle();
+        }
+        logArena('attack', {
+          distance: arenaTarget.distance,
+          ...(prevStickyId !== arenaStickyTargetId ? { targetAcquired: true } : {}),
+        });
         return player.attack(attackUnit as any);
       }
 
-      arenaStickyTargetId = null;
+      const allOpponentsDead = opponents.length > 0 && opponents.every(o => o.hp !== null && o.hp <= 0);
+      logArena(allOpponentsDead ? 'waitingMatchEnd' : 'idle');
       return player.idle();
     }
 
-    wasInArena = false;
+    const tickExtras: Record<string, unknown> = {};
+    let tickLevel: logger.LogLevel = 'info';
+    let depositOverride: Decision | null = null;
+
+    // 60-second timeout: arena matches last exactly 60s. If we're back in the
+    // overworld and that much time has elapsed since match start, it's over.
+    if (arenaMatchActive && arenaMatchStartMs > 0 && Date.now() - arenaMatchStartMs > 60_000) {
+      const timeoutOutcome =
+        lastArenaHp <= 0 ? 'lost' :
+          lastArenaOpponents.length > 0 && lastArenaOpponents.every(o => o.hp !== null && o.hp <= 0) ? 'won' :
+            'unknown';
+      logger.tick({
+        ctx: 'arena',
+        pos: { x: 0, y: 0 },
+        hp: lastArenaHp,
+        maxHp: 0,
+        calories: 0,
+        weight: 0,
+        decision: 'matchExit',
+        outcome: timeoutOutcome,
+        aliveAtExit: lastArenaHp > 0,
+        reason: 'timeout',
+      });
+      arenaMatchActive = false;
+    }
+
     const { player } = heartbeat;
     const playerHp = isFiniteNumber(player.hp) ? player.hp : 0;
     const playerPosition = isFinitePosition(player.position)
@@ -861,11 +1090,11 @@ connect({
           huntTier += 1;
           huntIdleTicks = 0;
           const next = getHuntTierInfo(huntTier);
-          console.log(`[bot] Hunt: escalating to tier ${huntTier} — targets: ${next.targets.join(', ')}, radius: ${next.radius}m`);
+          tickExtras.huntEscalated = { tier: huntTier, targets: next.targets, radius: next.radius };
         }
       }
     }
-    const inventoryWeight = getInventoryWeight(player.inventory ?? {}, heartbeat.items);
+    const inventoryWeight = getInventoryWeight(player.inventory ?? {}, heartbeat.items, player.equipment);
     const isEncumbered = inventoryWeight >= maxCarryWeight * ENCUMBRANCE_THRESHOLD;
 
     // Collect selling inventories from every visible merchant — used both for
@@ -882,18 +1111,81 @@ connect({
       const selling = ((unit as any).trades?.selling ?? {}) as Record<string, { price: number; quantity: number } | undefined>;
       if (!lastLoggedMerchants.has(unit.id)) {
         lastLoggedMerchants.add(unit.id);
-        console.log(`[bot] merchant ${unit.id} sells:`, Object.keys(selling));
+        const seen = (tickExtras.merchantsSeen as Array<{ id: string; sells: string[] }> | undefined) ?? [];
+        seen.push({ id: unit.id, sells: Object.keys(selling) });
+        tickExtras.merchantsSeen = seen;
       }
       visibleMerchants.push({ unit, selling });
       Object.assign(allMerchantSelling, selling);
     }
 
+    // ── Banker detection ──────────────────────────────────────────────────────
+    const visibleBankers = Object.values(heartbeat.units).filter(
+      (unit) =>
+        unit.type === UNIT_TYPE.npc &&
+        (unit as { npcType?: string }).npcType === NPC_TYPE.banker &&
+        isFinitePosition(unit.position),
+    ) as ClientSideUnit[];
+    if (visibleBankers.length > 0) {
+      tickExtras.bankersFound = visibleBankers.map(u => ({ id: u.id, pos: u.position }));
+    }
+
+    const nearbyBanker = visibleBankers
+      .map((unit) => ({
+        unit,
+        distance: distanceBetween(playerPosition, unit.position as { x: number; y: number }),
+      }))
+      .sort((a, b) => a.distance - b.distance)[0]?.unit;
+
+    // ── Manual deposit via dashboard ───────────────────────────────────────────
+    if (depositInProgress && depositCachedItems && depositCachedBanker) {
+      depositOverride = { type: "deposit", items: depositCachedItems, banker: depositCachedBanker };
+      tickExtras.manualDeposit = { items: depositCachedItems, banker: depositCachedBanker.id, reissued: true };
+    }
+    const depositItemRequest = pendingDepositItem;
+    if (depositItemRequest !== null) {
+      tickExtras.pendingDeposit = { item: depositItemRequest, bankerFound: !!nearbyBanker, bankersVisible: visibleBankers.length };
+      if (nearbyBanker) {
+        const inv = player.inventory as Record<string, number>;
+        const coinsToDeposit = Math.min(inv['copperCoin'] ?? 0, 100);
+        const depositItems: Record<string, number> = {};
+        if (coinsToDeposit > 0) depositItems.copperCoin = coinsToDeposit;
+        if (depositItemRequest !== 'copperCoin') {
+          const itemQty = inv[depositItemRequest] ?? 0;
+          if (itemQty > 0) depositItems[depositItemRequest] = 1;
+        }
+        if (Object.keys(depositItems).length > 0) {
+          lastDepositMessage = `Depositing ${JSON.stringify(depositItems)} with banker ${nearbyBanker.id}`;
+          tickExtras.manualDeposit = { items: depositItems, banker: nearbyBanker.id, coins_in_inv: inv['copperCoin'] };
+          depositInProgress = true;
+          depositCachedItems = depositItems;
+          depositCachedBanker = nearbyBanker;
+          pendingDepositItem = null;
+          depositOverride = { type: "deposit", items: depositItems, banker: nearbyBanker };
+        } else {
+          lastDepositMessage = `Skipped: no items to deposit (pending=${depositItemRequest}, coins=${inv['copperCoin']}, qty=${inv[depositItemRequest]})`;
+          tickExtras.manualDepositSkipped = lastDepositMessage;
+          depositInProgress = false;
+          depositCachedItems = null;
+          depositCachedBanker = null;
+          pendingDepositItem = null;
+        }
+      } else {
+        lastDepositMessage = `Skipped: no banker found (pending=${depositItemRequest}, visible=${visibleBankers.length})`;
+        tickExtras.manualDepositSkipped = lastDepositMessage;
+        depositInProgress = false;
+        depositCachedItems = null;
+        depositCachedBanker = null;
+        pendingDepositItem = null;
+      }
+    }
+
+    const playerCoins = (player.inventory as Record<string, number>)['copperCoin'] ?? 0;
+
     // heartbeat.recipes is typed as Recipe[] but the server sends a Record keyed by id at runtime.
     const recipesArray: RecipeList = Array.isArray(heartbeat.recipes)
       ? heartbeat.recipes
       : Object.values(heartbeat.recipes as any);
-
-    const playerCoins = (player.inventory as Record<string, number>)['copperCoin'] ?? 0;
 
     // Determine next upgrade target per slot from all items we know how to acquire.
     // This drives sell-protection, buy plans, and craft decisions.
@@ -906,6 +1198,17 @@ connect({
       playerCoins,
     });
     const keepItems = getTargetItemsToKeep(upgradeTargets, recipesArray);
+
+    // Compute what to deposit: spare coins + keepItems currently in inventory.
+    const invRecord = (player.inventory ?? {}) as Record<string, number>;
+    const toDeposit: Partial<Record<string, number>> = {};
+    if (playerCoins > COINS_TO_KEEP) {
+      toDeposit.copperCoin = playerCoins - COINS_TO_KEEP;
+    }
+    for (const [itemId, qty] of Object.entries(invRecord)) {
+      if (itemId === 'copperCoin' || qty <= 0) continue;
+      if (keepItems.has(itemId)) toDeposit[itemId] = qty;
+    }
 
     const nearbyMerchant = visibleMerchants
       .map(({ unit }) => ({
@@ -985,6 +1288,8 @@ connect({
         idlingAtHome,
         lowHpThresholdPercent,
         lowHpThreshold,
+        depositItem: pendingDepositItem,
+        depositMessage: lastDepositMessage,
       }),
       world: {
         npcs: units.filter((u) => u.type === UNIT_TYPE.npc) as ClientSideNPC[],
@@ -992,6 +1297,7 @@ connect({
         objects: Object.values(heartbeat.gameObjects ?? {}) as GameObject[],
       },
       upgradePlans: upgradePlanItems,
+      events: [...rawEventBuffer],
     });
 
     // Clear finishingHomeChores once healthy, back at home base, and all tasks done.
@@ -1002,12 +1308,11 @@ connect({
       const hasChores =
         gearToEquip !== null ||
         recipeToCraft !== null ||
-        upgradesPlan.length > 0 ||
-        (nearbyMerchant !== undefined && Object.keys(toSell).length > 0);
+        upgradesPlan.length > 0;
       if (!hasChores) finishingHomeChores = false;
     }
 
-    const decision = decide({
+    const decision = depositOverride ?? decide({
       playerHp,
       maxHp,
       lowHpThreshold,
@@ -1030,63 +1335,13 @@ connect({
       finishingHomeChores,
     });
 
-    // Track decision stability; only log after it has held for LOG_AFTER_STABLE_TICKS.
+    // Track decision stability for intent conflict detection.
+    const prevDecision = lastDecision;
     if (decisionChanged(lastDecision, decision)) {
       decisionStableTicks = 1;
       lastDecision = decision;
     } else {
       decisionStableTicks += 1;
-    }
-
-    const shouldLog = decisionChanged(lastLoggedDecision, decision) && decisionStableTicks >= LOG_AFTER_STABLE_TICKS;
-
-    if (shouldLog) {
-      // When dropping an attack, explain why
-      let lostTargetReason: string | null = null;
-      if (lastLoggedDecision?.type === "attack" && decision.type !== "attack") {
-        const prevTargetId = (lastLoggedDecision as { type: "attack"; targetId: string }).targetId;
-        const rawUnit = heartbeat.units[prevTargetId];
-        if (!rawUnit) {
-          lostTargetReason = "target no longer in units";
-        } else if (typeof rawUnit.hp === "number" && rawUnit.hp <= 0) {
-          lostTargetReason = `target dead (hp=${rawUnit.hp})`;
-        } else if (!isFinitePosition(rawUnit.position)) {
-          lostTargetReason = "target position invalid";
-        } else {
-          const dist = distanceBetween(playerPosition, rawUnit.position);
-          if (decision.type === "return-home-recover") {
-            lostTargetReason = `recovering (low HP, dist=${dist.toFixed(1)})`;
-          } else if (decision.type === "return-home-overloaded") {
-            lostTargetReason = `returning home (overweight, dist=${dist.toFixed(1)})`;
-          } else if (decision.type === "sell") {
-            lostTargetReason = `selling to merchant (overweight, dist=${dist.toFixed(1)})`;
-          } else if (decision.type === "drop") {
-            lostTargetReason = `dropping to flee (overweight + threat, dist=${dist.toFixed(1)})`;
-          } else {
-            lostTargetReason = `target out of range (dist=${dist.toFixed(1)})`;
-          }
-        }
-      }
-
-      console.log("[bot] decision →", decision.type, {
-        was: lastLoggedDecision?.type ?? "none",
-        ...(lostTargetReason ? { lostTargetReason } : {}),
-        hp: `${playerHp}/${maxHp}`,
-        threshold: lowHpThreshold,
-        recovering: recoveringAtHome,
-        weight: `${inventoryWeight}g / ${Math.round(maxCarryWeight * ENCUMBRANCE_THRESHOLD)}g (${Math.round((inventoryWeight / maxCarryWeight) * 100)}%)`,
-        ...(decision.type === "sell" ? { merchant: decision.merchant.id, sellItems: Object.keys(decision.items).length } : {}),
-        ...(decision.type === "buy" ? { buyFrom: decision.merchant.id, buyItems: Object.keys(decision.items), coins: playerCoins } : {}),
-        ...(decision.type === "equip" ? { equipItem: decision.item, equipSlot: decision.slot } : {}),
-        ...(decision.type === "craft" ? { craftRecipe: decision.recipeId } : {}),
-        monsters: nearbyMonster
-          ? `${nearbyMonster.unit.id} @ ${nearbyMonster.distance.toFixed(1)}`
-          : "none",
-        serverAction: player.action,
-        serverIntent: player.intent?.type ?? null,
-        statusEffects: Object.keys(player.statusEffects ?? {}),
-      });
-      lastLoggedDecision = decision;
     }
 
     // Warn when the server's stored intent actively conflicts with our decision.
@@ -1097,6 +1352,7 @@ connect({
       if (d.type === "respawn") return "respawn";
       if (d.type === "sell") return "sellItems";
       if (d.type === "buy") return "buyItems";
+      if (d.type === "deposit") return "deposit";
       if (d.type === "equip") return "equip";
       if (d.type === "craft") return "craft";
       if (d.type === "eat") return "eat";
@@ -1117,9 +1373,10 @@ connect({
       // When attacking, the server emits intent='move' for as long as it takes
       // to walk into attack range. This is normal — suppress it entirely.
       !(decision.type === "attack" && serverIntentType === "move") &&
-      // Selling/buying also emits intent='move' while walking to the merchant.
+      // Selling/buying/depositing also emits intent='move' while walking to the NPC.
       !(decision.type === "sell" && serverIntentType === "move") &&
       !(decision.type === "buy" && serverIntentType === "move") &&
+      !(decision.type === "deposit" && serverIntentType === "move") &&
       // After any decision change, give the server time to acknowledge the new
       // intent before treating a mismatch as a problem.
       decisionStableTicks > INTENT_TRANSITION_GRACE_TICKS;
@@ -1127,28 +1384,106 @@ connect({
     if (isConflictingIntent) {
       unexpectedIdleTicks += 1;
       if (unexpectedIdleTicks >= UNEXPECTED_IDLE_WARN_AFTER) {
-        console.warn(
-          `[bot] WARNING: server intent "${serverIntentType}" doesn't match expected "${expectedIntent}" for ${unexpectedIdleTicks} ticks`,
-          {
-            decision: decision.type,
-            expectedIntent,
-            serverIntent: serverIntentType,
-            serverAction: player.action,
-            hp: playerHp,
-            position: playerPosition,
-            statusEffects: Object.keys(player.statusEffects ?? {}),
-          },
-        );
+        tickLevel = 'warn';
+        tickExtras.intentConflict = {
+          serverIntent: serverIntentType,
+          expectedIntent,
+          ticks: unexpectedIdleTicks,
+          serverAction: player.action,
+        };
       }
     } else {
       unexpectedIdleTicks = 0;
     }
 
+    // Explain why an attack was dropped.
+    let lostTargetReason: string | null = null;
+    if (prevDecision?.type === "attack" && decision.type !== "attack") {
+      const prevTargetId = (prevDecision as { type: "attack"; targetId: string }).targetId;
+      const rawUnit = heartbeat.units[prevTargetId];
+      if (!rawUnit) {
+        lostTargetReason = "target no longer in units";
+      } else if (typeof rawUnit.hp === "number" && rawUnit.hp <= 0) {
+        lostTargetReason = `target dead (hp=${rawUnit.hp})`;
+      } else if (!isFinitePosition(rawUnit.position)) {
+        lostTargetReason = "target position invalid";
+      } else {
+        const dist = distanceBetween(playerPosition, rawUnit.position);
+        if (decision.type === "return-home-recover") {
+          lostTargetReason = `recovering (low HP, dist=${dist.toFixed(1)})`;
+        } else if (decision.type === "return-home-overloaded") {
+          lostTargetReason = `returning home (overweight, dist=${dist.toFixed(1)})`;
+        } else if (decision.type === "sell") {
+          lostTargetReason = `selling to merchant (overweight, dist=${dist.toFixed(1)})`;
+        } else if (decision.type === "drop") {
+          lostTargetReason = `dropping to flee (overweight + threat, dist=${dist.toFixed(1)})`;
+        } else {
+          lostTargetReason = `target out of range (dist=${dist.toFixed(1)})`;
+        }
+      }
+    }
+
+    if (playerHp > 0 && pendingOverworldDeath !== null) {
+      logger.writeDeathSnapshot(pendingOverworldDeath);
+      pendingOverworldDeath = null;
+    }
+
+    logger.tick({
+      ctx: 'overworld',
+      pos: playerPosition,
+      hp: playerHp,
+      maxHp,
+      calories: playerCalories,
+      weight: inventoryWeight,
+      decision: decision.type,
+      level: tickLevel,
+      was: prevDecision?.type ?? 'none',
+      ...(lostTargetReason ? { lostTargetReason } : {}),
+      threshold: lowHpThreshold,
+      recovering: recoveringAtHome,
+      ...(decision.type === "sell" ? { merchant: decision.merchant.id, sellItems: Object.keys(decision.items).length } : {}),
+      ...(decision.type === "buy" ? { buyFrom: decision.merchant.id, buyItems: Object.keys(decision.items), coins: playerCoins } : {}),
+      ...(decision.type === "deposit" ? { depositTo: decision.banker.id, depositItems: Object.keys(decision.items) } : {}),
+      ...(decision.type === "equip" ? { equipItem: decision.item, equipSlot: decision.slot } : {}),
+      ...(decision.type === "craft" ? { craftRecipe: decision.recipeId } : {}),
+      target: nearbyMonster
+        ? { id: nearbyMonster.unit.id, hp: typeof nearbyMonster.unit.hp === 'number' ? nearbyMonster.unit.hp : null, distance: nearbyMonster.distance }
+        : null,
+      serverAction: player.action,
+      serverIntent: serverIntentType,
+      statusEffects: Object.keys(player.statusEffects ?? {}),
+      ...tickExtras,
+    });
+
     // ── Execute ─────────────────────────────────────────────────────────────
 
     switch (decision.type) {
-      case "respawn":
+      case "respawn": {
+        if (pendingOverworldDeath === null) {
+          pendingOverworldDeath = {
+            ctx: 'overworld',
+            hp: playerHp,
+            pos: playerPosition,
+            calories: playerCalories,
+            weight: inventoryWeight,
+            equipment: (player.equipment ?? {}) as Record<string, string | null | undefined>,
+            inventory: (player.inventory ?? {}) as Partial<Record<string, number>>,
+            statusEffects: Object.keys(player.statusEffects ?? {}),
+            lastDecision: prevDecision?.type ?? null,
+            nearbyMonsters: Object.values(heartbeat.units)
+              .filter(u => u.type === UNIT_TYPE.monster && isFinitePosition(u.position))
+              .map(u => ({ id: u.id, hp: typeof u.hp === 'number' ? u.hp : undefined, distance: distanceBetween(playerPosition, u.position as { x: number; y: number }) })),
+            nearbyNpcs: Object.values(heartbeat.units)
+              .filter(u => u.type === UNIT_TYPE.npc && isFinitePosition(u.position))
+              .map(u => ({ id: u.id, distance: distanceBetween(playerPosition, u.position as { x: number; y: number }) })),
+            causeOfDeath:
+              (nearbyMonster && nearbyMonster.distance < 5) ? 'combat'
+                : (playerCalories === 0 && findCheapestFood(player.inventory ?? {}, heartbeat.items) === null) ? 'starvation'
+                  : 'unknown',
+          };
+        }
         return player.respawn();
+      }
       case "return-home-recover":
         return player.move(HOME_POSITION);
       case "return-home-idle":
@@ -1167,6 +1502,8 @@ connect({
         return player.craft(decision.recipeId as any);
       case "drop":
         return player.drop({ item: decision.item as any, amount: decision.amount });
+      case "deposit":
+        return player.deposit(decision.banker as any, decision.items as any);
       case "attack": {
         const target = heartbeat.units[decision.targetId];
         return target ? player.attack(target as any) : player.idle();
