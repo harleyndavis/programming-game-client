@@ -9,6 +9,7 @@ module.exports = {
     max_restarts: 10,
     min_uptime: 5000,
     kill_timeout: 5000,
+    treekill: true,
     shutdown_with_message: true,
   }],
 };
