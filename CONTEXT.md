@@ -116,7 +116,42 @@ vulnerability whose length depends on equip action duration (not yet measured).
 ### Global cooldown
 0.5 seconds between actions (from `heartbeat.constants.globalCooldown` — the
 deprecated `constants.ts` value matches but live value should be preferred).
-Applies after gear equips, attacks, and other actions.
+Applies after gear equips, attacks, and other actions. **Move is exempt** — the
+bot can issue move intents freely during cooldown, but all other actions are
+blocked. Intents can be changed during cooldown; they are queued and executed
+when the cooldown expires.
+
+### Intent throttle
+The server applies a 100 ms leading-and-trailing throttle to incoming intents.
+Multiple intent changes within a 100 ms window collapse to the last one received
+— the intermediate intents are silently dropped. The client will not resend an
+intent if it has not changed since the last send. Combined with the global
+cooldown and status effects, this means an intent sent by the bot may not be
+acted on for several ticks; the server queues it and executes it as soon as
+conditions allow. This is the primary explanation for observed intent lag of
+6–30 ticks.
+
+Intent persistence varies by type. **Attack does not clear when combat ends** —
+the attack intent remains in the heartbeat after the target is dead. A stale
+attack intent does not mean combat is ongoing; confirm against active target
+presence.
+
+### Arena match boundaries
+There is no explicit match-start or match-end event. Detection strategy:
+
+- **Match start**: when an arena heartbeat arrives and the arena timer has
+  advanced, a new match has begun. Log this tick as the match-start boundary and
+  close out the previous match (win/loss/tie) at the same time.
+- **Closing previous match on start**: if no arena combat log exists yet (e.g.
+  fresh bot startup), there is no previous match to close — skip the close-out.
+  This handles the cold-start edge case.
+- **Match end**: if 60 seconds have elapsed since the last arena tick, assume
+  the match has ended. The arena match duration is fixed at 60 seconds.
+
+Extra heartbeat ticks arrive between server events — the client fires one on
+every server event *and* on a 300 ms poll. These extra ticks carry no new server
+state; they are time-passing acknowledgements and should not be treated as match
+activity.
 
 ### Action durations
 - **Gear equip**: instant — fires `equipped` immediately, then global cooldown.
@@ -126,6 +161,40 @@ Applies after gear equips, attacks, and other actions.
   before engaging.
 - **Crafting, harvesting, casting**: have individual durations tracked via
   `actionStart` + `actionDuration` in the heartbeat.
+
+### Raw server events
+`connect()` accepts an `onEvent` callback that receives every raw server event
+before it is processed into a heartbeat. Useful for debugging intent lag,
+observing `unitDisappeared` events, and timing analysis. The server can emit up
+to 60 events per second during movement (~16–17 ms between events).
+
+Storage events (`storageCharged`, `storageEmptied`, `deposited`, `withdrew`) are
+logged via `logger.addExtra` in the `onEvent` handler at `index.ts:721`. This
+makes the fee (`charged`) and remaining coins visible per-tick for monitoring.
+
+### Storage / Banking
+Each player has a personal bank vault (`player.storage`) accessible through
+banker NPCs (`NPC_TYPE.banker`). Items in storage survive death.
+
+**Deposit trigger:** the bot deposits items when at home (`recoveringAtHome`,
+`idlingAtHome`, or `finishingHomeChores`) and a banker is visible.
+
+**What is deposited:**
+- `copperCoin` — all coins above `COINS_TO_KEEP` (200) are deposited. Pocket
+  change stays in inventory for small merchant purchases.
+- `keepItems` — upgrade ingredients and tools that the bot is reserving for
+  crafting are deposited in full (already excluded from sale).
+
+**Priority within home chores:** deposit runs last (after equip, craft, buy, and
+sell). This ensures sale proceeds are captured in the same deposit, and the coin
+count used for buy decisions isn't reduced by the deposit.
+
+**Withdraw:** not yet implemented. The bot only deposits. Items must be
+withdrawn manually or via future agent work.
+
+**Event monitoring:** `storageCharged` (contains `coinsLeft` and `charged`) and
+`storageEmptied` are logged via `onEvent` at `index.ts:721` so the storage fee
+can be observed at runtime.
 
 ### Safe location
 Any location where the bot can recover HP without danger. Includes the starting
@@ -172,7 +241,10 @@ and `player.actionDuration` in the heartbeat. An action is in progress while
 ### Intent
 The server-confirmed goal of the character (e.g. `attack`, `move`, `craft`).
 Updated only when the server echoes back a `setIntent` event — lags behind the
-locally-sent intent by several ticks under normal latency.
+locally-sent intent by several ticks under normal latency. See **Intent
+throttle** for the full lag model. Some intents persist after the action
+completes (e.g. `attack` remains after the target dies); presence of an intent
+does not imply the action is still executing.
 
 ### Bot memory
 Persistent knowledge about the game world accumulated across ticks and across

@@ -40,6 +40,16 @@ Some low cost providers:
 - [fly.io](https://fly.io) - You can run a client on fly.io for less than $5/month.
 - [heroku](https://heroku.com) - you can deploy a single dyno that stays connected for $5/month.
 
+## Environment Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `USER_ID` | *(required)* | Your game user ID — found at https://programming-game.com/dashboard |
+| `API_KEY` | *(required)* | Your game API key — found at https://programming-game.com/dashboard |
+| `DASHBOARD_PORT` | `8787` | Port for the local bot dashboard (`http://localhost:<port>`) |
+| `LOW_HP_THRESHOLD_PERCENT` | `25` | HP % at or below which the bot retreats home to heal (clamped 1–95) |
+| `LOG_DIR` | current working directory | Directory where `overworld.log`, `arena.log`, and `deaths/` snapshots are written |
+
 ## Getting Help
 
 If you need any help with code or mechanics, or want to coordinate with other players, come [join the discord server](https://discord.gg/69M8p25ffP)
