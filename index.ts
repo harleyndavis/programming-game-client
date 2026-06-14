@@ -32,7 +32,8 @@ const HUNT_PASSES_TO_ESCALATE = 2;
 const HUNT_THREAT_RADIUS = 20;
 const FLEE_DROP_RADIUS = 12; // drop heaviest item to outrun a monster within this distance
 const HOME_CHORES_CLEAR_RADIUS = 15; // must be this close to home before declaring chores done
-const COINS_TO_KEEP = 200; // pocket change; rest goes to storage
+const COINS_TO_KEEP = 0; // pocket change; rest goes to storage
+const STORAGE_FEE_BUFFER = 100; // keep 100× the per-charge fee in storage at minimum
 
 let recoveringAtHome = false;
 let idlingAtHome = false;
@@ -504,6 +505,34 @@ const computeItemsToSell = (opts: {
   return toSell;
 };
 
+// ── Sell routing ─────────────────────────────────────────────────────────────
+
+// Returns the merchant offering the highest total payout for the items in
+// toSell, along with the filtered item list (capped to the merchant's buy
+// quantity). Returns null when no visible merchant buys any of our items.
+const findBestSellMerchant = (
+  merchants: Array<{ unit: ClientSideUnit; buying: Record<string, { price: number; quantity: number } | undefined> }>,
+  toSell: Partial<Record<string, number>>,
+): { merchant: ClientSideUnit; items: Partial<Record<string, number>> } | null => {
+  let best: { merchant: ClientSideUnit; items: Partial<Record<string, number>>; payout: number } | null = null;
+  for (const { unit, buying } of merchants) {
+    const items: Partial<Record<string, number>> = {};
+    let payout = 0;
+    for (const [itemId, qty] of Object.entries(toSell)) {
+      if (typeof qty !== 'number' || qty <= 0) continue;
+      const offer = buying[itemId];
+      if (!offer || offer.price <= 0 || offer.quantity <= 0) continue;
+      const sellQty = Math.min(qty, offer.quantity);
+      items[itemId] = sellQty;
+      payout += offer.price * sellQty;
+    }
+    if (payout > 0 && (!best || payout > best.payout)) {
+      best = { merchant: unit, items, payout };
+    }
+  }
+  return best ? { merchant: best.merchant, items: best.items } : null;
+};
+
 // ── Decision types ────────────────────────────────────────────────────────────
 
 type Decision =
@@ -518,6 +547,7 @@ type Decision =
   | { type: "craft"; recipeId: string }
   | { type: "drop"; item: string; amount: number }
   | { type: "deposit"; items: Partial<Record<string, number>>; banker: ClientSideUnit }
+  | { type: "withdraw"; items: Partial<Record<string, number>>; banker: ClientSideUnit }
   | { type: "attack"; targetId: string; distance: number }
   | { type: "explore"; to: { x: number; y: number } };
 
@@ -529,6 +559,8 @@ const decisionChanged = (prev: Decision | null, next: Decision): boolean => {
   if (next.type === "sell" && prev.type === "sell")
     return prev.merchant.id !== next.merchant.id;
   if (next.type === "deposit" && prev.type === "deposit")
+    return prev.banker.id !== next.banker.id || JSON.stringify(prev.items) !== JSON.stringify(next.items);
+  if (next.type === "withdraw" && prev.type === "withdraw")
     return prev.banker.id !== next.banker.id || JSON.stringify(prev.items) !== JSON.stringify(next.items);
   if (next.type === "buy" && prev.type === "buy")
     return prev.merchant.id !== next.merchant.id || JSON.stringify(prev.items) !== JSON.stringify(next.items);
@@ -576,8 +608,7 @@ const decide = (opts: {
   | { unit: { id: string; position: { x: number; y: number } }; distance: number }
   | undefined;
   isEncumbered: boolean;
-  nearbyMerchant: ClientSideUnit | undefined;
-  toSell: Partial<Record<string, number>>;
+  sellOpportunity: { merchant: ClientSideUnit; items: Partial<Record<string, number>> } | null;
   heaviestInventoryItem: { item: string; amount: number } | null;
   playerCalories: number;
   maxCalories: number;
@@ -591,17 +622,18 @@ const decide = (opts: {
   recipeToCraft: UpgradeTarget | null;
   finishingHomeChores: boolean;
 }): Decision => {
-  const { playerHp, maxHp, lowHpThreshold, playerPosition, nearbyMonster, isEncumbered, nearbyMerchant, toSell, heaviestInventoryItem, playerCalories, maxCalories, cheapestFood, isHunting, huntRadius, nearbyHuntTarget, nearbyThreat, upgradesPlan, gearToEquip, recipeToCraft, finishingHomeChores } = opts;
+  const { playerHp, maxHp, lowHpThreshold, playerPosition, nearbyMonster, isEncumbered, sellOpportunity, heaviestInventoryItem, playerCalories, maxCalories, cheapestFood, isHunting, huntRadius, nearbyHuntTarget, nearbyThreat, upgradesPlan, gearToEquip, recipeToCraft, finishingHomeChores } = opts;
 
   if (playerHp <= 0) return { type: "respawn" };
 
   if (recoveringAtHome) {
-    // While waiting to heal, equip better gear, craft upgrades, or buy from a nearby merchant.
+    // While waiting to heal, do housekeeping: equip, craft, buy, sell.
     if (gearToEquip) return { type: "equip", item: gearToEquip.item, slot: gearToEquip.slot };
     if (recipeToCraft) return { type: "craft", recipeId: recipeToCraft.recipe!.id };
     if (upgradesPlan.length > 0) {
       return { type: "buy", items: upgradesPlan[0].items, merchant: upgradesPlan[0].merchant };
     }
+    if (sellOpportunity) return { type: "sell", items: sellOpportunity.items, merchant: sellOpportunity.merchant };
     return { type: "return-home-recover" };
   }
   // Survival behaviors — run regardless of idlingAtHome.
@@ -617,9 +649,7 @@ const decide = (opts: {
     if ((closeMonster || closeThreat) && heaviestInventoryItem) {
       return { type: "drop", ...heaviestInventoryItem };
     }
-    if (nearbyMerchant && Object.keys(toSell).length > 0) {
-      return { type: "sell", items: toSell, merchant: nearbyMerchant };
-    }
+    if (sellOpportunity) return { type: "sell", items: sellOpportunity.items, merchant: sellOpportunity.merchant };
     return { type: "return-home-overloaded" };
   }
   // Hunt for food — only engage target animals, flee from everything else.
@@ -635,9 +665,7 @@ const decide = (opts: {
     if (upgradesPlan.length > 0) {
       return { type: "buy", items: upgradesPlan[0].items, merchant: upgradesPlan[0].merchant };
     }
-    if (nearbyMerchant && Object.keys(toSell).length > 0) {
-      // return { type: "sell", items: toSell, merchant: nearbyMerchant };
-    }
+    if (sellOpportunity) return { type: "sell", items: sellOpportunity.items, merchant: sellOpportunity.merchant };
     return { type: "return-home-idle" };
   }
   // Let the SDK handle moving into range — attack() is "move to and attack".
@@ -714,10 +742,9 @@ let emergencyModeActive = false;
 const activateEmergencyMode = (label: string, reason: unknown, exitCode = 1) => {
   if (emergencyModeActive) return;
   emergencyModeActive = true;
-  logger.tick({ ctx: 'overworld', pos: { x: 0, y: 0 }, hp: 0, maxHp: 0, calories: 0, weight: 0, decision: `${label}: ${String(reason)}`, level: 'warn' });
-  // Release port 8787 immediately so PM2 can restart cleanly, then keep
-  // the process alive briefly so one onTick fires the move-home intent.
-  dashboard.stop();
+  try { logger.tick({ ctx: 'overworld', pos: { x: 0, y: 0 }, hp: 0, maxHp: 0, calories: 0, weight: 0, decision: `${label}: ${String(reason)}`, level: 'warn' }); } catch { /* never block shutdown */ }
+  try { dashboard.stop(); } catch { /* never block shutdown */ }
+  // Keep alive briefly so one onTick fires the move-home intent; then exit.
   setTimeout(() => process.exit(exitCode), 500);
 };
 
@@ -1105,7 +1132,7 @@ connect({
     // Collect selling inventories from every visible merchant — used both for
     // upgrade-target computation (to know what's buyable) and for building
     // per-merchant buy baskets.
-    const visibleMerchants: Array<{ unit: ClientSideUnit; selling: Record<string, { price: number; quantity: number } | undefined> }> = [];
+    const visibleMerchants: Array<{ unit: ClientSideUnit; selling: Record<string, { price: number; quantity: number } | undefined>; buying: Record<string, { price: number; quantity: number } | undefined> }> = [];
     const allMerchantSelling: Record<string, { price: number; quantity: number } | undefined> = {};
     for (const unit of Object.values(heartbeat.units)) {
       if (
@@ -1114,13 +1141,14 @@ connect({
         !isFinitePosition(unit.position)
       ) continue;
       const selling = ((unit as any).trades?.selling ?? {}) as Record<string, { price: number; quantity: number } | undefined>;
+      const buying = ((unit as any).trades?.buying ?? {}) as Record<string, { price: number; quantity: number } | undefined>;
       if (!lastLoggedMerchants.has(unit.id)) {
         lastLoggedMerchants.add(unit.id);
         const seen = (tickExtras.merchantsSeen as Array<{ id: string; sells: string[] }> | undefined) ?? [];
         seen.push({ id: unit.id, sells: Object.keys(selling) });
         tickExtras.merchantsSeen = seen;
       }
-      visibleMerchants.push({ unit, selling });
+      visibleMerchants.push({ unit, selling, buying });
       Object.assign(allMerchantSelling, selling);
     }
 
@@ -1194,9 +1222,14 @@ connect({
 
     // Determine next upgrade target per slot from all items we know how to acquire.
     // This drives sell-protection, buy plans, and craft decisions.
+    // Merge storage + inventory so items in storage are visible for crafting/buy planning.
+    // Without this, depositing a craftable ingredient would make it disappear from the
+    // upgrade targets, dropping it from keepItems → non-protected withdraw pulls it back →
+    // deposit again → infinite cycle (e.g. rat pelts ↔ leather armor).
+    const combinedInventory = { ...heartbeat.player.storage, ...player.inventory } as Partial<Record<string, number>>;
     const upgradeTargets = computeUpgradeTargets({
       equipment: (player.equipment ?? {}) as Record<string, string | null | undefined>,
-      inventory: player.inventory ?? {},
+      inventory: combinedInventory,
       items: heartbeat.items as unknown as ItemMap,
       recipes: recipesArray,
       allMerchantSelling,
@@ -1215,13 +1248,6 @@ connect({
       if (keepItems.has(itemId)) toDeposit[itemId] = qty;
     }
 
-    const nearbyMerchant = visibleMerchants
-      .map(({ unit }) => ({
-        unit,
-        distance: distanceBetween(playerPosition, unit.position as { x: number; y: number }),
-      }))
-      .sort((a, b) => a.distance - b.distance)[0]?.unit;
-
     const toSell = computeItemsToSell({
       inventory: player.inventory ?? {},
       items: heartbeat.items as unknown as ItemMap,
@@ -1229,27 +1255,69 @@ connect({
       keepItems,
       maxCalories,
     });
+    const sellOpportunity = findBestSellMerchant(visibleMerchants, toSell);
     const heaviestInventoryItem = isEncumbered
       ? findHeaviestInventoryItem(player.inventory ?? {}, heartbeat.items)
       : null;
 
     const atHome = recoveringAtHome || idlingAtHome || finishingHomeChores;
 
-    // Build per-merchant buy baskets from the upgrade targets.
+    // Compute storage fee buffer for withdrawal calculations.
+    const storageRecord = heartbeat.player.storage ?? {};
+    const storageCoins = typeof storageRecord.copperCoin === 'number' ? storageRecord.copperCoin : 0;
+    const storageItemsWeight = Object.entries(storageRecord)
+      .filter(([id]) => id !== 'copperCoin')
+      .reduce((sum, [id, qty]) => {
+        const defW = (heartbeat.items as Record<string, { weight?: number }> | undefined)?.[id]?.weight ?? 0;
+        return sum + defW * (typeof qty === 'number' ? qty : 1);
+      }, 0);
+    const storageWeight = storageItemsWeight + storageCoins;
+    const feePerCharge = Math.ceil(storageWeight * 0.0025);
+    const minStorageCoins = feePerCharge * STORAGE_FEE_BUFFER;
+    const availableStorageWithdrawal = Math.max(0, storageCoins - minStorageCoins);
+
+    // Build per-merchant buy baskets using effective coins (pocket + storage beyond fee buffer).
+    const effectiveCoins = playerCoins + availableStorageWithdrawal;
     const upgradesPlan: Array<{ items: Partial<Record<string, number>>; merchant: ClientSideUnit }> = [];
     if (atHome) {
       for (const { unit, selling } of visibleMerchants) {
         const basket = computeTargetsToBuyFromMerchant({
           targets: upgradeTargets,
           merchantSelling: selling,
-          playerCoins,
-          inventory: player.inventory ?? {},
+          playerCoins: effectiveCoins,
+          inventory: combinedInventory,
         });
         if (Object.keys(basket).length > 0) {
           upgradesPlan.push({ items: basket, merchant: unit });
         }
       }
       upgradesPlan.sort((a, b) => Object.keys(b.items).length - Object.keys(a.items).length);
+    }
+
+    // Compute total cost of the first merchant's buy basket.
+    let buyCost = 0;
+    if (upgradesPlan.length > 0) {
+      const firstBasket = upgradesPlan[0];
+      const merchantSelling = visibleMerchants.find(m => m.unit.id === firstBasket.merchant.id)?.selling ?? {};
+      for (const [itemId, qty = 1] of Object.entries(firstBasket.items)) {
+        buyCost += (merchantSelling[itemId]?.price ?? 0) * qty;
+      }
+    }
+
+    // Only keep coins in inventory if we can afford the purchase (with or without a withdrawal).
+    // If we can't afford it, deposit everything to avoid losing coins on death.
+    if (buyCost > 0 && toDeposit.copperCoin && toDeposit.copperCoin > 0) {
+      const canAffordPurchase = playerCoins >= buyCost || availableStorageWithdrawal >= (buyCost - playerCoins);
+      if (canAffordPurchase) {
+        toDeposit.copperCoin = Math.max(0, (playerCoins - COINS_TO_KEEP) - buyCost);
+      } else {
+        toDeposit.copperCoin = playerCoins - COINS_TO_KEEP;
+      }
+    }
+
+    // Remove 0-value entries from toDeposit to avoid pointless no-op deposit commands.
+    for (const [key, val] of Object.entries(toDeposit)) {
+      if (val === undefined || val <= 0) delete toDeposit[key as keyof typeof toDeposit];
     }
 
     const gearToEquip = atHome
@@ -1287,6 +1355,8 @@ connect({
       };
     });
 
+    const coverage = feePerCharge > 0 ? storageCoins / feePerCharge : 0;
+
     dashboard.publish({
       ...toDashboardSnapshot(heartbeat, {
         recoveringAtHome,
@@ -1295,7 +1365,16 @@ connect({
         lowHpThreshold,
         depositItem: pendingDepositItem,
         depositMessage: lastDepositMessage,
+        nearbyBankers: visibleBankers.length,
+        nearbyMerchants: visibleMerchants.length,
       }),
+      storageFee: {
+        coinsInStorage: storageCoins,
+        perCharge: feePerCharge,
+        buffer: minStorageCoins,
+        coverage,
+        availableWithdrawal: availableStorageWithdrawal,
+      },
       world: {
         npcs: units.filter((u) => u.type === UNIT_TYPE.npc) as ClientSideNPC[],
         mobs: units.filter((u) => u.type === UNIT_TYPE.monster) as ClientSideMonster[],
@@ -1317,15 +1396,42 @@ connect({
       if (!hasChores) finishingHomeChores = false;
     }
 
-    const decision = depositOverride ?? decide({
+    // ── Auto-deposit spare coins and keepItems ──────────────────────────────
+    if (!depositOverride && atHome && nearbyBanker && Object.keys(toDeposit).length > 0) {
+      depositOverride = { type: "deposit", items: toDeposit, banker: nearbyBanker };
+      tickExtras.autoDeposit = { items: toDeposit, banker: nearbyBanker.id };
+    }
+
+    // ── Withdraw coins from storage for purchases, leaving 100× storage fee ──
+    let withdrawOverride: Decision | null = null;
+    if (atHome && nearbyBanker && buyCost > 0 && playerCoins < buyCost && availableStorageWithdrawal >= (buyCost - playerCoins)) {
+      const deficit = buyCost - playerCoins;
+      withdrawOverride = { type: "withdraw", items: { copperCoin: deficit }, banker: nearbyBanker };
+      tickExtras.autoWithdraw = { amount: deficit, deficit, playerCoins, storageFee: feePerCharge, storageFeeBuffer: minStorageCoins };
+    }
+
+    // ── Withdraw non-protected items from storage to sell ────────────────────
+    if (!withdrawOverride && !depositOverride && atHome && nearbyBanker) {
+      const storageRecord = heartbeat.player.storage ?? {};
+      const toWithdrawFromStorage: Partial<Record<string, number>> = {};
+      for (const [itemId, qty] of Object.entries(storageRecord)) {
+        if (itemId === 'copperCoin' || typeof qty !== 'number' || qty <= 0) continue;
+        if (!keepItems.has(itemId)) toWithdrawFromStorage[itemId] = qty;
+      }
+      if (Object.keys(toWithdrawFromStorage).length > 0) {
+        withdrawOverride = { type: "withdraw", items: toWithdrawFromStorage, banker: nearbyBanker };
+        tickExtras.autoWithdrawItems = { items: Object.keys(toWithdrawFromStorage), banker: nearbyBanker.id };
+      }
+    }
+
+    const decision = withdrawOverride ?? depositOverride ?? decide({
       playerHp,
       maxHp,
       lowHpThreshold,
       playerPosition,
       nearbyMonster,
       isEncumbered,
-      nearbyMerchant,
-      toSell,
+      sellOpportunity,
       heaviestInventoryItem,
       playerCalories,
       maxCalories,
@@ -1358,6 +1464,7 @@ connect({
       if (d.type === "sell") return "sellItems";
       if (d.type === "buy") return "buyItems";
       if (d.type === "deposit") return "deposit";
+      if (d.type === "withdraw") return "withdraw";
       if (d.type === "equip") return "equip";
       if (d.type === "craft") return "craft";
       if (d.type === "eat") return "eat";
@@ -1382,6 +1489,7 @@ connect({
       !(decision.type === "sell" && serverIntentType === "move") &&
       !(decision.type === "buy" && serverIntentType === "move") &&
       !(decision.type === "deposit" && serverIntentType === "move") &&
+      !(decision.type === "withdraw" && serverIntentType === "move") &&
       // After any decision change, give the server time to acknowledge the new
       // intent before treating a mismatch as a problem.
       decisionStableTicks > INTENT_TRANSITION_GRACE_TICKS;
@@ -1446,9 +1554,20 @@ connect({
       ...(lostTargetReason ? { lostTargetReason } : {}),
       threshold: lowHpThreshold,
       recovering: recoveringAtHome,
+      ...(atHome ? {
+        playerCoins,
+        storageCoins,
+        buyCost,
+        availableWithdrawal: availableStorageWithdrawal,
+        effectiveCoins,
+        toDepositCount: Object.keys(toDeposit).length,
+        feePerCharge,
+        minStorageCoins,
+      } : {}),
       ...(decision.type === "sell" ? { merchant: decision.merchant.id, sellItems: Object.keys(decision.items).length } : {}),
       ...(decision.type === "buy" ? { buyFrom: decision.merchant.id, buyItems: Object.keys(decision.items), coins: playerCoins } : {}),
       ...(decision.type === "deposit" ? { depositTo: decision.banker.id, depositItems: Object.keys(decision.items) } : {}),
+      ...(decision.type === "withdraw" ? { withdrawFrom: decision.banker.id, withdrawItems: Object.keys(decision.items) } : {}),
       ...(decision.type === "equip" ? { equipItem: decision.item, equipSlot: decision.slot } : {}),
       ...(decision.type === "craft" ? { craftRecipe: decision.recipeId } : {}),
       target: nearbyMonster
@@ -1510,6 +1629,8 @@ connect({
         return player.drop({ item: decision.item as any, amount: decision.amount });
       case "deposit":
         return player.deposit(decision.banker as any, decision.items as any);
+      case "withdraw":
+        return player.withdraw(decision.banker as any, decision.items as any);
       case "attack": {
         const target = heartbeat.units[decision.targetId];
         return target ? player.attack(target as any) : player.idle();

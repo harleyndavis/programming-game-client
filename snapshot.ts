@@ -35,6 +35,7 @@ type SnapshotPlayer = {
         maxHp?: number;
         attack?: number;
         defense?: number;
+        movementSpeed?: number;
     };
     position?: Position;
     action?: string;
@@ -61,6 +62,8 @@ type SnapshotMeta = {
     lowHpThreshold: number;
     depositItem: string | null;
     depositMessage: string;
+    nearbyBankers: number;
+    nearbyMerchants: number;
 };
 
 const toPosition = (position?: Position): Position | null => {
@@ -135,6 +138,8 @@ export const toDashboardSnapshot = (heartbeat: SnapshotHeartbeat, meta: Snapshot
             lowHpThreshold: meta.lowHpThreshold,
             depositItem: meta.depositItem,
             depositMessage: meta.depositMessage,
+            nearbyBankers: meta.nearbyBankers,
+            nearbyMerchants: meta.nearbyMerchants,
         },
         serverState: {
             action: typeof heartbeat.player.action === "string" ? heartbeat.player.action : null,
@@ -148,6 +153,7 @@ export const toDashboardSnapshot = (heartbeat: SnapshotHeartbeat, meta: Snapshot
             name: typeof heartbeat.player.name === "string" ? heartbeat.player.name : null,
             hp: typeof heartbeat.player.hp === "number" ? heartbeat.player.hp : null,
             maxHp: typeof heartbeat.player.stats?.maxHp === "number" ? heartbeat.player.stats.maxHp : null,
+            movementSpeed: typeof heartbeat.player.stats?.movementSpeed === "number" ? heartbeat.player.stats.movementSpeed : null,
             mp: typeof heartbeat.player.mp === "number" ? heartbeat.player.mp : null,
             tp: typeof heartbeat.player.tp === "number" ? heartbeat.player.tp : null,
             calories: typeof heartbeat.player.calories === "number" ? heartbeat.player.calories : null,
