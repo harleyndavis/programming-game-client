@@ -176,21 +176,60 @@ makes the fee (`charged`) and remaining coins visible per-tick for monitoring.
 Each player has a personal bank vault (`player.storage`) accessible through
 banker NPCs (`NPC_TYPE.banker`). Items in storage survive death.
 
-**Deposit trigger:** the bot deposits items when at home (`recoveringAtHome`,
-`idlingAtHome`, or `finishingHomeChores`) and a banker is visible.
+**Home state (`atHome`):** True when any of `recoveringAtHome`, `idlingAtHome`,
+or `finishingHomeChores` is true. All banking decisions use this flag.
+
+**Deposit trigger:** auto-deposit runs when at home, a banker is nearby, and the
+`toDeposit` dict is non-empty. Deposit is set as an override (`depositOverride`)
+before the main `decide()` function runs, but withdraw overrides take priority.
 
 **What is deposited:**
-- `copperCoin` — all coins above `COINS_TO_KEEP` (200) are deposited. Pocket
-  change stays in inventory for small merchant purchases.
+- `copperCoin` — `COINS_TO_KEEP` is **0**: all coins above the immediate
+  purchase need are deposited. The `toDeposit.copperCoin` is adjusted by
+  subtracting `buyCost`; coins needed for the next purchase stay in inventory.
 - `keepItems` — upgrade ingredients and tools that the bot is reserving for
-  crafting are deposited in full (already excluded from sale).
+  crafting are deposited.
 
-**Priority within home chores:** deposit runs last (after equip, craft, buy, and
-sell). This ensures sale proceeds are captured in the same deposit, and the coin
-count used for buy decisions isn't reduced by the deposit.
+**Buy-cost adjustment:** Before the deposit check, `toDeposit.copperCoin` is
+reduced by `buyCost` (the total price of the first merchant's planned
+purchases). This prevents depositing coins that are immediately needed. If the
+bot can't afford the purchase at all (coins + max safe storage withdrawal <
+buyCost), ALL coins are deposited (death-loss avoidance).
 
-**Withdraw:** not yet implemented. The bot only deposits. Items must be
-withdrawn manually or via future agent work.
+**Withdraw (coins):** If at home with a banker, a purchase is planned
+(`buyCost > 0`), the bot lacks enough pocket coins (`playerCoins < buyCost`),
+and storage has enough withdrawable coins (above the 100× fee buffer), the bot
+issues a withdraw override for the exact deficit. This override takes priority
+over deposit.
+
+**Withdraw (non-protected items):** Items in storage that are NOT in `keepItems`
+are withdrawn to inventory for selling. Runs only when no other banking override
+is active.
+
+**Fee buffer:** `minStorageCoins = ceil(total_storage_weight_g × 0.0025) × 100`.
+Only coins above this buffer are available for withdrawal.
+
+**Upgrade-aware inventory (cycle prevention):** `computeUpgradeTargets` receives
+a merged view of `player.inventory + player.storage` so that craftable
+ingredients already in storage are still visible. Without this merge, depositing
+ingredients (e.g. rat pelts for leather armor) would make them disappear from
+the upgrade targets → they'd drop from `keepItems` → the non-protected withdraw
+would pull them back → deposit → infinite cycle.
+
+**Decision priority chain (line 1412):**
+1. Coin withdraw (for purchase deficit)
+2. Non-protected item withdraw (for selling)
+3. Deposit (coins + keepItems)
+4. `decide()` — equip, craft, buy, sell, or return-home
+
+Note: `decide()`'s `recoveringAtHome` branch now includes a sell check (line
+625), so withdrawn non-protected items are sold during recovery instead of
+sitting in inventory.
+
+**Sell during recovery:** The `recoveringAtHome` branch in `decide()` now
+includes `if (nearbyMerchant && Object.keys(toSell).length > 0)  → sell`, so the
+bot clears sellable items from inventory while healing, not just during idle
+chores.
 
 **Event monitoring:** `storageCharged` (contains `coinsLeft` and `charged`) and
 `storageEmptied` are logged via `onEvent` at `index.ts:721` so the storage fee
