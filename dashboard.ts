@@ -274,6 +274,10 @@ export const createDashboard = (port: number) => {
         },
         stop() {
             if (server) {
+                sseClients.forEach((client) => {
+                    client.end();
+                });
+                sseClients.clear();
                 server.close();
                 server = null;
             }
