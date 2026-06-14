@@ -127,6 +127,7 @@
         <section class="tab-panel" data-panel="inventory">
           <div class="panel-inner">
             <div id="inventoryList" class="list-section"></div>
+            <div id="depositStatus" class="control-note" style="margin-top: 8px;"></div>
           </div>
         </section>
         <section class="tab-panel" data-panel="storage">
@@ -141,6 +142,7 @@
       <button class="tab-button" data-world-tab="world-npcs" type="button">NPCs</button>
       <button class="tab-button" data-world-tab="world-mobs" type="button">Mobs</button>
       <button class="tab-button" data-world-tab="world-objects" type="button">Objects</button>
+      <button class="tab-button" data-world-tab="events" type="button">Events</button>
     </div>
     <section class="tab-panel active" data-world-panel="upgrade-plans">
       <div class="card">
@@ -164,6 +166,12 @@
       <div class="card">
         <div class="label" style="margin-bottom: 10px;">World Objects</div>
         <div id="objectsList" class="list-section"></div>
+      </div>
+    </section>
+    <section class="tab-panel" data-world-panel="events">
+      <div class="card">
+        <div class="label" style="margin-bottom: 10px;">Raw Server Events <span style="font-weight:400;font-size:0.8em;opacity:0.6;">(last 200)</span></div>
+        <div id="eventsList" class="list-section"></div>
       </div>
     </section>
     <div class="payload-split" style="margin-top: 16px; display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">

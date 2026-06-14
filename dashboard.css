@@ -511,6 +511,49 @@ h1 {
   font-size: 12px;
 }
 
+.deposit-btn {
+  appearance: none;
+  border: 1px solid #374151;
+  border-radius: 6px;
+  background: #0ea5e9;
+  color: #03121a;
+  font: inherit;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 6px;
+  cursor: pointer;
+  white-space: nowrap;
+  align-self: center;
+}
+
+.deposit-btn:hover {
+  background: #38bdf8;
+}
+
+.event-row {
+  font-size: 12px;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.event-row .event-data {
+  padding-top: 2px;
+  border-top: 1px solid #1f2937;
+}
+
+.event-name {
+  color: var(--accent);
+  font-family: inherit;
+}
+
+.event-data {
+  font-size: 11px;
+  color: var(--muted);
+  word-break: break-all;
+  text-align: left;
+  max-width: 400px;
+}
+
 .spellbook-grid {
   display: grid;
   gap: 8px;

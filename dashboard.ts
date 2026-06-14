@@ -49,6 +49,10 @@ export type DashboardSnapshot = {
         idleAtHome: boolean;
         lowHpThresholdPercent: number;
         lowHpThreshold: number;
+        /** Item the dashboard user requested to deposit, shown until processed. */
+        depositItem: string | null;
+        /** Human-readable deposit status message. */
+        depositMessage: string;
     };
     serverState: {
         action: string | null;
@@ -85,6 +89,8 @@ export type DashboardSnapshot = {
     world?: WorldState;
     /** Bot upgrade plans — managed separately via updateUpgradePlans(). */
     upgradePlans?: UpgradePlanItem[];
+    /** Recent raw server events captured by onEvent. */
+    events?: Array<{ ts: string; name: string; data: unknown }>;
 };
 
 const DEFAULT_EQUIPMENT: EquipmentSnapshot = {
@@ -110,6 +116,11 @@ type DashboardIdleAtHomeConfig = {
     setIdleAtHome: (value: boolean) => boolean;
 };
 
+type DashboardDepositRequestConfig = {
+    getPendingItem: () => string | null;
+    setPendingItem: (item: string | null) => void;
+};
+
 export const createDashboard = (port: number) => {
     let latestSnapshot: DashboardSnapshot = {
         receivedAt: new Date().toISOString(),
@@ -118,6 +129,8 @@ export const createDashboard = (port: number) => {
             idleAtHome: false,
             lowHpThresholdPercent: 25,
             lowHpThreshold: 0,
+            depositItem: null,
+            depositMessage: '',
         },
         serverState: {
             action: null,
@@ -194,6 +207,11 @@ export const createDashboard = (port: number) => {
         },
     };
 
+    let depositRequestConfig: DashboardDepositRequestConfig = {
+        getPendingItem: () => null,
+        setPendingItem: (_item) => { /* no-op default */ },
+    };
+
     const sseClients = new Set<ServerResponse>();
 
     const loadDashboardHtml = () => readFileSync(join(__dirname, "dashboard.html"), "utf-8");
@@ -242,6 +260,8 @@ export const createDashboard = (port: number) => {
         });
     };
 
+    let server: ReturnType<typeof createServer> | null = null;
+
     return {
         configureThreshold(config: DashboardThresholdConfig) {
             thresholdConfig = config;
@@ -249,8 +269,17 @@ export const createDashboard = (port: number) => {
         configureIdleAtHome(config: DashboardIdleAtHomeConfig) {
             idleAtHomeConfig = config;
         },
+        configureDepositRequest(config: DashboardDepositRequestConfig) {
+            depositRequestConfig = config;
+        },
+        stop() {
+            if (server) {
+                server.close();
+                server = null;
+            }
+        },
         start() {
-            createServer(async (req, res) => {
+            server = createServer(async (req, res) => {
                 const url = req.url ?? "/";
 
                 if (url === "/") {
@@ -329,6 +358,19 @@ export const createDashboard = (port: number) => {
                     return;
                 }
 
+                if (url === "/deposit" && req.method === "POST") {
+                    try {
+                        const body = await readRequestBody(req);
+                        const parsed = body ? JSON.parse(body) : {};
+                        const item = typeof parsed.item === "string" ? parsed.item : null;
+                        depositRequestConfig.setPendingItem(item);
+                        writeJson(res, { pendingItem: item });
+                    } catch (err) {
+                        writeError(res, 400, `invalid deposit request: ${String(err)}`);
+                    }
+                    return;
+                }
+
                 if (url === "/events") {
                     res.statusCode = 200;
                     res.setHeader("Content-Type", "text/event-stream");
@@ -347,6 +389,14 @@ export const createDashboard = (port: number) => {
                 res.end("Not Found");
             }).listen(port, () => {
                 console.log(`Dashboard running at http://localhost:${port}`);
+            }).on("error", (err: Error) => {
+                const nodeErr = err as NodeJS.ErrnoException;
+                if (nodeErr.code === "EADDRINUSE") {
+                    console.error(`Port ${port} is already in use. Stop the other process or change DASHBOARD_PORT.`);
+                } else {
+                    console.error(`Dashboard server error: ${err.message}`);
+                }
+                process.exit(1);
             });
         },
         publish(snapshot: DashboardSnapshot) {

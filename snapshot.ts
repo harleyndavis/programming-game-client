@@ -59,6 +59,8 @@ type SnapshotMeta = {
     idlingAtHome: boolean;
     lowHpThresholdPercent: number;
     lowHpThreshold: number;
+    depositItem: string | null;
+    depositMessage: string;
 };
 
 const toPosition = (position?: Position): Position | null => {
@@ -131,6 +133,8 @@ export const toDashboardSnapshot = (heartbeat: SnapshotHeartbeat, meta: Snapshot
             idleAtHome: meta.idlingAtHome,
             lowHpThresholdPercent: meta.lowHpThresholdPercent,
             lowHpThreshold: meta.lowHpThreshold,
+            depositItem: meta.depositItem,
+            depositMessage: meta.depositMessage,
         },
         serverState: {
             action: typeof heartbeat.player.action === "string" ? heartbeat.player.action : null,
