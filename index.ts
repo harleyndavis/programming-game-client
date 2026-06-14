@@ -811,6 +811,7 @@ connect({
           weight: 0,
           decision,
           level,
+          speed: player.stats?.movementSpeed ?? null,
           opponents,
           ...extras,
         });
@@ -1449,6 +1450,7 @@ connect({
       target: nearbyMonster
         ? { id: nearbyMonster.unit.id, hp: typeof nearbyMonster.unit.hp === 'number' ? nearbyMonster.unit.hp : null, distance: nearbyMonster.distance }
         : null,
+      speed: player.stats?.movementSpeed ?? null,
       serverAction: player.action,
       serverIntent: serverIntentType,
       statusEffects: Object.keys(player.statusEffects ?? {}),
