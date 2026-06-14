@@ -1,4 +1,4 @@
-import { appendFileSync, closeSync, mkdirSync, openSync, readSync, statSync, writeFileSync } from 'fs';
+import { appendFileSync, closeSync, mkdirSync, openSync, readSync, renameSync, statSync, writeFileSync } from 'fs';
 import { join } from 'path';
 
 export type LogCtx = 'overworld' | 'arena';
@@ -36,8 +36,12 @@ export type DeathSnapshot = {
 
 const LOG_DIR = process.env.LOG_DIR ?? process.cwd();
 const OVERWORLD_LOG = join(LOG_DIR, 'overworld.log');
-const ARENA_LOG = join(LOG_DIR, 'arena.log');
 const DEATHS_DIR = join(LOG_DIR, 'deaths');
+const ARENA_DIR = join(LOG_DIR, 'arena');
+
+// Overworld log rotation: keep up to MAX_GENERATIONS files of MAX_BYTES each.
+const OVERWORLD_MAX_BYTES = 10 * 1024 * 1024; // 10 MB per file
+const OVERWORLD_MAX_GENERATIONS = 5;
 
 export const TICK_BUFFER_SIZE = 60;
 const overworldTickBuffer: TickEntry[] = [];
@@ -61,7 +65,15 @@ const warmBuffer = (buffer: TickEntry[], logPath: string): void => {
 };
 
 warmBuffer(overworldTickBuffer, OVERWORLD_LOG);
-warmBuffer(arenaTickBuffer, ARENA_LOG);
+// Arena buffer is not warmed from disk: each match has its own file and the
+// buffer is cleared after each death snapshot write, so starting empty on
+// restart is acceptable.
+
+let overworldBytesWritten = 0;
+try { overworldBytesWritten = statSync(OVERWORLD_LOG).size; } catch { /* first run */ }
+
+// Set by openArenaMatch(); ticks inside a match are written here, not to a shared file.
+let currentArenaMatchPath: string | null = null;
 
 // Extras queued outside the tick (e.g. config changes) are flushed into the next tick entry.
 let pendingExtras: Record<string, unknown> = {};
@@ -82,10 +94,33 @@ const formatNumbers = (value: unknown): unknown => {
   return value;
 };
 
-const append = (path: string, entry: Record<string, unknown>): void => {
+const appendLine = (path: string, line: string): void => {
   try {
-    appendFileSync(path, JSON.stringify(formatNumbers(entry)) + '\n', 'utf8');
+    appendFileSync(path, line, 'utf8');
   } catch { /* don't crash bot on log write failure */ }
+};
+
+const rotateOverworld = (): void => {
+  for (let i = OVERWORLD_MAX_GENERATIONS; i >= 1; i--) {
+    const src = i === 1 ? OVERWORLD_LOG : `${OVERWORLD_LOG}.${i - 1}`;
+    const dst = `${OVERWORLD_LOG}.${i}`;
+    try { renameSync(src, dst); } catch { /* file may not exist */ }
+  }
+  overworldBytesWritten = 0;
+};
+
+/** Open a new per-match arena log file. Implicitly supersedes any previously open match file. */
+export const openArenaMatch = (startTime: Date): void => {
+  try {
+    mkdirSync(ARENA_DIR, { recursive: true });
+    const name = startTime.toISOString().slice(0, 19).replace('T', '_').replace(/:/g, '-');
+    currentArenaMatchPath = join(ARENA_DIR, `${name}.log`);
+  } catch { /* don't crash bot */ }
+};
+
+/** Stop writing arena ticks to the current match file. */
+export const closeArenaMatch = (): void => {
+  currentArenaMatchPath = null;
 };
 
 type TickInput = {
@@ -123,7 +158,20 @@ export const tick = (entry: TickInput & Record<string, unknown>): TickEntry => {
   if (buffer.length >= TICK_BUFFER_SIZE) buffer.shift();
   buffer.push(record);
 
-  append(record.ctx === 'arena' ? ARENA_LOG : OVERWORLD_LOG, record as Record<string, unknown>);
+  const line = JSON.stringify(formatNumbers(record as Record<string, unknown>)) + '\n';
+  if (record.ctx === 'arena') {
+    if (currentArenaMatchPath) {
+      appendLine(currentArenaMatchPath, line);
+    }
+  } else {
+    const lineBytes = Buffer.byteLength(line, 'utf8');
+    if (overworldBytesWritten + lineBytes >= OVERWORLD_MAX_BYTES) {
+      rotateOverworld();
+    }
+    appendLine(OVERWORLD_LOG, line);
+    overworldBytesWritten += lineBytes;
+  }
+
   return record;
 };
 

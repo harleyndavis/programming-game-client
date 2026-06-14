@@ -832,6 +832,7 @@ connect({
         arenaMatchStartMs = Date.now();
         arenaStickyTargetId = null;
         arenaStickyTargetLostTicks = 0;
+        logger.openArenaMatch(new Date());
         logArena('matchEntry', { timeRemaining: arenaTimeRemaining });
       }
 
@@ -841,6 +842,7 @@ connect({
           nonSelfUnits.every(([, u]) => typeof u.hp === 'number' && u.hp <= 0);
         const outcome = arenaHp <= 0 ? 'lost' : allOpponentsDead ? 'won' : 'drew';
         logArena('matchExit', { outcome, aliveAtExit: arenaHp > 0, reason: 'timerExpired' });
+        logger.closeArenaMatch();
         arenaMatchActive = false;
         return arenaHp <= 0 ? player.respawn() : player.idle();
       }
@@ -853,6 +855,7 @@ connect({
       if (arenaHp <= 0) {
         if (arenaMatchActive) {
           logArena('matchExit', { outcome: 'lost', aliveAtExit: false, reason: 'playerDied' });
+          logger.closeArenaMatch();
           arenaMatchActive = false;
         }
         if (pendingArenaDeath === null) {
@@ -954,6 +957,7 @@ connect({
         aliveAtExit: lastArenaHp > 0,
         reason: 'timeout',
       });
+      logger.closeArenaMatch();
       arenaMatchActive = false;
     }
 
