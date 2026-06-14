@@ -42,6 +42,14 @@ export type WorldState = {
     objects: GameObject[];
 };
 
+export type StorageFeeInfo = {
+    coinsInStorage: number;
+    perCharge: number;
+    buffer: number;
+    coverage: number;
+    availableWithdrawal: number;
+};
+
 export type DashboardSnapshot = {
     receivedAt: string;
     bot: {
@@ -53,6 +61,8 @@ export type DashboardSnapshot = {
         depositItem: string | null;
         /** Human-readable deposit status message. */
         depositMessage: string;
+        nearbyBankers: number;
+        nearbyMerchants: number;
     };
     serverState: {
         action: string | null;
@@ -70,6 +80,7 @@ export type DashboardSnapshot = {
         calories: number | null;
         attack: number | null;
         defense: number | null;
+        movementSpeed: number | null;
         weight: number | null;
         maxCarryWeight: number | null;
         name: string | null;
@@ -85,6 +96,8 @@ export type DashboardSnapshot = {
     units: UnitSnapshot[];
     /** The unmodified heartbeat object as received from the game server. */
     raw: Record<string, unknown>;
+    /** Storage fee breakdown — computed by the bot tick. */
+    storageFee?: StorageFeeInfo;
     /** Accumulated world knowledge — managed separately via updateWorld(). */
     world?: WorldState;
     /** Bot upgrade plans — managed separately via updateUpgradePlans(). */
@@ -131,6 +144,8 @@ export const createDashboard = (port: number) => {
             lowHpThreshold: 0,
             depositItem: null,
             depositMessage: '',
+            nearbyBankers: 0,
+            nearbyMerchants: 0,
         },
         serverState: {
             action: null,
@@ -149,6 +164,7 @@ export const createDashboard = (port: number) => {
             calories: null,
             attack: null,
             defense: null,
+            movementSpeed: null,
             weight: null,
             maxCarryWeight: null,
             position: null,
@@ -275,10 +291,11 @@ export const createDashboard = (port: number) => {
         stop() {
             if (server) {
                 sseClients.forEach((client) => {
-                    client.end();
+                    try { client.socket?.destroy(); } catch { /* ignore */ }
                 });
                 sseClients.clear();
-                server.close();
+                try { (server as any).closeAllConnections?.(); } catch { /* ignore */ }
+                try { server.close(); } catch { /* ignore */ }
                 server = null;
             }
         },
@@ -396,11 +413,10 @@ export const createDashboard = (port: number) => {
             }).on("error", (err: Error) => {
                 const nodeErr = err as NodeJS.ErrnoException;
                 if (nodeErr.code === "EADDRINUSE") {
-                    console.error(`Port ${port} is already in use. Stop the other process or change DASHBOARD_PORT.`);
+                    console.error(`Dashboard port ${port} is already in use — continuing without dashboard.`);
                 } else {
                     console.error(`Dashboard server error: ${err.message}`);
                 }
-                process.exit(1);
             });
         },
         publish(snapshot: DashboardSnapshot) {

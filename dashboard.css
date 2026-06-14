@@ -530,6 +530,26 @@ h1 {
   background: #38bdf8;
 }
 
+.npc-buying {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 5px;
+}
+
+.npc-buy-item {
+  font-size: 11px;
+  color: var(--muted);
+  border: 1px solid #374151;
+  border-radius: 5px;
+  padding: 1px 6px;
+  white-space: nowrap;
+}
+
+.npc-buy-price {
+  color: #22c55e;
+}
+
 .event-row {
   font-size: 12px;
   flex-direction: column;

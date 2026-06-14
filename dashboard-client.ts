@@ -28,6 +28,10 @@ const mpFillEl = document.getElementById("mpFill");
 const tpFillEl = document.getElementById("tpFill");
 const caloriesFillEl = document.getElementById("caloriesFill");
 const weightFillEl = document.getElementById("weightFill");
+const carryWeightEl = document.getElementById("carryWeight");
+const moveSpeedEl = document.getElementById("moveSpeed");
+const storageFeeCoverageEl = document.getElementById("storageFeeCoverage");
+const nearbyCountsEl = document.getElementById("nearbyCounts");
 const equipmentGridEl = document.getElementById("equipmentGrid");
 
 const combatSkillsListEl = document.getElementById("combatSkillsList");
@@ -380,13 +384,26 @@ const renderWorldList = (containerEl: HTMLElement | null, items: unknown[] | nul
 };
 
 const renderNpcs = (npcs: unknown[] | null | undefined) => {
-  renderWorldList(npcsListEl, npcs, (npc) => (
-    '<div class="list-row">' +
-    '<div><div class="list-title">' + escapeHtml(formatItemName(npc.name || npc.id)) + '</div>' +
-    '<div class="list-meta">' + escapeHtml(npc.npcType || "npc") + " · " + escapeHtml(npc.id) + '</div></div>' +
-    '<div class="list-value">' + escapeHtml(formatPosition(npc.position)) + '</div>' +
-    '</div>'
-  ), "No NPCs recorded yet.");
+  renderWorldList(npcsListEl, npcs, (npc) => {
+    const buying = (npc.trades?.buying || {}) as Record<string, { price: number; quantity: number } | undefined>;
+    const buyingEntries = Object.entries(buying).filter(([, v]) => v && v.price > 0);
+    const buyingHtml = buyingEntries.length > 0
+      ? '<div class="npc-buying">' +
+        buyingEntries.map(([itemId, offer]) =>
+          '<span class="npc-buy-item">' + escapeHtml(lookupItemName(itemId)) + ' <span class="npc-buy-price">' + escapeHtml(String(offer!.price)) + '¢</span></span>'
+        ).join('') +
+        '</div>'
+      : '';
+    return (
+      '<div class="list-row">' +
+      '<div style="flex:1"><div class="list-title">' + escapeHtml(formatItemName(npc.name || npc.id)) + '</div>' +
+      '<div class="list-meta">' + escapeHtml(npc.npcType || "npc") + " · " + escapeHtml(npc.id) + '</div>' +
+      buyingHtml +
+      '</div>' +
+      '<div class="list-value">' + escapeHtml(formatPosition(npc.position)) + '</div>' +
+      '</div>'
+    );
+  }, "No NPCs recorded yet.");
 };
 
 const renderMobs = (mobs: unknown[] | null | undefined) => {
@@ -577,6 +594,29 @@ const render = (payload: any) => {
   setMeter(tpFillEl, tpTextEl, player.tp, 100);
   setMeter(caloriesFillEl, caloriesTextEl, player.calories, 3000);
   setMeter(weightFillEl, weightTextEl, player.weight, player.maxCarryWeight);
+
+  if (carryWeightEl) {
+    if (typeof player.weight === "number" && typeof player.maxCarryWeight === "number" && player.maxCarryWeight > 0) {
+      const pct = (player.weight / player.maxCarryWeight) * 100;
+      carryWeightEl.textContent = pct.toFixed(1) + "%";
+    } else {
+      carryWeightEl.textContent = "-";
+    }
+  }
+  if (moveSpeedEl) {
+    moveSpeedEl.textContent = typeof player.movementSpeed === "number" ? player.movementSpeed.toFixed(1) + " m/s" : "-";
+  }
+  if (storageFeeCoverageEl) {
+    const sf = payload.storageFee || null;
+    if (sf && typeof sf.coverage === "number" && typeof sf.perCharge === "number") {
+      storageFeeCoverageEl.textContent = sf.coverage.toFixed(1) + "x (" + sf.perCharge + "¢/charge)";
+    } else {
+      storageFeeCoverageEl.textContent = "-";
+    }
+  }
+  if (nearbyCountsEl) {
+    nearbyCountsEl.textContent = String(payload.bot?.nearbyBankers ?? 0) + " / " + String(payload.bot?.nearbyMerchants ?? 0);
+  }
 
   itemCatalog = (payload.raw?.items || {}) as Record<string, Record<string, unknown>>;
   renderEquipment(equipment, payload.raw?.items);
