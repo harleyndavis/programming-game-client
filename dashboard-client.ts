@@ -394,11 +394,21 @@ const renderNpcs = (npcs: unknown[] | null | undefined) => {
         ).join('') +
         '</div>'
       : '';
+    const selling = (npc.trades?.selling || {}) as Record<string, { price: number; quantity: number } | undefined>;
+    const sellingEntries = Object.entries(selling).filter(([, v]) => v && v.price > 0);
+    const sellingHtml = sellingEntries.length > 0
+      ? '<div class="npc-selling">' +
+        sellingEntries.map(([itemId, offer]) =>
+          '<span class="npc-sell-item">' + escapeHtml(lookupItemName(itemId)) + ' <span class="npc-sell-price">' + escapeHtml(String(offer!.price)) + '¢</span>' + (offer!.quantity > 0 ? ' <span class="npc-sell-qty">×' + escapeHtml(String(offer!.quantity)) + '</span>' : '') + '</span>'
+        ).join('') +
+        '</div>'
+      : '';
     return (
       '<div class="list-row">' +
       '<div style="flex:1"><div class="list-title">' + escapeHtml(formatItemName(npc.name || npc.id)) + '</div>' +
       '<div class="list-meta">' + escapeHtml(npc.npcType || "npc") + " · " + escapeHtml(npc.id) + '</div>' +
       buyingHtml +
+      sellingHtml +
       '</div>' +
       '<div class="list-value">' + escapeHtml(formatPosition(npc.position)) + '</div>' +
       '</div>'

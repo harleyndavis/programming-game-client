@@ -1,3 +1,4 @@
+import "dotenv/config";
 import { appendFileSync, closeSync, mkdirSync, openSync, readSync, renameSync, statSync, writeFileSync } from 'fs';
 import { join } from 'path';
 
@@ -187,7 +188,7 @@ export const writeDeathSnapshot = (snapshot: Omit<DeathSnapshot, 'ts' | 'recentT
       ...snapshot,
       recentTicks: [...buffer],
     };
-    writeFileSync(join(DEATHS_DIR, `${name}.json`), JSON.stringify(formatNumbers(full), null, 2), 'utf8');
+    writeFileSync(join(DEATHS_DIR, `${snapshot.ctx}-${name}.json`), JSON.stringify(formatNumbers(full), null, 2), 'utf8');
     buffer.length = 0;
   } catch { /* don't crash bot on snapshot write failure */ }
 };

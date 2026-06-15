@@ -34,6 +34,16 @@ const FLEE_DROP_RADIUS = 12; // drop heaviest item to outrun a monster within th
 const HOME_CHORES_CLEAR_RADIUS = 15; // must be this close to home before declaring chores done
 const COINS_TO_KEEP = 0; // pocket change; rest goes to storage
 const STORAGE_FEE_BUFFER = 100; // keep 100× the per-charge fee in storage at minimum
+const EXPLORE_DIRECTIONS = [
+  { x: 0, y: -1 },   // N
+  { x: 0, y: 1 },    // S
+  { x: 1, y: -1 },   // NE
+  { x: -1, y: 1 },   // SW
+  { x: 1, y: 0 },    // E
+  { x: -1, y: 0 },   // W
+  { x: 1, y: 1 },    // SE
+  { x: -1, y: -1 },  // NW
+];
 
 let recoveringAtHome = false;
 let idlingAtHome = false;
@@ -588,6 +598,7 @@ const STICKY_TARGET_GRACE_TICKS = 3;
 let huntTier = 0;
 let huntIdleTicks = 0;
 const lastLoggedMerchants = new Set<string>();
+let exploreDirectionIndex = 0;
 let pendingDepositItem: string | null = null;
 let lastDepositMessage = '';
 let depositInProgress = false;
@@ -671,7 +682,8 @@ const decide = (opts: {
   // Let the SDK handle moving into range — attack() is "move to and attack".
   if (nearbyMonster)
     return { type: "attack", targetId: nearbyMonster.unit.id, distance: nearbyMonster.distance };
-  return { type: "explore", to: { x: playerPosition.x + 10, y: playerPosition.y } };
+  const dir = EXPLORE_DIRECTIONS[exploreDirectionIndex];
+  return { type: "explore", to: { x: playerPosition.x + dir.x * 10, y: playerPosition.y + dir.y * 10 } };
 };
 
 dashboard.configureThreshold({
@@ -784,12 +796,38 @@ connect({
     }
   },
   onTick(heartbeat) {
+    // ── Upkeep ───────────────────────────────────────────────────────────────
+    // Runs on every tick regardless of context. Does not process tick data —
+    // only bot-level bookkeeping that isn't tied to arena or overworld state.
+
     if (emergencyModeActive) {
       return heartbeat.inArena ? heartbeat.player?.idle() : heartbeat.player.move(HOME_POSITION);
     }
-    // Arena ticks are isolated: they must not read or write overworld state.
-    // The arena player is always at a separate HP from the overworld player,
-    // and arena outcomes only affect leaderboards — resources spent here are free.
+
+    // Close out any arena match that ended early via combat and whose exit tick
+    // was never received. 60 s is the maximum match duration.
+    if (arenaMatchActive && arenaMatchStartMs > 0 && Date.now() - arenaMatchStartMs > 60_000) {
+      const timeoutOutcome =
+        lastArenaHp <= 0 ? 'lost' :
+          lastArenaOpponents.length > 0 && lastArenaOpponents.every(o => o.hp !== null && o.hp <= 0) ? 'won' :
+            'unknown';
+      logger.tick({
+        ctx: 'arena',
+        pos: { x: 0, y: 0 },
+        hp: lastArenaHp,
+        maxHp: 0,
+        calories: 0,
+        weight: 0,
+        decision: 'matchExit',
+        outcome: timeoutOutcome,
+        aliveAtExit: lastArenaHp > 0,
+        reason: 'timeout',
+      });
+      logger.closeArenaMatch();
+      arenaMatchActive = false;
+    }
+
+    // ── Arena tick ───────────────────────────────────────────────────────────
     if (heartbeat.inArena) {
       const arenaTimeRemaining = heartbeat.arenaTimeRemaining;
       const prevTime = prevArenaTimeRemaining;
@@ -810,7 +848,7 @@ connect({
           : Math.max(100, arenaHp);
 
       const opponents = Object.entries(heartbeat.units)
-        .filter(([id]) => id !== player.id)
+        .filter(([id, u]) => id !== player.id && u.type !== UNIT_TYPE.npc)
         .map(([id, u]) => ({
           id,
           hp: typeof u.hp === 'number' ? u.hp : null,
@@ -933,18 +971,22 @@ connect({
         }
       }
 
-      // Nearest living unit — exclude self by player.id (the actual server-side unit key),
-      // not userId (the credential ID), which may differ.
+      // Nearest living non-NPC unit — exclude self and arena NPCs (healer, merchant, etc.)
+      // that persist in heartbeat.units but cannot be killed and co-locate with players.
       const arenaTarget = Object.entries(heartbeat.units)
-        .filter(([id, unit]) => id !== player.id && isFinitePosition(unit.position) && (typeof unit.hp !== "number" || unit.hp > 0))
+        .filter(([id, unit]) => id !== player.id && unit.type !== UNIT_TYPE.npc && isFinitePosition(unit.position) && (typeof unit.hp !== "number" || unit.hp > 0))
         .map(([id, unit]) => ({ id, unit, distance: distanceBetween(arenaPosition, unit.position as { x: number; y: number }) }))
         .sort((a, b) => a.distance - b.distance)[0];
 
       if (arenaTarget) {
         const prevStickyId = arenaStickyTargetId;
         if (!arenaStickyTargetId) arenaStickyTargetId = arenaTarget.id;
-        const attackUnit = arenaStickyTargetId ? heartbeat.units[arenaStickyTargetId] ?? arenaTarget.unit : arenaTarget.unit;
-        if ((attackUnit as any)?.id === player.id) {
+        // Resolve unit and its map key separately so the self-attack check
+        // uses the authoritative key rather than the unit object's .id field.
+        const stickyUnit = arenaStickyTargetId ? heartbeat.units[arenaStickyTargetId] : undefined;
+        const attackUnit = stickyUnit ?? arenaTarget.unit;
+        const attackTargetId = stickyUnit ? arenaStickyTargetId! : arenaTarget.id;
+        if (attackTargetId === player.id) {
           arenaStickyTargetId = null;
           logArena('idle', { selfAttackPrevented: true }, 'warn');
           return player.idle();
@@ -961,32 +1003,10 @@ connect({
       return player.idle();
     }
 
+    // ── Overworld tick ───────────────────────────────────────────────────────
     const tickExtras: Record<string, unknown> = {};
     let tickLevel: logger.LogLevel = 'info';
     let depositOverride: Decision | null = null;
-
-    // 60-second timeout: arena matches last exactly 60s. If we're back in the
-    // overworld and that much time has elapsed since match start, it's over.
-    if (arenaMatchActive && arenaMatchStartMs > 0 && Date.now() - arenaMatchStartMs > 60_000) {
-      const timeoutOutcome =
-        lastArenaHp <= 0 ? 'lost' :
-          lastArenaOpponents.length > 0 && lastArenaOpponents.every(o => o.hp !== null && o.hp <= 0) ? 'won' :
-            'unknown';
-      logger.tick({
-        ctx: 'arena',
-        pos: { x: 0, y: 0 },
-        hp: lastArenaHp,
-        maxHp: 0,
-        calories: 0,
-        weight: 0,
-        decision: 'matchExit',
-        outcome: timeoutOutcome,
-        aliveAtExit: lastArenaHp > 0,
-        reason: 'timeout',
-      });
-      logger.closeArenaMatch();
-      arenaMatchActive = false;
-    }
 
     const { player } = heartbeat;
     const playerHp = isFiniteNumber(player.hp) ? player.hp : 0;
@@ -1056,7 +1076,10 @@ connect({
       recoveringAtHome = false;
       finishingHomeChores = false; // reset on death
     } else if (shouldRecover) {
-      if (!recoveringAtHome) finishingHomeChores = true; // start a home visit
+      if (!recoveringAtHome) {
+        finishingHomeChores = true; // start a home visit
+        exploreDirectionIndex = (exploreDirectionIndex + 1) % EXPLORE_DIRECTIONS.length;
+      }
       recoveringAtHome = true;
     }
     if (recoveringAtHome && playerHp >= maxHp) {
@@ -1236,8 +1259,21 @@ connect({
       playerCoins,
     });
     const keepItems = getTargetItemsToKeep(upgradeTargets, recipesArray);
+    const atHome = recoveringAtHome || idlingAtHome || finishingHomeChores;
 
-    // Compute what to deposit: spare coins + keepItems currently in inventory.
+    // The upgrade target we'd craft next from combined (storage + pocket) inventory.
+    // Drives deposit exclusion and the withdraw-for-craft override below.
+    const activeCraft = atHome ? findCraftableTarget(upgradeTargets, combinedInventory) : null;
+    const activeCraftItems: Set<string> = activeCraft?.recipe
+      ? new Set([
+        ...Object.keys(activeCraft.recipe.input),
+        ...activeCraft.recipe.required.map(String),
+      ])
+      : new Set();
+
+    // Compute what to deposit: spare coins + keepItems currently in inventory,
+    // excluding items needed for the active craft so they aren't deposited then
+    // immediately re-withdrawn.
     const invRecord = (player.inventory ?? {}) as Record<string, number>;
     const toDeposit: Partial<Record<string, number>> = {};
     if (playerCoins > COINS_TO_KEEP) {
@@ -1245,7 +1281,7 @@ connect({
     }
     for (const [itemId, qty] of Object.entries(invRecord)) {
       if (itemId === 'copperCoin' || qty <= 0) continue;
-      if (keepItems.has(itemId)) toDeposit[itemId] = qty;
+      if (keepItems.has(itemId) && !activeCraftItems.has(itemId)) toDeposit[itemId] = qty;
     }
 
     const toSell = computeItemsToSell({
@@ -1259,8 +1295,6 @@ connect({
     const heaviestInventoryItem = isEncumbered
       ? findHeaviestInventoryItem(player.inventory ?? {}, heartbeat.items)
       : null;
-
-    const atHome = recoveringAtHome || idlingAtHome || finishingHomeChores;
 
     // Compute storage fee buffer for withdrawal calculations.
     const storageRecord = heartbeat.player.storage ?? {};
@@ -1392,6 +1426,7 @@ connect({
       const hasChores =
         gearToEquip !== null ||
         recipeToCraft !== null ||
+        activeCraft !== null ||
         upgradesPlan.length > 0;
       if (!hasChores) finishingHomeChores = false;
     }
@@ -1408,6 +1443,31 @@ connect({
       const deficit = buyCost - playerCoins;
       withdrawOverride = { type: "withdraw", items: { copperCoin: deficit }, banker: nearbyBanker };
       tickExtras.autoWithdraw = { amount: deficit, deficit, playerCoins, storageFee: feePerCharge, storageFeeBuffer: minStorageCoins };
+    }
+
+    // ── Withdraw ingredients/tools from storage for the active craft ─────────
+    if (!withdrawOverride && atHome && nearbyBanker && activeCraft?.recipe) {
+      const toWithdrawForCraft: Partial<Record<string, number>> = {};
+      const storageRec = storageRecord as Record<string, number>;
+      for (const [itemId, qty] of Object.entries(activeCraft.recipe.input)) {
+        const haveInPocket = invRecord[itemId] ?? 0;
+        const needed = qty ?? 0;
+        if (haveInPocket < needed) {
+          const canWithdraw = Math.min(needed - haveInPocket, storageRec[itemId] ?? 0);
+          if (canWithdraw > 0) toWithdrawForCraft[itemId] = canWithdraw;
+        }
+      }
+      for (const toolId of activeCraft.recipe.required) {
+        const toolStr = String(toolId);
+        if ((invRecord[toolStr] ?? 0) < 1) {
+          const canWithdraw = Math.min(1, storageRec[toolStr] ?? 0);
+          if (canWithdraw > 0) toWithdrawForCraft[toolStr] = canWithdraw;
+        }
+      }
+      if (Object.keys(toWithdrawForCraft).length > 0) {
+        withdrawOverride = { type: "withdraw", items: toWithdrawForCraft, banker: nearbyBanker };
+        tickExtras.withdrawForCraft = { items: Object.keys(toWithdrawForCraft) };
+      }
     }
 
     // ── Withdraw non-protected items from storage to sell ────────────────────

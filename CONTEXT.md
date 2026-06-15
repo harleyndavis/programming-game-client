@@ -1,5 +1,7 @@
 # Context
 
+> For discovered facts about the game server and client SDK (timing, combat ranges, event shapes, economy), see [`docs/game-reference.md`](docs/game-reference.md).
+
 ## Architecture direction
 
 ### Decision model
@@ -57,12 +59,6 @@ history and heat map data. Drives two decisions:
 
 Unknown entities default to high threat until data is collected.
 
-### World geometry
-The game world is an open plane with no hard impassable obstacles — characters
-walk through trees, ore deposits, and other objects. Pathfinding requires only
-cost-weighted routing (avoid high-threat areas), not obstacle avoidance or
-connectivity graphs.
-
 ### Exploration trigger
 The bot expands its search radius when progression is blocked — specifically
 when a required crafting ingredient or resource cannot be obtained from any
@@ -104,73 +100,7 @@ combat style mid-fight. Triggers:
   style.
 
 During a weapon swap the character cannot attack. The swap exposes a window of
-vulnerability whose length depends on equip action duration (not yet measured).
-
-### Combat ranges
-- Melee: 0.7 units
-- Bow: 2.5–10 units (min ranged attack range 2.5, max 10)
-- Bow requires arrows (consumable); no arrows = cannot use bow.
-- Grimoire (offhand): assumes caster must be holding it to cast spells, same as
-  bow assumption — unverified.
-
-### Global cooldown
-0.5 seconds between actions (from `heartbeat.constants.globalCooldown` — the
-deprecated `constants.ts` value matches but live value should be preferred).
-Applies after gear equips, attacks, and other actions. **Move is exempt** — the
-bot can issue move intents freely during cooldown, but all other actions are
-blocked. Intents can be changed during cooldown; they are queued and executed
-when the cooldown expires.
-
-### Intent throttle
-The server applies a 100 ms leading-and-trailing throttle to incoming intents.
-Multiple intent changes within a 100 ms window collapse to the last one received
-— the intermediate intents are silently dropped. The client will not resend an
-intent if it has not changed since the last send. Combined with the global
-cooldown and status effects, this means an intent sent by the bot may not be
-acted on for several ticks; the server queues it and executes it as soon as
-conditions allow. This is the primary explanation for observed intent lag of
-6–30 ticks.
-
-Intent persistence varies by type. **Attack does not clear when combat ends** —
-the attack intent remains in the heartbeat after the target is dead. A stale
-attack intent does not mean combat is ongoing; confirm against active target
-presence.
-
-### Arena match boundaries
-There is no explicit match-start or match-end event. Detection strategy:
-
-- **Match start**: when an arena heartbeat arrives and the arena timer has
-  advanced, a new match has begun. Log this tick as the match-start boundary and
-  close out the previous match (win/loss/tie) at the same time.
-- **Closing previous match on start**: if no arena combat log exists yet (e.g.
-  fresh bot startup), there is no previous match to close — skip the close-out.
-  This handles the cold-start edge case.
-- **Match end**: if 60 seconds have elapsed since the last arena tick, assume
-  the match has ended. The arena match duration is fixed at 60 seconds.
-
-Extra heartbeat ticks arrive between server events — the client fires one on
-every server event *and* on a 300 ms poll. These extra ticks carry no new server
-state; they are time-passing acknowledgements and should not be treated as match
-activity.
-
-### Action durations
-- **Gear equip**: instant — fires `equipped` immediately, then global cooldown.
-  Bow ↔ melee switching is viable mid-combat.
-- **Spell equip**: 5,000 ms — fires `beganEquippingSpell`, then `equippedSpell`
-  after 5 seconds. Too slow for mid-combat use; spellbook must be configured
-  before engaging.
-- **Crafting, harvesting, casting**: have individual durations tracked via
-  `actionStart` + `actionDuration` in the heartbeat.
-
-### Raw server events
-`connect()` accepts an `onEvent` callback that receives every raw server event
-before it is processed into a heartbeat. Useful for debugging intent lag,
-observing `unitDisappeared` events, and timing analysis. The server can emit up
-to 60 events per second during movement (~16–17 ms between events).
-
-Storage events (`storageCharged`, `storageEmptied`, `deposited`, `withdrew`) are
-logged via `logger.addExtra` in the `onEvent` handler at `index.ts:721`. This
-makes the fee (`charged`) and remaining coins visible per-tick for monitoring.
+vulnerability whose length depends on equip action duration (see `docs/game-reference.md` → *Action durations*).
 
 ### Storage / Banking
 Each player has a personal bank vault (`player.storage`) accessible through
@@ -207,7 +137,7 @@ are withdrawn to inventory for selling. Runs only when no other banking override
 is active.
 
 **Fee buffer:** `minStorageCoins = ceil(total_storage_weight_g × 0.0025) × 100`.
-Only coins above this buffer are available for withdrawal.
+Only coins above this buffer are available for withdrawal. (Formula source: `docs/game-reference.md` → *Storage fees*.)
 
 **Upgrade-aware inventory (cycle prevention):** `computeUpgradeTargets` receives
 a merged view of `player.inventory + player.storage` so that craftable
@@ -320,13 +250,7 @@ than any other route should be pursued when that ingredient is on the upgrade
 path.
 
 ### Merchant trade model
-Each merchant NPC exposes two price lists:
-- `trades.selling` — items the merchant sells *to* the player (player buys)
-- `trades.buying` — items the merchant buys *from* the player (player sells)
-
-When deciding where to sell an item, compare prices across all visible
-merchants' `buying` lists. The current bot only reads `selling` and misses this
-entirely. The deprecated `wants/offers` barter fields should be ignored.
+See `docs/game-reference.md` → *Merchants* for the full price-list structure (`trades.selling` / `trades.buying`). When deciding where to sell an item, compare `buying.price` across all visible merchants. The deprecated `wants`/`offers` fields should be ignored.
 
 ### Player trade
 Players can publish their own `buying` and `selling` price lists via `setTrade`,

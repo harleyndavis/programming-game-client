@@ -550,6 +550,30 @@ h1 {
   color: #22c55e;
 }
 
+.npc-selling {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 5px;
+}
+
+.npc-sell-item {
+  font-size: 11px;
+  color: var(--muted);
+  border: 1px solid #374151;
+  border-radius: 5px;
+  padding: 1px 6px;
+  white-space: nowrap;
+}
+
+.npc-sell-price {
+  color: #f59e0b;
+}
+
+.npc-sell-qty {
+  color: #6b7280;
+}
+
 .event-row {
   font-size: 12px;
   flex-direction: column;
