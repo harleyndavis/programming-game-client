@@ -31,7 +31,7 @@ const HUNT_TICKS_PER_PASS = 150;
 const HUNT_PASSES_TO_ESCALATE = 2;
 const HUNT_THREAT_RADIUS = 20;
 const FLEE_DROP_RADIUS = 12; // drop heaviest item to outrun a monster within this distance
-const HOME_CHORES_CLEAR_RADIUS = 15; // must be this close to home before declaring chores done
+const HOME_CHORES_CLEAR_RADIUS = 2; // must be this close to home before declaring chores done
 const COINS_TO_KEEP = 0; // pocket change; rest goes to storage
 const STORAGE_FEE_BUFFER = 100; // keep 100× the per-charge fee in storage at minimum
 const EXPLORE_DIRECTIONS = [
@@ -709,8 +709,8 @@ let myUnitId: string | null = null;
 type RawEvent = { ts: string; name: string; data: unknown };
 const EVENT_BUFFER_SIZE = 200;
 const ARENA_EVENT_BUFFER_SIZE = 20;
-let arenaTargetId: string | null = null;
 let isMatchEntry: boolean = false;
+let arenaOpponentId: string | null = null;
 
 const storageEventBuffer: RawEvent[] = [];
 const harvestEventBuffer: RawEvent[] = [];
@@ -930,23 +930,25 @@ disconnectFromGame = connect({
       pushEvent(arenaEventBuffer, ARENA_EVENT_BUFFER_SIZE, eventName, evt);
       arenaMatchDuration = evt.duration;
       arenaMatchStartMs = Date.now(); // Align wall-clock with SDK timer
-      arenaTargetId = null;
       if (!arenaMatchActive) {
         arenaMatchActive = true;
         isMatchEntry = true;
         logger.openArenaMatch(new Date());
       }
-    } else if (_instance === '1v1Arena' && eventName !== 'takingAction') {
+    } else if (_instance === '1v1Arena') {
+      if (eventName === 'unitAppeared') {
+        console.log(`Arena opponent appeared: ${evt.unit.id}`);
+        if (evt.unit.id !== myUnitId) {
+          arenaOpponentId = evt.unit.id;
+        }
+      }
+      if (eventName === 'unitDisappeared') console.log(`Arena opponent disappeared: ${evt.unitId}`);
+      if (eventName === 'despawn') console.log(`Arena opponent despawned: ${evt.unitId}`);
       pushEvent(arenaEventBuffer, ARENA_EVENT_BUFFER_SIZE, eventName, evt);
     } else if (eventName === 'beganHarvesting' || eventName === 'harvested') {
       pushEvent(harvestEventBuffer, EVENT_BUFFER_SIZE, eventName, evt);
       logger.addExtra(eventName, { objectId: evt.objectId, ...(eventName === 'beganHarvesting' ? { duration: evt.duration, gameTime: evt.gameTime } : {}) });
     } else if (eventName === 'takingAction' && evt.action === 'attack' && myUnitId && evt.actionTarget === myUnitId) {
-      if (_instance === '1v1Arena') {
-        pushEvent(arenaEventBuffer, ARENA_EVENT_BUFFER_SIZE, eventName, evt);
-        arenaTargetId = evt.unitId;
-        return; // We are just setting a target and letting the bot attack it.
-      }
       // Proactive defense: a unit started an attack targeting us.
       lastAttackerId = evt.unitId;
       lastAttackerTicksLeft = LAST_ATTACKER_TICK_TIMEOUT;
@@ -1063,7 +1065,7 @@ disconnectFromGame = connect({
       };
 
       if (isMatchEntry) {
-        logArena('matchEntry');
+        logArena('matchEntry', { opponents: Object.values(heartbeat.units).filter((unit) => unit.id !== myUnitId).map(u => ({ id: u.id, type: u.type, name: u.name })) });
         isMatchEntry = false;
       }
 
@@ -1333,7 +1335,7 @@ disconnectFromGame = connect({
           pendingDepositItem = null;
           depositOverride = { type: "deposit", items: depositItems, banker: nearbyBanker };
         } else {
-          lastDepositMessage = `Skipped: no items to deposit (pending=${depositItemRequest}, coins=${inv['copperCoin']}, qty=${inv[depositItemRequest]})`;
+          lastDepositMessage = `Skipped: no items to deposit(pending = ${depositItemRequest}, coins = ${inv['copperCoin']}, qty = ${inv[depositItemRequest]})`;
           tickExtras.manualDepositSkipped = lastDepositMessage;
           depositInProgress = false;
           depositCachedItems = null;
@@ -1341,7 +1343,7 @@ disconnectFromGame = connect({
           pendingDepositItem = null;
         }
       } else {
-        lastDepositMessage = `Skipped: no banker found (pending=${depositItemRequest}, visible=${visibleBankers.length})`;
+        lastDepositMessage = `Skipped: no banker found(pending = ${depositItemRequest}, visible = ${visibleBankers.length})`;
         tickExtras.manualDepositSkipped = lastDepositMessage;
         depositInProgress = false;
         depositCachedItems = null;
@@ -1726,21 +1728,21 @@ disconnectFromGame = connect({
       if (!rawUnit) {
         lostTargetReason = "target no longer in units";
       } else if (typeof rawUnit.hp === "number" && rawUnit.hp <= 0) {
-        lostTargetReason = `target dead (hp=${rawUnit.hp})`;
+        lostTargetReason = `target dead(hp = ${rawUnit.hp})`;
       } else if (!isFinitePosition(rawUnit.position)) {
         lostTargetReason = "target position invalid";
       } else {
         const dist = distanceBetween(playerPosition, rawUnit.position);
         if (decision.type === "return-home-recover") {
-          lostTargetReason = `recovering (low HP, dist=${dist.toFixed(1)})`;
+          lostTargetReason = `recovering(low HP, dist = ${dist.toFixed(1)})`;
         } else if (decision.type === "return-home-overloaded") {
-          lostTargetReason = `returning home (overweight, dist=${dist.toFixed(1)})`;
+          lostTargetReason = `returning home(overweight, dist = ${dist.toFixed(1)})`;
         } else if (decision.type === "sell") {
-          lostTargetReason = `selling to merchant (overweight, dist=${dist.toFixed(1)})`;
+          lostTargetReason = `selling to merchant(overweight, dist = ${dist.toFixed(1)})`;
         } else if (decision.type === "drop") {
-          lostTargetReason = `dropping to flee (overweight + threat, dist=${dist.toFixed(1)})`;
+          lostTargetReason = `dropping to flee(overweight + threat, dist = ${dist.toFixed(1)})`;
         } else {
-          lostTargetReason = `target out of range (dist=${dist.toFixed(1)})`;
+          lostTargetReason = `target out of range(dist = ${dist.toFixed(1)})`;
         }
       }
     }
