@@ -10,6 +10,8 @@ export type Position = {
     y: number;
 };
 
+export type RawEvent = { ts: string; name: string; data: unknown };
+
 export type UnitSnapshot = {
     id: string;
     type: string;
@@ -102,8 +104,11 @@ export type DashboardSnapshot = {
     world?: WorldState;
     /** Bot upgrade plans — managed separately via updateUpgradePlans(). */
     upgradePlans?: UpgradePlanItem[];
-    /** Recent raw server events captured by onEvent. */
-    events?: Array<{ ts: string; name: string; data: unknown }>;
+    /** Recent raw server events captured by onEvent, kept in separate per-category buffers. */
+    storageEvents?: RawEvent[];
+    harvestEvents?: RawEvent[];
+    combatEvents?: RawEvent[];
+    arenaEvents?: RawEvent[];
 };
 
 const DEFAULT_EQUIPMENT: EquipmentSnapshot = {

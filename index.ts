@@ -706,8 +706,21 @@ const LAST_ATTACKER_TICK_TIMEOUT = 15;
 // Captured from the first heartbeat — used for event target comparisons.
 let myUnitId: string | null = null;
 
-const RAW_EVENT_BUFFER_SIZE = 200;
-const rawEventBuffer: Array<{ ts: string; name: string; data: unknown }> = [];
+type RawEvent = { ts: string; name: string; data: unknown };
+const EVENT_BUFFER_SIZE = 200;
+const ARENA_EVENT_BUFFER_SIZE = 20;
+let arenaTargetId: string | null = null;
+let isMatchEntry: boolean = false;
+
+const storageEventBuffer: RawEvent[] = [];
+const harvestEventBuffer: RawEvent[] = [];
+const combatEventBuffer: RawEvent[] = [];
+const arenaEventBuffer: RawEvent[] = [];
+
+const pushEvent = (buffer: RawEvent[], maxSize: number, name: string, data: unknown) => {
+  buffer.push({ ts: new Date().toISOString(), name, data });
+  if (buffer.length > maxSize) buffer.shift();
+};
 
 // ── Decision logic ────────────────────────────────────────────────────────────
 
@@ -855,14 +868,19 @@ type PendingSnapshot = Omit<logger.DeathSnapshot, 'ts' | 'recentTicks'>;
 let pendingOverworldDeath: PendingSnapshot | null = null;
 let pendingArenaDeath: PendingSnapshot | null = null;
 
-// ── Arena sticky target ───────────────────────────────────────────────────────
-let arenaStickyTargetId: string | null = null;
-let arenaStickyTargetLostTicks = 0;
-let prevArenaTimeRemaining = -1;
+// ── Arena match bookkeeping ───────────────────────────────────────────────────
+// Arena heartbeats are a full snapshot every tick, so targeting decisions are
+// made fresh each tick straight from heartbeat.units — nothing about opponents
+// is cached. Only the match transition (start/end) persists across ticks, since
+// there's no explicit match-id field; it's derived from the countdown timer.
 let arenaMatchActive = false;
 let arenaMatchStartMs = 0;
+let arenaMatchDuration = 60000; // updated when arena event fires; default 60s
 let lastArenaHp = 0;
-let lastArenaOpponents: Array<{ id: string; hp: number | null }> = [];
+let lastArenaMaxHp = 100;
+let lastArenaCalories = 0;
+let lastArenaPos = { x: 0, y: 0 };
+let lastArenaOpponentAlive = false;
 
 // ── Crash recovery ───────────────────────────────────────────────────────────
 // If an uncaught exception fires, set this flag so the next tick returns a
@@ -906,25 +924,38 @@ disconnectFromGame = connect({
   },
   onEvent(_instance, _charId, eventName, evt: any) {
     if (eventName === 'storageCharged' || eventName === 'storageEmptied' || eventName === 'deposited' || eventName === 'withdrew') {
-      rawEventBuffer.push({ ts: new Date().toISOString(), name: eventName, data: evt });
-      if (rawEventBuffer.length > RAW_EVENT_BUFFER_SIZE) rawEventBuffer.shift();
-    }
-    if (eventName === 'beganHarvesting' || eventName === 'harvested') {
-      rawEventBuffer.push({ ts: new Date().toISOString(), name: eventName, data: evt });
-      if (rawEventBuffer.length > RAW_EVENT_BUFFER_SIZE) rawEventBuffer.shift();
+      pushEvent(storageEventBuffer, EVENT_BUFFER_SIZE, eventName, evt);
+    } else if (eventName === 'arena') {
+      console.log(`Arena event: ${_instance}`, evt);
+      pushEvent(arenaEventBuffer, ARENA_EVENT_BUFFER_SIZE, eventName, evt);
+      arenaMatchDuration = evt.duration;
+      arenaMatchStartMs = Date.now(); // Align wall-clock with SDK timer
+      arenaTargetId = null;
+      if (!arenaMatchActive) {
+        arenaMatchActive = true;
+        isMatchEntry = true;
+        logger.openArenaMatch(new Date());
+      }
+    } else if (_instance === '1v1Arena' && eventName !== 'takingAction') {
+      pushEvent(arenaEventBuffer, ARENA_EVENT_BUFFER_SIZE, eventName, evt);
+    } else if (eventName === 'beganHarvesting' || eventName === 'harvested') {
+      pushEvent(harvestEventBuffer, EVENT_BUFFER_SIZE, eventName, evt);
       logger.addExtra(eventName, { objectId: evt.objectId, ...(eventName === 'beganHarvesting' ? { duration: evt.duration, gameTime: evt.gameTime } : {}) });
     } else if (eventName === 'takingAction' && evt.action === 'attack' && myUnitId && evt.actionTarget === myUnitId) {
+      if (_instance === '1v1Arena') {
+        pushEvent(arenaEventBuffer, ARENA_EVENT_BUFFER_SIZE, eventName, evt);
+        arenaTargetId = evt.unitId;
+        return; // We are just setting a target and letting the bot attack it.
+      }
       // Proactive defense: a unit started an attack targeting us.
       lastAttackerId = evt.unitId;
       lastAttackerTicksLeft = LAST_ATTACKER_TICK_TIMEOUT;
-      rawEventBuffer.push({ ts: new Date().toISOString(), name: 'attackStarted', data: { attacker: evt.unitId } });
-      if (rawEventBuffer.length > RAW_EVENT_BUFFER_SIZE) rawEventBuffer.shift();
+      pushEvent(combatEventBuffer, EVENT_BUFFER_SIZE, 'attackStarted', { attacker: evt.unitId });
       logger.addExtra('defensiveTrigger', { attacker: evt.unitId, source: 'takingAction' });
     } else if (eventName === 'attacked' && myUnitId && evt.attacked === myUnitId) {
       lastAttackerId = evt.attacker;
       lastAttackerTicksLeft = LAST_ATTACKER_TICK_TIMEOUT;
-      rawEventBuffer.push({ ts: new Date().toISOString(), name: eventName, data: evt });
-      if (rawEventBuffer.length > RAW_EVENT_BUFFER_SIZE) rawEventBuffer.shift();
+      pushEvent(combatEventBuffer, EVENT_BUFFER_SIZE, eventName, evt);
       logger.addExtra('attacked', { attacker: evt.attacker, damage: evt.damage, hp: evt.hp });
     } else if (eventName === 'storageCharged') {
       logger.addExtra('storageCharged', { coinsLeft: evt.coinsLeft, charged: evt.charged });
@@ -945,27 +976,26 @@ disconnectFromGame = connect({
     // Runs on every tick regardless of context. Does not process tick data —
     // only bot-level bookkeeping that isn't tied to arena or overworld state.
 
-    if (emergencyModeActive) {
-      return heartbeat.inArena ? heartbeat.player?.idle() : heartbeat.player.move(HOME_POSITION);
+    if (emergencyModeActive && heartbeat.instanceId === 'overworld') {
+      return heartbeat.player.move(HOME_POSITION);
     }
 
     // Close out any arena match that ended early via combat and whose exit tick
-    // was never received. 60 s is the maximum match duration.
+    // was never received. Uses duration from the arena event, falls back to 60 s.
+    // 60 s is the maximum match duration.
     if (arenaMatchActive && arenaMatchStartMs > 0 && Date.now() - arenaMatchStartMs > 60_000) {
-      const timeoutOutcome =
-        lastArenaHp <= 0 ? 'lost' :
-          lastArenaOpponents.length > 0 && lastArenaOpponents.every(o => o.hp !== null && o.hp <= 0) ? 'won' :
-            'unknown';
+      const selfAlive = lastArenaHp > 0;
+      const outcome = !selfAlive ? 'lost' : lastArenaOpponentAlive ? 'drew' : 'won';
       logger.tick({
         ctx: 'arena',
-        pos: { x: 0, y: 0 },
+        pos: lastArenaPos,
         hp: lastArenaHp,
-        maxHp: 0,
-        calories: 0,
+        maxHp: lastArenaMaxHp,
+        calories: lastArenaCalories,
         weight: 0,
         decision: 'matchExit',
-        outcome: timeoutOutcome,
-        aliveAtExit: lastArenaHp > 0,
+        outcome,
+        aliveAtExit: selfAlive,
         reason: 'timeout',
       });
       logger.closeArenaMatch();
@@ -973,17 +1003,19 @@ disconnectFromGame = connect({
     }
 
     // ── Arena tick ───────────────────────────────────────────────────────────
-    if (heartbeat.inArena) {
+    if ('arenaTimeRemaining' in heartbeat) {
       const arenaTimeRemaining = heartbeat.arenaTimeRemaining;
-      const prevTime = prevArenaTimeRemaining;
-      // Timer only decreases during a match. A jump means a new match started.
-      const isMatchEntry = arenaTimeRemaining > prevTime;
-      // Crosses from positive to ≤ 0 exactly once per match.
-      const isMatchEnd = !isMatchEntry && arenaTimeRemaining <= 0 && prevTime > 0;
-      prevArenaTimeRemaining = arenaTimeRemaining;
 
       const { player } = heartbeat;
       if (!myUnitId && player.id) myUnitId = player.id;
+
+      // Open the match log on the first arena tick (arena event may arrive late).
+      if (!arenaMatchActive) {
+        logger.openArenaMatch(new Date());
+        arenaMatchActive = true;
+        arenaMatchStartMs = Date.now();
+        isMatchEntry = true;
+      }
       const arenaHp = isFiniteNumber(player.hp) ? player.hp : 0;
       const arenaPosition = isFinitePosition(player.position) ? player.position : { x: 0, y: 0 };
       const arenaMaxCalories = typeof heartbeat.constants?.maxCalories === "number" ? heartbeat.constants.maxCalories : 3_000;
@@ -992,160 +1024,60 @@ disconnectFromGame = connect({
         typeof player.stats?.maxHp === "number" && player.stats.maxHp > 0
           ? player.stats.maxHp
           : Math.max(100, arenaHp);
+      // Arena is strictly 1v1 — heartbeat.units should contain exactly two units,
+      // self and the opponent. The opponent's unit type varies (player, npc, or
+      // monster depending on the match), so it's identified purely by not being
+      // self, never by type.
+      const opponent = Object.values(heartbeat.units).find((unit) => unit.id !== myUnitId);
 
-      const opponents = Object.entries(heartbeat.units)
-        .filter(([id, u]) => id !== player.id && u.type !== UNIT_TYPE.npc)
-        .map(([id, u]) => ({
-          id,
-          hp: typeof u.hp === 'number' ? u.hp : null,
-          pos: isFinitePosition(u.position) ? u.position : null,
-        }));
-
-      // Save match state for close-out outcome detection. Skip on entry ticks so
-      // the close-out at isMatchEntry reads the previous match's final values.
-      if (!isMatchEntry) {
-        lastArenaHp = arenaHp;
-        lastArenaOpponents = opponents;
-      }
+      lastArenaHp = arenaHp;
+      lastArenaMaxHp = arenaMaxHp;
+      lastArenaCalories = arenaCalories;
+      lastArenaPos = arenaPosition;
+      lastArenaOpponentAlive = opponent !== undefined && opponent.hp > 0;
 
       const logArena = (
         decision: string,
         extras: Record<string, unknown> = {},
         level: logger.LogLevel = 'info',
       ) => {
-        logger.tick({
-          ctx: 'arena',
-          pos: arenaPosition,
-          hp: arenaHp,
-          maxHp: arenaMaxHp,
-          calories: arenaCalories,
-          weight: 0,
-          decision,
-          level,
-          speed: player.stats?.movementSpeed ?? null,
-          opponents,
-          ...extras,
-        });
+        try {
+          logger.tick({
+            ctx: 'arena',
+            pos: arenaPosition,
+            hp: arenaHp,
+            maxHp: arenaMaxHp,
+            calories: arenaCalories,
+            weight: 0,
+            decision,
+            level,
+            opponentName: opponent?.name ?? null,
+            opennentId: opponent?.id ?? null,
+            opponentHp: opponent && isFiniteNumber(opponent.hp) ? opponent.hp : null,
+            timeRemaining: arenaTimeRemaining,
+            ...extras,
+          });
+        } catch (e) {
+          console.log('logArena error:', e);
+        }
       };
 
       if (isMatchEntry) {
-        // Close out any previous match that never got an explicit exit log
-        // (server dropped ticks before timer hit 0). Derive outcome from the
-        // last known arena state rather than assuming.
-        if (arenaMatchActive) {
-          const closeOutcome =
-            lastArenaHp <= 0 ? 'lost' :
-              lastArenaOpponents.length > 0 && lastArenaOpponents.every(o => o.hp !== null && o.hp <= 0) ? 'won' :
-                'unknown';
-          logArena('matchExit', { outcome: closeOutcome, aliveAtExit: lastArenaHp > 0, reason: 'newMatchDetected' });
-        }
-        arenaMatchActive = true;
-        arenaMatchStartMs = Date.now();
-        arenaStickyTargetId = null;
-        arenaStickyTargetLostTicks = 0;
-        logger.openArenaMatch(new Date());
-        logArena('matchEntry', { timeRemaining: arenaTimeRemaining });
+        logArena('matchEntry');
+        isMatchEntry = false;
       }
 
-      if (isMatchEnd) {
-        const nonSelfUnits = Object.entries(heartbeat.units).filter(([id]) => id !== player.id);
-        const allOpponentsDead = nonSelfUnits.length > 0 &&
-          nonSelfUnits.every(([, u]) => typeof u.hp === 'number' && u.hp <= 0);
-        const outcome = arenaHp <= 0 ? 'lost' : allOpponentsDead ? 'won' : 'drew';
-        logArena('matchExit', { outcome, aliveAtExit: arenaHp > 0, reason: 'timerExpired' });
-        logger.closeArenaMatch();
-        arenaMatchActive = false;
-        return arenaHp <= 0 ? player.respawn() : player.idle();
+      // The living opponent — re-evaluated fresh from the heartbeat every tick.
+      // The arena is 1v1, so there's at most one valid target and nothing about
+      // it is worth caching across ticks. Not filtered by type: the opponent can
+      // be a player, npc, or monster unit depending on the match.
+
+      if (opponent) {
+        logArena('attack', { timeRemaining: arenaTimeRemaining });
+        return player.attack(opponent);
       }
 
-      // Timer has already expired — match is over, ticks still arriving before units clear.
-      if (arenaTimeRemaining <= 0) {
-        return player.idle();
-      }
-
-      if (arenaHp <= 0) {
-        if (arenaMatchActive) {
-          logArena('matchExit', { outcome: 'lost', aliveAtExit: false, reason: 'playerDied' });
-          logger.closeArenaMatch();
-          arenaMatchActive = false;
-        }
-        if (pendingArenaDeath === null) {
-          pendingArenaDeath = {
-            ctx: 'arena',
-            hp: arenaHp,
-            pos: arenaPosition,
-            calories: arenaCalories,
-            weight: 0,
-            equipment: (player.equipment ?? {}) as Record<string, string | null | undefined>,
-            inventory: (player.inventory ?? {}) as Partial<Record<string, number>>,
-            statusEffects: Object.keys(player.statusEffects ?? {}),
-            lastDecision: lastDecision?.type ?? null,
-            nearbyMonsters: Object.values(heartbeat.units)
-              .filter(u => u.type === UNIT_TYPE.monster && isFinitePosition(u.position))
-              .map(u => ({ id: u.id, hp: typeof u.hp === 'number' ? u.hp : undefined, distance: distanceBetween(arenaPosition, u.position as { x: number; y: number }) })),
-            nearbyNpcs: [],
-            causeOfDeath: 'combat',
-          };
-        }
-        return player.respawn();
-      }
-
-      if (pendingArenaDeath !== null) {
-        logger.writeDeathSnapshot(pendingArenaDeath);
-        pendingArenaDeath = null;
-      }
-
-      // Eat freely — arena doesn't count against real-world resources.
-      const arenaFood = findCheapestFood(player.inventory ?? {}, heartbeat.items);
-      if (arenaFood !== null && arenaMaxCalories - arenaCalories >= arenaFood.calories) {
-        logArena('eat', { food: arenaFood.item });
-        return player.eat(arenaFood.item as any);
-      }
-
-      // Sticky target: hold current target a few ticks through replication gaps.
-      if (arenaStickyTargetId) {
-        const stickyUnit = heartbeat.units[arenaStickyTargetId];
-        const alive = stickyUnit && isFinitePosition(stickyUnit.position) && (typeof stickyUnit.hp !== "number" || stickyUnit.hp > 0);
-        if (alive) {
-          arenaStickyTargetLostTicks = 0;
-        } else {
-          arenaStickyTargetLostTicks += 1;
-          if (arenaStickyTargetLostTicks >= STICKY_TARGET_GRACE_TICKS) {
-            arenaStickyTargetId = null;
-            arenaStickyTargetLostTicks = 0;
-          }
-        }
-      }
-
-      // Nearest living non-NPC unit — exclude self and arena NPCs (healer, merchant, etc.)
-      // that persist in heartbeat.units but cannot be killed and co-locate with players.
-      const arenaTarget = Object.entries(heartbeat.units)
-        .filter(([id, unit]) => id !== player.id && unit.type !== UNIT_TYPE.npc && isFinitePosition(unit.position) && (typeof unit.hp !== "number" || unit.hp > 0))
-        .map(([id, unit]) => ({ id, unit, distance: distanceBetween(arenaPosition, unit.position as { x: number; y: number }) }))
-        .sort((a, b) => a.distance - b.distance)[0];
-
-      if (arenaTarget) {
-        const prevStickyId = arenaStickyTargetId;
-        if (!arenaStickyTargetId) arenaStickyTargetId = arenaTarget.id;
-        // Resolve unit and its map key separately so the self-attack check
-        // uses the authoritative key rather than the unit object's .id field.
-        const stickyUnit = arenaStickyTargetId ? heartbeat.units[arenaStickyTargetId] : undefined;
-        const attackUnit = stickyUnit ?? arenaTarget.unit;
-        const attackTargetId = stickyUnit ? arenaStickyTargetId! : arenaTarget.id;
-        if (attackTargetId === player.id) {
-          arenaStickyTargetId = null;
-          logArena('idle', { selfAttackPrevented: true }, 'warn');
-          return player.idle();
-        }
-        logArena('attack', {
-          distance: arenaTarget.distance,
-          ...(prevStickyId !== arenaStickyTargetId ? { targetAcquired: true } : {}),
-        });
-        return player.attack(attackUnit as any);
-      }
-
-      const allOpponentsDead = opponents.length > 0 && opponents.every(o => o.hp !== null && o.hp <= 0);
-      logArena(allOpponentsDead ? 'waitingMatchEnd' : 'idle');
+      logArena(opponent ? 'waitingMatchEnd' : 'idle');
       return player.idle();
     }
 
@@ -1229,8 +1161,8 @@ disconnectFromGame = connect({
     );
     const nearbyTree = hasFellingAxe
       ? treeObjects
-          .map((obj) => ({ obj, distance: distanceBetween(playerPosition, obj.position!) }))
-          .sort((a, b) => a.distance - b.distance)[0]
+        .map((obj) => ({ obj, distance: distanceBetween(playerPosition, obj.position!) }))
+        .sort((a, b) => a.distance - b.distance)[0]
       : undefined;
     if (treeObjects.length > 0) {
       tickExtras.treesFound = treeObjects.map(t => ({ id: t.id, treeType: t.treeType, pos: t.position }));
@@ -1622,7 +1554,10 @@ disconnectFromGame = connect({
         objects: Object.values(heartbeat.gameObjects ?? {}) as GameObject[],
       },
       upgradePlans: upgradePlanItems,
-      events: [...rawEventBuffer],
+      storageEvents: [...storageEventBuffer],
+      harvestEvents: [...harvestEventBuffer],
+      combatEvents: [...combatEventBuffer],
+      arenaEvents: [...arenaEventBuffer],
     });
 
     // Clear finishingHomeChores once healthy, back at home base, and all tasks done.

@@ -119,6 +119,8 @@ export const openArenaMatch = (startTime: Date): void => {
   } catch { /* don't crash bot */ }
 };
 
+export const isArenaMatchOpen = (): boolean => currentArenaMatchPath !== null;
+
 /** Stop writing arena ticks to the current match file. */
 export const closeArenaMatch = (): void => {
   currentArenaMatchPath = null;
