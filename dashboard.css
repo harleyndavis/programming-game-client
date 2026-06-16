@@ -431,9 +431,42 @@ h1 {
 
 .equipment-grid .eq-weapon .slot-icon,
 .equipment-grid .eq-offhand .slot-icon {
-  width: calc(5 * var(--eq-u));
-  height: calc(5 * var(--eq-u));
-  font-size: calc(2.5 * var(--eq-u));
+  width: calc(10 * var(--eq-u));
+  height: calc(10 * var(--eq-u));
+  font-size: calc(5 * var(--eq-u));
+}
+
+.equipment-grid .equipped-icon {
+  width: 100%;
+  height: 100%;
+  mask-image: var(--icon-src);
+  mask-size: contain;
+  mask-repeat: no-repeat;
+  mask-position: center;
+  -webkit-mask-image: var(--icon-src);
+  -webkit-mask-size: contain;
+  -webkit-mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+}
+
+.equipment-grid .eq-weapon .equipped-icon,
+.equipment-grid .eq-helm .equipped-icon,
+.equipment-grid .eq-hands .equipped-icon,
+.equipment-grid .eq-feet .equipped-icon,
+.equipment-grid .eq-legs .equipped-icon {
+  transform: scale(1.8);
+  transform-origin: center;
+}
+
+.equipment-grid .eq-chest .equipped-icon,
+.equipment-grid .eq-legs .equipped-icon {
+  transform: scale(1.9, 2.2);
+  transform-origin: center;
+}
+
+.equipment-grid .eq-offhand .equipped-icon {
+  transform: scale(1.1);
+  transform-origin: center;
 }
 
 .equipment-grid .eq-ring1,
@@ -574,6 +607,47 @@ h1 {
   color: #6b7280;
 }
 
+.quest-entry {
+  flex-direction: column;
+  gap: 6px;
+}
+
+.quest-reqs,
+.quest-kills,
+.quest-rewards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  font-size: 11px;
+  margin-top: 4px;
+}
+
+.quest-req-item,
+.quest-kill-item,
+.quest-reward-item {
+  border: 1px solid #374151;
+  border-radius: 5px;
+  padding: 1px 6px;
+  white-space: nowrap;
+}
+
+.quest-req-item {
+  color: #f59e0b;
+}
+
+.quest-kill-item {
+  color: #ef4444;
+}
+
+.quest-reward-item {
+  color: #22c55e;
+}
+
+.quest-req-count,
+.quest-reward-count {
+  color: var(--muted);
+}
+
 .event-row {
   font-size: 12px;
   flex-direction: column;
@@ -634,8 +708,56 @@ h1 {
 
 /* ── World tabs ──────────────────────────────────────────────── */
 
+.world-section {
+  background: color-mix(in srgb, var(--panel), black 15%);
+  border: 1px solid #374151;
+  border-radius: 10px;
+  margin-bottom: 16px;
+  overflow: hidden;
+}
+
+.world-section > .tab-bar {
+  margin: 0;
+  border-radius: 0;
+  border: none;
+  border-bottom: 1px solid #374151;
+  padding: 8px 8px 0;
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.world-section > .tab-bar .tab-button {
+  border-radius: 8px 8px 0 0;
+}
+
+.world-section-content {
+  height: 400px;
+  overflow: hidden;
+}
+
+.world-section .tab-panel {
+  display: none;
+  height: 100%;
+  overflow-y: scroll;
+  margin-bottom: 0;
+}
+
+.world-section .tab-panel.active {
+  display: block;
+}
+
+.world-section .tab-panel::-webkit-scrollbar {
+  width: 6px;
+}
+.world-section .tab-panel::-webkit-scrollbar-track {
+  background: transparent;
+}
+.world-section .tab-panel::-webkit-scrollbar-thumb {
+  background: #374151;
+  border-radius: 3px;
+}
+
 .world-tab-bar {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
 }
 
 .world-list {
@@ -654,6 +776,23 @@ h1 {
 
 .upgrade-entry.completed {
   opacity: 0.45;
+}
+
+.upgrade-entry.next-craft {
+  border-color: var(--accent);
+  background: rgba(59, 130, 246, 0.08);
+}
+
+.next-craft-badge {
+  font-size: 10px;
+  font-weight: 700;
+  color: #0b1220;
+  background: var(--accent);
+  border-radius: 4px;
+  padding: 1px 5px;
+  white-space: nowrap;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
 }
 
 .upgrade-header {
@@ -755,6 +894,41 @@ h1 {
   color: var(--muted);
   text-align: right;
   white-space: nowrap;
+}
+
+/* ── Event subtabs ───────────────────────────────────────────── */
+
+.event-subtab-bar {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+.event-subtab-btn {
+  appearance: none;
+  border: 1px solid #374151;
+  border-radius: 8px;
+  background: rgba(17, 24, 39, 0.65);
+  color: var(--muted);
+  padding: 4px 10px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.event-subtab-btn.active {
+  color: var(--text);
+  border-color: #38bdf8;
+  background: rgba(14, 165, 233, 0.2);
+}
+
+.event-subtab-panel {
+  display: none;
+}
+
+.event-subtab-panel.active {
+  display: block;
 }
 
 /* ── Snapshot button ─────────────────────────────────────────── */

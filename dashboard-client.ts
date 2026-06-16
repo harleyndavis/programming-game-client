@@ -5,10 +5,13 @@ const outputSnapshot = document.getElementById("outputSnapshot");
 const snapshotTimeEl = document.getElementById("snapshotTime");
 const snapshotBtnEl = document.getElementById("snapshotBtn");
 const upgradePlansListEl = document.getElementById("upgradePlansList");
-  const npcsListEl = document.getElementById("npcsList");
-  const mobsListEl = document.getElementById("mobsList");
-  const objectsListEl = document.getElementById("objectsList");
-  const eventsListEl = document.getElementById("eventsList");
+const npcsListEl = document.getElementById("npcsList");
+const questsListEl = document.getElementById("questsList");
+const mobsListEl = document.getElementById("mobsList");
+const objectsListEl = document.getElementById("objectsList");
+const storageEventsListEl = document.getElementById("storageEventsList");
+const harvestEventsListEl = document.getElementById("harvestEventsList");
+const combatEventsListEl = document.getElementById("combatEventsList");
 const connectionBannerEl = document.getElementById("connectionBanner");
 const connectionMsgEl = document.getElementById("connectionMsg");
 const receivedAtEl = document.getElementById("receivedAt");
@@ -61,6 +64,61 @@ const equipmentSlots = [
   { key: "ring1", label: "Ring 1", icon: "◉" },
   { key: "ring2", label: "Ring 2", icon: "◉" },
 ];
+
+const SLOT_SVG: Record<string, string> = {
+  weapon: '/images/relic-blade.svg',
+  offhand: '/images/bordered-shield.svg',
+  helm: '/images/closed-barbute.svg',
+  hands: '/images/gloves.svg',
+  legs: '/images/greaves.svg',
+  feet: '/images/leg-armor.svg',
+  chest: '/images/leather-vest.svg',
+  amulet: '/images/gem-chain.svg',
+  ring1: '/images/big-diamond-ring.svg',
+  ring2: '/images/big-diamond-ring.svg',
+};
+
+const MATERIAL_COLORS: Record<string, string> = {
+  // leather
+  lightLeather: '#8B6914',
+  snakeSkin: '#4c7a3e',
+  // metals
+  copper: '#c95f3a',
+  tin: '#c0c0c0',
+  bronze: '#cd7f32',
+  iron: '#808080',
+  steel: '#b0b0b0',
+  gold: '#ffd700',
+  cobalt: '#0050b3',
+  titanium: '#878681',
+  mythril: '#6a9b8a',
+  adamantite: '#5a5a8a',
+  // wood
+  pinewood: '#c8a96e',
+  oak: '#a0784c',
+  mesquite: '#6b4226',
+  hemlock: '#a0845c',
+  cypress: '#6b7b3a',
+  bloodwood: '#8b0000',
+  rosewood: '#65000b',
+  ebony: '#3b3b3b',
+  // cloth
+  cotton: '#f5f5dc',
+  linen: '#dcc8a0',
+  wool: '#b8a888',
+  // other
+  stone: '#808080',
+  basic: '#ffffff',
+};
+
+const KNOWN_MATERIALS = Object.keys(MATERIAL_COLORS).sort((a, b) => b.length - a.length);
+
+const extractMaterial = (itemId: string): string => {
+  for (const mat of KNOWN_MATERIALS) {
+    if (itemId.startsWith(mat)) return mat;
+  }
+  return 'basic';
+};
 
 const escapeHtml = (value: unknown) =>
   String(value)
@@ -152,6 +210,22 @@ worldTabButtons.forEach((btn) => {
 });
 
 setActiveWorldTab("upgrade-plans");
+
+const eventSubtabBtns = Array.from(document.querySelectorAll<HTMLElement>("[data-event-tab]"));
+const eventSubtabPanels = Array.from(document.querySelectorAll<HTMLElement>("[data-event-panel]"));
+
+const setActiveEventSubtab = (tabName: string) => {
+  eventSubtabBtns.forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset["eventTab"] === tabName);
+  });
+  eventSubtabPanels.forEach((panel) => {
+    panel.classList.toggle("active", panel.dataset["eventPanel"] === tabName);
+  });
+};
+
+eventSubtabBtns.forEach((btn) => {
+  btn.addEventListener("click", () => setActiveEventSubtab(btn.dataset["eventTab"] || "storage"));
+});
 
 // Request notification permission early so it's ready when we need it.
 if ("Notification" in window && Notification.permission === "default") {
@@ -359,10 +433,12 @@ const renderUpgradePlans = (plans: unknown) => {
         '</div>'
       );
     }).join("");
+    const extraClasses = (plan.completed ? " completed" : "") + (plan.isNextCraft ? " next-craft" : "");
     return (
-      '<div class="upgrade-entry' + (plan.completed ? " completed" : "") + '">' +
+      '<div class="upgrade-entry' + extraClasses + '">' +
       '<div class="upgrade-header">' +
       '<span class="upgrade-priority">#' + escapeHtml(String(plan.priority)) + '</span>' +
+      (plan.isNextCraft ? '<span class="next-craft-badge">NEXT</span>' : '') +
       '<span class="upgrade-name">' + escapeHtml(plan.name || lookupItemName(plan.targetItem)) + '</span>' +
       '<span class="upgrade-badge">' + escapeHtml(plan.slot || "") + '</span>' +
       '<span class="upgrade-status ' + statusClass + '">' + statusLabel + '</span>' +
@@ -389,19 +465,19 @@ const renderNpcs = (npcs: unknown[] | null | undefined) => {
     const buyingEntries = Object.entries(buying).filter(([, v]) => v && v.price > 0);
     const buyingHtml = buyingEntries.length > 0
       ? '<div class="npc-buying">' +
-        buyingEntries.map(([itemId, offer]) =>
-          '<span class="npc-buy-item">' + escapeHtml(lookupItemName(itemId)) + ' <span class="npc-buy-price">' + escapeHtml(String(offer!.price)) + '¢</span></span>'
-        ).join('') +
-        '</div>'
+      buyingEntries.map(([itemId, offer]) =>
+        '<span class="npc-buy-item">' + escapeHtml(lookupItemName(itemId)) + ' <span class="npc-buy-price">' + escapeHtml(String(offer!.price)) + '¢</span></span>'
+      ).join('') +
+      '</div>'
       : '';
     const selling = (npc.trades?.selling || {}) as Record<string, { price: number; quantity: number } | undefined>;
     const sellingEntries = Object.entries(selling).filter(([, v]) => v && v.price > 0);
     const sellingHtml = sellingEntries.length > 0
       ? '<div class="npc-selling">' +
-        sellingEntries.map(([itemId, offer]) =>
-          '<span class="npc-sell-item">' + escapeHtml(lookupItemName(itemId)) + ' <span class="npc-sell-price">' + escapeHtml(String(offer!.price)) + '¢</span>' + (offer!.quantity > 0 ? ' <span class="npc-sell-qty">×' + escapeHtml(String(offer!.quantity)) + '</span>' : '') + '</span>'
-        ).join('') +
-        '</div>'
+      sellingEntries.map(([itemId, offer]) =>
+        '<span class="npc-sell-item">' + escapeHtml(lookupItemName(itemId)) + ' <span class="npc-sell-price">' + escapeHtml(String(offer!.price)) + '¢</span>' + (offer!.quantity > 0 ? ' <span class="npc-sell-qty">×' + escapeHtml(String(offer!.quantity)) + '</span>' : '') + '</span>'
+      ).join('') +
+      '</div>'
       : '';
     return (
       '<div class="list-row">' +
@@ -414,6 +490,108 @@ const renderNpcs = (npcs: unknown[] | null | undefined) => {
       '</div>'
     );
   }, "No NPCs recorded yet.");
+};
+
+interface NpcQuestStepGather {
+  type: "gather";
+  targets: Record<string, number>;
+}
+interface NpcQuestStepKill {
+  type: "kill";
+  targets: Record<string, number>;
+}
+interface NpcQuestStepTurnIn {
+  type: "turn_in";
+  requiredItems?: Record<string, number>;
+}
+type NpcQuestStep = NpcQuestStepGather | NpcQuestStepKill | NpcQuestStepTurnIn | { type: string };
+
+interface AvailableQuest {
+  id: string;
+  name: string;
+  repeatable: boolean;
+  steps: NpcQuestStep[];
+  rewards: { items: Record<string, number> };
+}
+
+interface WorldNpc {
+  name?: string;
+  id: string;
+  availableQuests: Record<string, AvailableQuest>;
+}
+
+const renderQuests = (npcs: WorldNpc[] | null | undefined) => {
+  if (!questsListEl) return;
+  if (!npcs || npcs.length === 0) {
+    questsListEl.innerHTML = '<div class="list-row"><span class="list-title" style="opacity:0.5;">No NPCs nearby.</span></div>';
+    return;
+  }
+  const questRows: Array<{ npcName: string; quest: AvailableQuest }> = [];
+  for (const npc of npcs) {
+    const aq = npc.availableQuests || {};
+    const npcName = formatItemName(npc.name || npc.id);
+    for (const questId of Object.keys(aq)) {
+      questRows.push({ npcName, quest: aq[questId] });
+    }
+  }
+  if (questRows.length === 0) {
+    questsListEl.innerHTML = '<div class="list-row"><span class="list-title" style="opacity:0.5;">None of the nearby NPCs offer quests.</span></div>';
+    return;
+  }
+  questsListEl.innerHTML = questRows.map(({ npcName, quest }) => {
+    const gatherReqs: Record<string, number> = {};
+    const killReqs: Record<string, number> = {};
+    let turnInItems: Record<string, number> = {};
+    const steps: NpcQuestStep[] = quest.steps || [];
+    for (const step of steps) {
+      if (step.type === 'gather' && 'targets' in step) {
+        for (const [item, count] of Object.entries(step.targets)) {
+          if (typeof count === 'number') gatherReqs[item] = (gatherReqs[item] || 0) + count;
+        }
+      }
+      if (step.type === 'kill' && 'targets' in step) {
+        for (const [monster, count] of Object.entries(step.targets)) {
+          if (typeof count === 'number') killReqs[monster] = (killReqs[monster] || 0) + count;
+        }
+      }
+      if (step.type === 'turn_in' && 'requiredItems' in step && step.requiredItems) {
+        for (const [item, count] of Object.entries(step.requiredItems)) {
+          if (typeof count === 'number') turnInItems[item] = (turnInItems[item] || 0) + count;
+        }
+      }
+    }
+    const allReqs = { ...gatherReqs };
+    for (const [item, count] of Object.entries(turnInItems)) {
+      if (count) allReqs[item] = (allReqs[item] || 0) + count;
+    }
+    const rewards = quest.rewards?.items || {};
+    const reqsHtml = Object.keys(allReqs).length > 0
+      ? '<div class="quest-reqs">' + Object.entries(allReqs).map(([item, count]) =>
+        '<span class="quest-req-item">' + escapeHtml(lookupItemName(item)) + ' <span class="quest-req-count">×' + escapeHtml(String(count)) + '</span></span>'
+      ).join('') + '</div>'
+      : '';
+    const killHtml = Object.keys(killReqs).length > 0
+      ? '<div class="quest-kills">' + Object.entries(killReqs).map(([monster, count]) =>
+        '<span class="quest-kill-item">Kill ' + escapeHtml(formatItemName(monster)) + ' <span class="quest-req-count">×' + escapeHtml(String(count)) + '</span></span>'
+      ).join('') + '</div>'
+      : '';
+    const rewardsHtml = Object.keys(rewards).length > 0
+      ? '<div class="quest-rewards">Rewards: ' + Object.entries(rewards).map(([item, count]) =>
+        '<span class="quest-reward-item">' + escapeHtml(lookupItemName(item)) + ' <span class="quest-reward-count">×' + escapeHtml(String(count)) + '</span></span>'
+      ).join('') + '</div>'
+      : '';
+    return (
+      '<div class="list-row quest-entry">' +
+      '<div style="flex:1">' +
+      '<div class="list-title">' + escapeHtml(quest.name || formatItemName(quest.id)) + '</div>' +
+      '<div class="list-meta">' + escapeHtml(npcName) + (quest.repeatable ? ' · Repeatable' : '') + '</div>' +
+      reqsHtml +
+      killHtml +
+      rewardsHtml +
+      '</div>' +
+      '</div>'
+    );
+  }).join("");
 };
 
 const renderMobs = (mobs: unknown[] | null | undefined) => {
@@ -448,6 +626,7 @@ const renderWorld = (world: unknown, upgradePlans: unknown) => {
   const w = (world || {}) as Record<string, unknown>;
   renderUpgradePlans(upgradePlans);
   renderNpcs(w["npcs"] as unknown[] | null);
+  renderQuests(w["npcs"] as WorldNpc[] | null);
   renderMobs(w["mobs"] as unknown[] | null);
   renderObjects(w["objects"] as unknown[] | null);
 };
@@ -475,9 +654,22 @@ const renderEquipment = (equipment: unknown, items: unknown) => {
       lines.push("Empty");
     }
     const tooltip = lines.join("\n");
+
+    let iconHtml = "";
+    if (itemId) {
+      const svgUrl = SLOT_SVG[key];
+      if (svgUrl) {
+        const material = extractMaterial(itemId);
+        const color = MATERIAL_COLORS[material] || '#ffffff';
+        iconHtml = '<div class="equipped-icon" style="--icon-src: url(' + svgUrl + '); background-color: ' + color + ';"></div>';
+      } else {
+        iconHtml = escapeHtml(slot?.icon || "");
+      }
+    }
+
     const slotHtml = (
       '<div class="slot-item eq-' + key + '" title="' + escapeHtml(tooltip) + '">' +
-      '<div class="slot-icon">' + (itemId ? escapeHtml(slot?.icon || "") : "") + '</div>' +
+      '<div class="slot-icon">' + iconHtml + '</div>' +
       '</div>'
     );
     if (key === "hands" || key === "feet") {
@@ -649,16 +841,17 @@ const render = (payload: any) => {
   renderWorld(payload.world, payload.upgradePlans);
 
   // ── Events ──────────────────────────────────────────────────────────────────
-  const events: Array<{ ts: string; name: string; data: unknown }> = payload.events ?? [];
-  if (eventsListEl) {
-    const storageEvents = events.filter(e =>
-      e.name === 'storageCharged' || e.name === 'storageEmptied' ||
-      e.name === 'deposited' || e.name === 'withdrew'
-    );
-    if (storageEvents.length === 0) {
-      eventsListEl.innerHTML = '<div class="list-row"><span class="list-title">No storage events</span><span class="list-meta">Deposit something to see events here</span></div>';
-    } else {
-      eventsListEl.innerHTML = storageEvents.toReversed().map((evt) => {
+  // renderEvents() routes server events into per-category subtabs.
+  // To add a new category: add a subtab in dashboard.html (see comment there),
+  // then add a filter + renderEventList() call below.
+  const renderEvents = (events: Array<{ ts: string; name: string; data: unknown }>) => {
+    const renderEventList = (containerEl: HTMLElement | null, filtered: typeof events, emptyText: string) => {
+      if (!containerEl) return;
+      if (filtered.length === 0) {
+        containerEl.innerHTML = '<div class="list-row"><span class="list-title" style="opacity:0.5;">' + escapeHtml(emptyText) + '</span></div>';
+        return;
+      }
+      containerEl.innerHTML = filtered.toReversed().map((evt) => {
         const dataStr = typeof evt.data === 'object' && evt.data !== null
           ? JSON.stringify(evt.data, null, 1)
           : String(evt.data ?? '');
@@ -671,8 +864,26 @@ const render = (payload: any) => {
           escapeHtml(dataStr) +
           '</div></div>';
       }).join("");
-    }
-  }
+    };
+
+    renderEventList(
+      storageEventsListEl,
+      events.filter(e => e.name === 'storageCharged' || e.name === 'storageEmptied' || e.name === 'deposited' || e.name === 'withdrew'),
+      "No storage events yet."
+    );
+    renderEventList(
+      harvestEventsListEl,
+      events.filter(e => e.name === 'beganHarvesting' || e.name === 'harvested'),
+      "No harvest events yet."
+    );
+    renderEventList(
+      combatEventsListEl,
+      events.filter(e => e.name === 'attacked' || e.name === 'attackStarted'),
+      "No combat events yet."
+    );
+  };
+
+  renderEvents(payload.events ?? []);
 };
 
 fetch("/state")

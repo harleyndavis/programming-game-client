@@ -153,43 +153,64 @@
         </section>
       </div>
     </div>
-    <div class="tab-bar world-tab-bar" role="tablist" aria-label="World tabs" style="margin-top: 16px;">
-      <button class="tab-button active" data-world-tab="upgrade-plans" type="button">Upgrade Plans</button>
-      <button class="tab-button" data-world-tab="world-npcs" type="button">NPCs</button>
-      <button class="tab-button" data-world-tab="world-mobs" type="button">Mobs</button>
-      <button class="tab-button" data-world-tab="world-objects" type="button">Objects</button>
-      <button class="tab-button" data-world-tab="events" type="button">Events</button>
+    <div class="world-section">
+      <div class="tab-bar world-tab-bar" role="tablist" aria-label="World tabs">
+        <button class="tab-button active" data-world-tab="upgrade-plans" type="button">Upgrade Plans</button>
+        <button class="tab-button" data-world-tab="world-npcs" type="button">NPCs</button>
+        <button class="tab-button" data-world-tab="world-quests" type="button">Quests</button>
+        <button class="tab-button" data-world-tab="world-mobs" type="button">Mobs</button>
+        <button class="tab-button" data-world-tab="world-objects" type="button">Objects</button>
+        <button class="tab-button" data-world-tab="events" type="button">Events</button>
+      </div>
+      <div class="world-section-content">
+        <section class="tab-panel active" data-world-panel="upgrade-plans">
+          <div class="panel-inner">
+            <div id="upgradePlansList" class="world-list"></div>
+          </div>
+        </section>
+        <section class="tab-panel" data-world-panel="world-npcs">
+          <div class="panel-inner">
+            <div id="npcsList" class="list-section"></div>
+          </div>
+        </section>
+        <section class="tab-panel" data-world-panel="world-quests">
+          <div class="panel-inner">
+            <div id="questsList" class="list-section"></div>
+          </div>
+        </section>
+        <section class="tab-panel" data-world-panel="world-mobs">
+          <div class="panel-inner">
+            <div id="mobsList" class="list-section"></div>
+          </div>
+        </section>
+        <section class="tab-panel" data-world-panel="world-objects">
+          <div class="panel-inner">
+            <div id="objectsList" class="list-section"></div>
+          </div>
+        </section>
+        <section class="tab-panel" data-world-panel="events">
+          <div class="panel-inner">
+            <!-- EVENT SUBTABS: add a button[data-event-tab] + div[data-event-panel] pair here
+                 for each new event category the bot tracks, then add a matching filter+render
+                 block in the renderEvents() function in dashboard-client.ts -->
+            <div class="event-subtab-bar" role="tablist">
+              <button class="event-subtab-btn active" data-event-tab="storage" type="button">Storage</button>
+              <button class="event-subtab-btn" data-event-tab="harvest" type="button">Harvest</button>
+              <button class="event-subtab-btn" data-event-tab="combat" type="button">Combat</button>
+            </div>
+            <div class="event-subtab-panel active" data-event-panel="storage">
+              <div id="storageEventsList" class="list-section"></div>
+            </div>
+            <div class="event-subtab-panel" data-event-panel="harvest">
+              <div id="harvestEventsList" class="list-section"></div>
+            </div>
+            <div class="event-subtab-panel" data-event-panel="combat">
+              <div id="combatEventsList" class="list-section"></div>
+            </div>
+          </div>
+        </section>
+      </div>
     </div>
-    <section class="tab-panel active" data-world-panel="upgrade-plans">
-      <div class="card">
-        <div class="label" style="margin-bottom: 10px;">Upgrade Plans</div>
-        <div id="upgradePlansList" class="world-list"></div>
-      </div>
-    </section>
-    <section class="tab-panel" data-world-panel="world-npcs">
-      <div class="card">
-        <div class="label" style="margin-bottom: 10px;">NPCs Seen</div>
-        <div id="npcsList" class="list-section"></div>
-      </div>
-    </section>
-    <section class="tab-panel" data-world-panel="world-mobs">
-      <div class="card">
-        <div class="label" style="margin-bottom: 10px;">Mobs Seen</div>
-        <div id="mobsList" class="list-section"></div>
-      </div>
-    </section>
-    <section class="tab-panel" data-world-panel="world-objects">
-      <div class="card">
-        <div class="label" style="margin-bottom: 10px;">World Objects</div>
-        <div id="objectsList" class="list-section"></div>
-      </div>
-    </section>
-    <section class="tab-panel" data-world-panel="events">
-      <div class="card">
-        <div class="label" style="margin-bottom: 10px;">Raw Server Events <span style="font-weight:400;font-size:0.8em;opacity:0.6;">(last 200)</span></div>
-        <div id="eventsList" class="list-section"></div>
-      </div>
-    </section>
     <div class="payload-split" style="margin-top: 16px; display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
       <div class="card">
         <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px;">

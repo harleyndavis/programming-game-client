@@ -392,6 +392,25 @@ export const createDashboard = (port: number) => {
                     return;
                 }
 
+                if (url && url.startsWith("/images/")) {
+                    const filename = url.slice("/images/".length);
+                    if (filename.includes("..") || filename.includes("/") || filename.includes("\\")) {
+                        writeError(res, 400, "Invalid path");
+                        return;
+                    }
+                    const imagePath = join(__dirname, "data/images", filename);
+                    try {
+                        const content = readFileSync(imagePath);
+                        res.statusCode = 200;
+                        res.setHeader("Content-Type", "image/svg+xml; charset=utf-8");
+                        res.setHeader("Cache-Control", "no-store");
+                        res.end(content);
+                    } catch {
+                        writeError(res, 404, "Not Found");
+                    }
+                    return;
+                }
+
                 if (url === "/events") {
                     res.statusCode = 200;
                     res.setHeader("Content-Type", "text/event-stream");
