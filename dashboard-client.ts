@@ -12,6 +12,7 @@ const objectsListEl = document.getElementById("objectsList");
 const storageEventsListEl = document.getElementById("storageEventsList");
 const harvestEventsListEl = document.getElementById("harvestEventsList");
 const combatEventsListEl = document.getElementById("combatEventsList");
+const arenaEventsListEl = document.getElementById("arenaEventsList");
 const connectionBannerEl = document.getElementById("connectionBanner");
 const connectionMsgEl = document.getElementById("connectionMsg");
 const receivedAtEl = document.getElementById("receivedAt");
@@ -841,17 +842,23 @@ const render = (payload: any) => {
   renderWorld(payload.world, payload.upgradePlans);
 
   // ── Events ──────────────────────────────────────────────────────────────────
-  // renderEvents() routes server events into per-category subtabs.
-  // To add a new category: add a subtab in dashboard.html (see comment there),
-  // then add a filter + renderEventList() call below.
-  const renderEvents = (events: Array<{ ts: string; name: string; data: unknown }>) => {
-    const renderEventList = (containerEl: HTMLElement | null, filtered: typeof events, emptyText: string) => {
+  // Each category arrives from the server as its own buffer. renderEvents() just
+  // renders each into its subtab. To add a new category: add a subtab in
+  // dashboard.html (see comment there), then add a renderEventList() call below.
+  type RawEvent = { ts: string; name: string; data: unknown };
+  const renderEvents = (
+    storageEvents: RawEvent[],
+    harvestEvents: RawEvent[],
+    combatEvents: RawEvent[],
+    arenaEvents: RawEvent[],
+  ) => {
+    const renderEventList = (containerEl: HTMLElement | null, events: RawEvent[], emptyText: string) => {
       if (!containerEl) return;
-      if (filtered.length === 0) {
+      if (events.length === 0) {
         containerEl.innerHTML = '<div class="list-row"><span class="list-title" style="opacity:0.5;">' + escapeHtml(emptyText) + '</span></div>';
         return;
       }
-      containerEl.innerHTML = filtered.toReversed().map((evt) => {
+      containerEl.innerHTML = events.toReversed().map((evt) => {
         const dataStr = typeof evt.data === 'object' && evt.data !== null
           ? JSON.stringify(evt.data, null, 1)
           : String(evt.data ?? '');
@@ -866,24 +873,18 @@ const render = (payload: any) => {
       }).join("");
     };
 
-    renderEventList(
-      storageEventsListEl,
-      events.filter(e => e.name === 'storageCharged' || e.name === 'storageEmptied' || e.name === 'deposited' || e.name === 'withdrew'),
-      "No storage events yet."
-    );
-    renderEventList(
-      harvestEventsListEl,
-      events.filter(e => e.name === 'beganHarvesting' || e.name === 'harvested'),
-      "No harvest events yet."
-    );
-    renderEventList(
-      combatEventsListEl,
-      events.filter(e => e.name === 'attacked' || e.name === 'attackStarted'),
-      "No combat events yet."
-    );
+    renderEventList(storageEventsListEl, storageEvents, "No storage events yet.");
+    renderEventList(harvestEventsListEl, harvestEvents, "No harvest events yet.");
+    renderEventList(combatEventsListEl, combatEvents, "No combat events yet.");
+    renderEventList(arenaEventsListEl, arenaEvents, "No arena events yet.");
   };
 
-  renderEvents(payload.events ?? []);
+  renderEvents(
+    payload.storageEvents ?? [],
+    payload.harvestEvents ?? [],
+    payload.combatEvents ?? [],
+    payload.arenaEvents ?? [],
+  );
 };
 
 fetch("/state")
