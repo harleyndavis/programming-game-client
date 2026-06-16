@@ -744,13 +744,15 @@ const decide = (opts: {
   if (playerHp <= 0) return { type: "respawn" };
 
   if (recoveringAtHome) {
-    // While waiting to heal, do housekeeping: equip, craft, buy, sell.
-    if (gearToEquip) return { type: "equip", item: gearToEquip.item, slot: gearToEquip.slot };
-    if (recipeToCraft) return { type: "craft", recipeId: recipeToCraft.recipe!.id };
-    if (upgradesPlan.length > 0) {
-      return { type: "buy", items: upgradesPlan[0].items, merchant: upgradesPlan[0].merchant };
+    // Only do housekeeping once close to home; otherwise go home.
+    if (distanceBetween(playerPosition, HOME_POSITION) < HOME_CHORES_CLEAR_RADIUS) {
+      if (gearToEquip) return { type: "equip", item: gearToEquip.item, slot: gearToEquip.slot };
+      if (recipeToCraft) return { type: "craft", recipeId: recipeToCraft.recipe!.id };
+      if (upgradesPlan.length > 0) {
+        return { type: "buy", items: upgradesPlan[0].items, merchant: upgradesPlan[0].merchant };
+      }
+      if (sellOpportunity) return { type: "sell", items: sellOpportunity.items, merchant: sellOpportunity.merchant };
     }
-    if (sellOpportunity) return { type: "sell", items: sellOpportunity.items, merchant: sellOpportunity.merchant };
     return { type: "return-home-recover" };
   }
   // Survival behaviors — run regardless of idlingAtHome.
@@ -775,6 +777,9 @@ const decide = (opts: {
     if (nearbyHuntTarget) return { type: "attack", targetId: nearbyHuntTarget.unit.id, distance: nearbyHuntTarget.distance };
     return { type: "explore", to: huntPatrolTo(playerPosition, huntRadius) };
   }
+  // Self-defense when not recovering: fight back if attacked while doing chores.
+  if (attackingMonster)
+    return { type: "attack", targetId: attackingMonster.unit.id, distance: attackingMonster.distance };
   // idlingAtHome / finishingHomeChores: equip, craft, buy, sell; no combat or exploration.
   if (idlingAtHome || finishingHomeChores) {
     if (gearToEquip) return { type: "equip", item: gearToEquip.item, slot: gearToEquip.slot };
@@ -785,9 +790,6 @@ const decide = (opts: {
     if (sellOpportunity) return { type: "sell", items: sellOpportunity.items, merchant: sellOpportunity.merchant };
     return { type: "return-home-idle" };
   }
-  // Self-defense: fight back against anything that recently attacked us.
-  if (attackingMonster)
-    return { type: "attack", targetId: attackingMonster.unit.id, distance: attackingMonster.distance };
   // Attack nearby monsters when not busy.
   if (nearbyMonster)
     return { type: "attack", targetId: nearbyMonster.unit.id, distance: nearbyMonster.distance };
