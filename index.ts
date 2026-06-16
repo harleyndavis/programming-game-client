@@ -1,6 +1,6 @@
 import { connect } from "programming-game";
 import { config } from "dotenv";
-import { UNIT_TYPE, NPC_TYPE, ClientSideUnit, ClientSideNPC, ClientSideMonster, GameObject } from "programming-game/types";
+import { UNIT_TYPE, NPC_TYPE, ClientSideUnit, ClientSideNPC, ClientSideMonster, GameObject, Tree } from "programming-game/types";
 import { createDashboard } from "./dashboard";
 import { toDashboardSnapshot } from "./snapshot";
 import { UpgradePlanItem } from "./bot-types";
@@ -213,6 +213,9 @@ const getChainedIngredients = (
 type UpgradeTarget = {
   itemId: string;
   slot: string;
+  tier: number;
+  gain: number;
+  reachable: boolean;
   // null means buy-only (no craftable recipe available)
   recipe: {
     id: string;
@@ -309,8 +312,8 @@ const computeUpgradeTargets = (opts: {
     const equippedDefense = equippedDef?.stats?.defense ?? 0;
     const equippedDps = ((equippedDef as any)?.damage ?? 0) * ((equippedDef as any)?.attacksPerSecond ?? 1);
 
-    let bestNonBlocked: { itemId: string; tier: number; gain: number; recipe: UpgradeTarget['recipe'] } | null = null;
-    let bestBlocked: { itemId: string; gain: number; recipe: UpgradeTarget['recipe'] } | null = null;
+    let bestNonBlocked: { itemId: string; tier: number; gain: number; reachable: boolean; recipe: UpgradeTarget['recipe'] } | null = null;
+    let bestBlocked: { itemId: string; tier: number; gain: number; reachable: boolean; recipe: UpgradeTarget['recipe'] } | null = null;
 
     for (const [itemId, itemDef] of Object.entries(items)) {
       if (!itemDef) continue;
@@ -322,19 +325,9 @@ const computeUpgradeTargets = (opts: {
       const dps = ((itemDef as any).damage ?? 0) * ((itemDef as any).attacksPerSecond ?? 1);
       if (defense <= equippedDefense && dps <= equippedDps) continue;
 
-      // Gate ranged weapons on ammo availability.
-      const requiredAmmoType = WEAPON_AMMO_REQUIREMENT[itemDef.type ?? ''];
-      if (requiredAmmoType) {
-        const ammoObtainable = Object.entries(items).some(([ammoId, ammoDef]) =>
-          ammoDef?.ammoType === requiredAmmoType &&
-          canObtainChain(ammoId, inventory, allMerchantSelling, recipes)
-        );
-        if (!ammoObtainable) continue;
-      }
-
       const recipe = recipes.find(r => itemId in r.output && r.station == null) ?? null;
       const inMerchant = itemId in allMerchantSelling && !!allMerchantSelling[itemId];
-      if (!recipe && !inMerchant) continue; // no known acquisition path
+      const reachable = !!recipe || !!inMerchant;
 
       const gain = (defense - equippedDefense) + (dps - equippedDps);
       const recipeEntry = recipe?.id
@@ -345,19 +338,23 @@ const computeUpgradeTargets = (opts: {
 
       if (tier < 5) {
         if (bestNonBlocked === null || tier < bestNonBlocked.tier || (tier === bestNonBlocked.tier && gain < bestNonBlocked.gain)) {
-          bestNonBlocked = { itemId, tier, gain, recipe: recipeEntry };
+          bestNonBlocked = { itemId, tier, gain, reachable, recipe: recipeEntry };
         }
       } else {
         if (bestBlocked === null || gain < bestBlocked.gain) {
-          bestBlocked = { itemId, gain, recipe: recipeEntry };
+          bestBlocked = { itemId, tier, gain, reachable, recipe: recipeEntry };
         }
       }
     }
 
     const winner = bestNonBlocked ?? bestBlocked;
-    if (winner) targets.push({ itemId: winner.itemId, slot, recipe: winner.recipe });
+    if (winner) targets.push({ itemId: winner.itemId, slot, tier: winner.tier, gain: winner.gain, reachable: winner.reachable, recipe: winner.recipe });
   }
 
+  targets.sort((a, b) => {
+    if (a.reachable !== b.reachable) return a.reachable ? -1 : 1;
+    return a.tier - b.tier || b.gain - a.gain;
+  });
   return targets;
 };
 
@@ -372,6 +369,24 @@ const getTargetItemsToKeep = (
     if (!target.recipe) continue;
     getChainedIngredients(target.itemId, recipes).forEach(id => result.add(id));
     for (const toolId of target.recipe.required) result.add(toolId as string);
+  }
+  return result;
+};
+
+// Returns item IDs needed to recraft currently-equipped craftable items.
+// Kept in storage as a death-recovery buffer so the bot can recraft lost gear.
+const getEquippedRecipeInputs = (
+  equipment: Record<string, string | null | undefined>,
+  recipes: RecipeList,
+): Set<string> => {
+  const result = new Set<string>();
+  for (const itemId of Object.values(equipment)) {
+    if (!itemId) continue;
+    getChainedIngredients(itemId, recipes).forEach(id => result.add(id));
+    const recipe = recipes.find(r => itemId in r.output);
+    if (recipe) {
+      for (const toolId of (recipe.required ?? [])) result.add(toolId as string);
+    }
   }
   return result;
 };
@@ -418,11 +433,14 @@ const computeTargetsToBuyFromMerchant = (opts: {
   return basket;
 };
 
-// Returns the first upgrade target whose recipe can be crafted right now
-// (all inputs and required tools present in inventory).
+// Returns the first upgrade target (or sub-step ingredient) whose recipe can be
+// crafted right now from inventory.  Walks the ingredient chain when direct
+// inputs aren't available but a sub-recipe is craftable, enabling multi-step
+// crafting (e.g. ratPelt → lightLeather → lightLeatherHelm).
 const findCraftableTarget = (
   targets: UpgradeTarget[],
   inventory: Partial<Record<string, number>>,
+  recipes: RecipeList,
 ): UpgradeTarget | null => {
   for (const target of targets) {
     if (!target.recipe) continue;
@@ -430,11 +448,81 @@ const findCraftableTarget = (
     for (const [inputId, qty] of Object.entries(target.recipe.input)) {
       if ((inventory[inputId] ?? 0) < (qty ?? 0)) { canCraft = false; break; }
     }
-    if (!canCraft) continue;
-    for (const toolId of target.recipe.required) {
-      if ((inventory[toolId as string] ?? 0) < 1) { canCraft = false; break; }
+    if (canCraft) {
+      for (const toolId of target.recipe.required) {
+        if ((inventory[toolId as string] ?? 0) < 1) { canCraft = false; break; }
+      }
+      if (canCraft) return target;
     }
-    if (canCraft) return target;
+    // Not directly craftable — walk ingredient chain for a craftable sub-step.
+    const subStep = findCraftableSubStep(target.recipe, inventory, recipes, new Set<string>());
+    if (subStep) {
+      return {
+        itemId: subStep.recipeId,
+        slot: target.slot,
+        tier: 0,
+        gain: 0,
+        reachable: true,
+        recipe: subStep.recipe,
+      };
+    }
+  }
+  return null;
+};
+
+// Returns the first upgrade target with a recipe, preferring non-blocked (tier < 5)
+// targets. Used as a fallback so the bot always has a next craft to work toward
+// even when nothing is immediately craftable.
+const findNextCraftTarget = (targets: UpgradeTarget[]): UpgradeTarget | null => {
+  for (const target of targets) {
+    if (target.reachable) return target;
+  }
+  return targets[0] ?? null;
+};
+
+// Walk the ingredient chain of a recipe to find the first item whose
+// recipe can be crafted directly from inventory (all inputs + tools).
+// visited prevents cycles in recursive ingredient chains.
+const findCraftableSubStep = (
+  recipe: NonNullable<UpgradeTarget['recipe']>,
+  inventory: Partial<Record<string, number>>,
+  recipes: RecipeList,
+  visited: Set<string>,
+): { recipeId: string; recipe: UpgradeTarget['recipe'] } | null => {
+  for (const [inputId, neededQty] of Object.entries(recipe.input)) {
+    const have = inventory[inputId] ?? 0;
+    if (have >= (neededQty ?? 0)) continue;
+    if (visited.has(inputId)) continue;
+    visited.add(inputId);
+    const inputRecipe = recipes.find(r => inputId in r.output && r.station == null);
+    if (!inputRecipe || !inputRecipe.id) continue;
+    let canCraft = true;
+    for (const [subId, subQty] of Object.entries(inputRecipe.input)) {
+      if ((inventory[subId] ?? 0) < (subQty ?? 0)) { canCraft = false; break; }
+    }
+    if (canCraft) {
+      for (const toolId of inputRecipe.required ?? []) {
+        if ((inventory[toolId as string] ?? 0) < 1) { canCraft = false; break; }
+      }
+    }
+    if (canCraft) {
+      return {
+        recipeId: inputRecipe.id,
+        recipe: {
+          id: inputRecipe.id,
+          input: inputRecipe.input as Partial<Record<string, number>>,
+          required: inputRecipe.required ?? [],
+        },
+      };
+    }
+    // Not directly craftable — recurse into the sub-recipe
+    const subRecipe: UpgradeTarget['recipe'] = {
+      id: inputRecipe.id,
+      input: inputRecipe.input as Partial<Record<string, number>>,
+      required: inputRecipe.required ?? [],
+    };
+    const deeper = findCraftableSubStep(subRecipe, inventory, recipes, visited);
+    if (deeper) return deeper;
   }
   return null;
 };
@@ -559,7 +647,8 @@ type Decision =
   | { type: "deposit"; items: Partial<Record<string, number>>; banker: ClientSideUnit }
   | { type: "withdraw"; items: Partial<Record<string, number>>; banker: ClientSideUnit }
   | { type: "attack"; targetId: string; distance: number }
-  | { type: "explore"; to: { x: number; y: number } };
+  | { type: "explore"; to: { x: number; y: number } }
+  | { type: "harvest"; targetId: string };
 
 /** Returns true when two decisions are meaningfully different. */
 const decisionChanged = (prev: Decision | null, next: Decision): boolean => {
@@ -580,6 +669,8 @@ const decisionChanged = (prev: Decision | null, next: Decision): boolean => {
     return prev.recipeId !== next.recipeId;
   if (next.type === "eat" && prev.type === "eat")
     return prev.item !== next.item;
+  if (next.type === "harvest" && prev.type === "harvest")
+    return prev.targetId !== next.targetId;
   return false;
 };
 
@@ -604,6 +695,16 @@ let lastDepositMessage = '';
 let depositInProgress = false;
 let depositCachedItems: Record<string, number> | null = null;
 let depositCachedBanker: ClientSideUnit | null = null;
+// Last known equipped item per slot — persists across death so recovery
+// materials remain protected even when equipment is temporarily empty.
+const lastEquipment: Record<string, string> = {};
+
+// Tracks the last unit that attacked us, for defensive combat.
+let lastAttackerId: string | null = null;
+let lastAttackerTicksLeft = 0;
+const LAST_ATTACKER_TICK_TIMEOUT = 15;
+// Captured from the first heartbeat — used for event target comparisons.
+let myUnitId: string | null = null;
 
 const RAW_EVENT_BUFFER_SIZE = 200;
 const rawEventBuffer: Array<{ ts: string; name: string; data: unknown }> = [];
@@ -632,8 +733,13 @@ const decide = (opts: {
   gearToEquip: { item: string; slot: string } | null;
   recipeToCraft: UpgradeTarget | null;
   finishingHomeChores: boolean;
+  nearbyTree: { obj: Tree; distance: number } | undefined;
+  isHarvesting: boolean;
+  attackingMonster:
+  | { unit: { id: string; position: { x: number; y: number } }; distance: number }
+  | undefined;
 }): Decision => {
-  const { playerHp, maxHp, lowHpThreshold, playerPosition, nearbyMonster, isEncumbered, sellOpportunity, heaviestInventoryItem, playerCalories, maxCalories, cheapestFood, isHunting, huntRadius, nearbyHuntTarget, nearbyThreat, upgradesPlan, gearToEquip, recipeToCraft, finishingHomeChores } = opts;
+  const { playerHp, maxHp, lowHpThreshold, playerPosition, nearbyMonster, isEncumbered, sellOpportunity, heaviestInventoryItem, playerCalories, maxCalories, cheapestFood, isHunting, huntRadius, nearbyHuntTarget, nearbyThreat, upgradesPlan, gearToEquip, recipeToCraft, finishingHomeChores, nearbyTree, isHarvesting, attackingMonster } = opts;
 
   if (playerHp <= 0) return { type: "respawn" };
 
@@ -679,9 +785,20 @@ const decide = (opts: {
     if (sellOpportunity) return { type: "sell", items: sellOpportunity.items, merchant: sellOpportunity.merchant };
     return { type: "return-home-idle" };
   }
-  // Let the SDK handle moving into range — attack() is "move to and attack".
+  // Self-defense: fight back against anything that recently attacked us.
+  if (attackingMonster)
+    return { type: "attack", targetId: attackingMonster.unit.id, distance: attackingMonster.distance };
+  // Attack nearby monsters when not busy.
   if (nearbyMonster)
     return { type: "attack", targetId: nearbyMonster.unit.id, distance: nearbyMonster.distance };
+  // Try harvesting nearby trees when not busy.
+  if (nearbyTree && !isHarvesting) {
+    const treeDist = distanceBetween(playerPosition, nearbyTree.obj.position!);
+    if (treeDist < 1.0) {
+      return { type: "harvest", targetId: nearbyTree.obj.id };
+    }
+    return { type: "explore", to: nearbyTree.obj.position! };
+  }
   const dir = EXPLORE_DIRECTIONS[exploreDirectionIndex];
   return { type: "explore", to: { x: playerPosition.x + dir.x * 10, y: playerPosition.y + dir.y * 10 } };
 };
@@ -751,27 +868,36 @@ let lastArenaOpponents: Array<{ id: string; hp: number | null }> = [];
 // the open rather than freezing in place mid-hunt.
 let emergencyModeActive = false;
 
+let disconnectFromGame: (() => void) | null = null;
+
 const activateEmergencyMode = (label: string, reason: unknown, exitCode = 1) => {
   if (emergencyModeActive) return;
   emergencyModeActive = true;
   try { logger.tick({ ctx: 'overworld', pos: { x: 0, y: 0 }, hp: 0, maxHp: 0, calories: 0, weight: 0, decision: `${label}: ${String(reason)}`, level: 'warn' }); } catch { /* never block shutdown */ }
   try { dashboard.stop(); } catch { /* never block shutdown */ }
   // Keep alive briefly so one onTick fires the move-home intent; then exit.
-  setTimeout(() => process.exit(exitCode), 500);
+  // Disconnect from game AFTER the delay so heartbeats keep flowing for the tick.
+  setTimeout(() => {
+    try { disconnectFromGame?.(); } catch { /* never block shutdown */ }
+    // Destroy stdio pipes to release the IPC handle PM2 uses — this is the handle
+    // that can keep a Windows process alive even after process.exit() is called.
+    try { process.stdin.destroy(); } catch { /* never block shutdown */ }
+    try { process.stdout.destroy(); } catch { /* never block shutdown */ }
+    try { process.stderr.destroy(); } catch { /* never block shutdown */ }
+    process.exit(exitCode);
+  }, 500);
 };
 
 process.on('uncaughtException', (err) => activateEmergencyMode('uncaughtException', err));
 process.on('unhandledRejection', (reason) => activateEmergencyMode('unhandledRejection', reason));
 process.on('SIGINT', () => activateEmergencyMode('SIGINT', 'process interrupted', 0));
 process.on('SIGTERM', () => activateEmergencyMode('SIGTERM', 'process terminated', 0));
-// PM2 sends a 'shutdown' IPC message when shutdown_with_message is enabled —
-// more reliable than signals on Windows.
 process.on('message', (msg: unknown) => {
   if (msg === 'shutdown') activateEmergencyMode('shutdown', 'PM2 shutdown', 0);
 });
 
 const userId = assertEnv("USER_ID");
-connect({
+disconnectFromGame = connect({
   credentials: {
     id: userId,
     key: assertEnv("API_KEY"),
@@ -781,7 +907,24 @@ connect({
       rawEventBuffer.push({ ts: new Date().toISOString(), name: eventName, data: evt });
       if (rawEventBuffer.length > RAW_EVENT_BUFFER_SIZE) rawEventBuffer.shift();
     }
-    if (eventName === 'storageCharged') {
+    if (eventName === 'beganHarvesting' || eventName === 'harvested') {
+      rawEventBuffer.push({ ts: new Date().toISOString(), name: eventName, data: evt });
+      if (rawEventBuffer.length > RAW_EVENT_BUFFER_SIZE) rawEventBuffer.shift();
+      logger.addExtra(eventName, { objectId: evt.objectId, ...(eventName === 'beganHarvesting' ? { duration: evt.duration, gameTime: evt.gameTime } : {}) });
+    } else if (eventName === 'takingAction' && evt.action === 'attack' && myUnitId && evt.actionTarget === myUnitId) {
+      // Proactive defense: a unit started an attack targeting us.
+      lastAttackerId = evt.unitId;
+      lastAttackerTicksLeft = LAST_ATTACKER_TICK_TIMEOUT;
+      rawEventBuffer.push({ ts: new Date().toISOString(), name: 'attackStarted', data: { attacker: evt.unitId } });
+      if (rawEventBuffer.length > RAW_EVENT_BUFFER_SIZE) rawEventBuffer.shift();
+      logger.addExtra('defensiveTrigger', { attacker: evt.unitId, source: 'takingAction' });
+    } else if (eventName === 'attacked' && myUnitId && evt.attacked === myUnitId) {
+      lastAttackerId = evt.attacker;
+      lastAttackerTicksLeft = LAST_ATTACKER_TICK_TIMEOUT;
+      rawEventBuffer.push({ ts: new Date().toISOString(), name: eventName, data: evt });
+      if (rawEventBuffer.length > RAW_EVENT_BUFFER_SIZE) rawEventBuffer.shift();
+      logger.addExtra('attacked', { attacker: evt.attacker, damage: evt.damage, hp: evt.hp });
+    } else if (eventName === 'storageCharged') {
       logger.addExtra('storageCharged', { coinsLeft: evt.coinsLeft, charged: evt.charged });
     } else if (eventName === 'storageEmptied') {
       logger.addExtra('storageEmptied', true);
@@ -838,6 +981,7 @@ connect({
       prevArenaTimeRemaining = arenaTimeRemaining;
 
       const { player } = heartbeat;
+      if (!myUnitId && player.id) myUnitId = player.id;
       const arenaHp = isFiniteNumber(player.hp) ? player.hp : 0;
       const arenaPosition = isFinitePosition(player.position) ? player.position : { x: 0, y: 0 };
       const arenaMaxCalories = typeof heartbeat.constants?.maxCalories === "number" ? heartbeat.constants.maxCalories : 3_000;
@@ -1009,6 +1153,10 @@ connect({
     let depositOverride: Decision | null = null;
 
     const { player } = heartbeat;
+    if (!myUnitId && player.id) {
+      myUnitId = player.id;
+      tickExtras.myUnitId = myUnitId;
+    }
     const playerHp = isFiniteNumber(player.hp) ? player.hp : 0;
     const playerPosition = isFinitePosition(player.position)
       ? player.position
@@ -1069,6 +1217,38 @@ connect({
     if (recoveringAtHome || idlingAtHome || finishingHomeChores || playerHp <= 0) {
       stickyTargetId = null;
       stickyTargetLostTicks = 0;
+    }
+
+    // Scan for nearby harvestable trees, only if we have a felling axe equipped.
+    const hasFellingAxe = (player.equipment?.weapon
+      && heartbeat.items?.[player.equipment.weapon]?.type === 'fellingAxe') ?? false;
+    const treeObjects = Object.values(heartbeat.gameObjects ?? {}).filter(
+      (obj): obj is Tree => obj.type === 'tree' && isFinitePosition(obj.position),
+    );
+    const nearbyTree = hasFellingAxe
+      ? treeObjects
+          .map((obj) => ({ obj, distance: distanceBetween(playerPosition, obj.position!) }))
+          .sort((a, b) => a.distance - b.distance)[0]
+      : undefined;
+    if (treeObjects.length > 0) {
+      tickExtras.treesFound = treeObjects.map(t => ({ id: t.id, treeType: t.treeType, pos: t.position }));
+    }
+    const isHarvesting = player.action === 'harvest';
+    if (isHarvesting && player.actionStart) {
+      tickExtras.isHarvesting = { duration: player.actionDuration, target: player.actionTarget, remaining: (player.actionStart + (player.actionDuration ?? 0)) - (heartbeat.gameTime ?? 0) };
+    }
+
+    // Attacker tracking: if something hit us recently, fight back regardless
+    // of harvest or hunting state.
+    if (lastAttackerTicksLeft > 0) lastAttackerTicksLeft -= 1;
+    if (lastAttackerTicksLeft <= 0) lastAttackerId = null;
+    const attackerUnit = lastAttackerId ? heartbeat.units[lastAttackerId] : undefined;
+    const attackingMonster =
+      attackerUnit && (typeof attackerUnit.hp !== "number" || attackerUnit.hp > 0) && isFinitePosition(attackerUnit.position)
+        ? { unit: attackerUnit, distance: distanceBetween(playerPosition, attackerUnit.position!) }
+        : undefined;
+    if (attackingMonster) {
+      tickExtras.attackingMonster = { id: attackingMonster.unit.id, distance: attackingMonster.distance, ticksLeft: lastAttackerTicksLeft };
     }
 
     // bookkeeping: update recovery state once per tick before deciding
@@ -1249,7 +1429,16 @@ connect({
     // Without this, depositing a craftable ingredient would make it disappear from the
     // upgrade targets, dropping it from keepItems → non-protected withdraw pulls it back →
     // deposit again → infinite cycle (e.g. rat pelts ↔ leather armor).
-    const combinedInventory = { ...heartbeat.player.storage, ...player.inventory } as Partial<Record<string, number>>;
+    // Merge storage + inventory by summing quantities (spread overwrites, doesn't add).
+    const combinedInventory: Partial<Record<string, number>> = {};
+    for (const source of [heartbeat.player.storage, player.inventory]) {
+      if (!source) continue;
+      for (const [itemId, qty] of Object.entries(source)) {
+        if (typeof qty === 'number' && qty > 0) {
+          combinedInventory[itemId] = (combinedInventory[itemId] ?? 0) + qty;
+        }
+      }
+    }
     const upgradeTargets = computeUpgradeTargets({
       equipment: (player.equipment ?? {}) as Record<string, string | null | undefined>,
       inventory: combinedInventory,
@@ -1259,11 +1448,26 @@ connect({
       playerCoins,
     });
     const keepItems = getTargetItemsToKeep(upgradeTargets, recipesArray);
+    // Update lastEquipment each tick but never clear on death: this keeps
+    // recovery materials protected across the window when equipment is empty.
+    for (const [slot, itemId] of Object.entries((player.equipment ?? {}) as Record<string, string | null | undefined>)) {
+      if (itemId) lastEquipment[slot] = itemId;
+    }
+    const recoveryItems = getEquippedRecipeInputs(lastEquipment, recipesArray);
+    // Union of upgrade-target inputs and equipped-gear recraft inputs — both
+    // must be protected from selling and kept in storage as a death buffer.
+    const protectedItems = new Set(Array.from(keepItems).concat(Array.from(recoveryItems)));
     const atHome = recoveringAtHome || idlingAtHome || finishingHomeChores;
 
     // The upgrade target we'd craft next from combined (storage + pocket) inventory.
     // Drives deposit exclusion and the withdraw-for-craft override below.
-    const activeCraft = atHome ? findCraftableTarget(upgradeTargets, combinedInventory) : null;
+    const activeCraft = atHome ? findCraftableTarget(upgradeTargets, combinedInventory, recipesArray) : null;
+    // Display-only — no inventory or withdraw impact (risk of death loss).
+    const nextCraftTarget = activeCraft ?? findNextCraftTarget(upgradeTargets);
+
+    // Only protect ingredients for the currently-craftable target from deposit.
+    // Non-craftable targets are shown on the dashboard via isNextCraft but must not
+    // affect inventory — carrying unprotected ingredients risks losing them on death.
     const activeCraftItems: Set<string> = activeCraft?.recipe
       ? new Set([
         ...Object.keys(activeCraft.recipe.input),
@@ -1281,14 +1485,14 @@ connect({
     }
     for (const [itemId, qty] of Object.entries(invRecord)) {
       if (itemId === 'copperCoin' || qty <= 0) continue;
-      if (keepItems.has(itemId) && !activeCraftItems.has(itemId)) toDeposit[itemId] = qty;
+      if (protectedItems.has(itemId) && !activeCraftItems.has(itemId)) toDeposit[itemId] = qty;
     }
 
     const toSell = computeItemsToSell({
       inventory: player.inventory ?? {},
       items: heartbeat.items as unknown as ItemMap,
       quests: (player.quests ?? {}) as QuestMap,
-      keepItems,
+      keepItems: protectedItems,
       maxCalories,
     });
     const sellOpportunity = findBestSellMerchant(visibleMerchants, toSell);
@@ -1363,7 +1567,7 @@ connect({
       : null;
 
     const recipeToCraft = atHome
-      ? findCraftableTarget(upgradeTargets, player.inventory ?? {})
+      ? findCraftableTarget(upgradeTargets, player.inventory ?? {}, recipesArray)
       : null;
 
     const upgradePlanItems: UpgradePlanItem[] = upgradeTargets.map((target, index) => {
@@ -1386,6 +1590,7 @@ connect({
         requirements,
         recipeId: (target.recipe?.id ?? null) as any,
         canBuy: target.itemId in allMerchantSelling && !!allMerchantSelling[target.itemId],
+        isNextCraft: nextCraftTarget?.itemId === target.itemId,
       };
     });
 
@@ -1446,6 +1651,8 @@ connect({
     }
 
     // ── Withdraw ingredients/tools from storage for the active craft ─────────
+    // Only withdraw for targets that are actually craftable — withdrawing for
+    // non-craftable targets would put valuable items at risk of death loss.
     if (!withdrawOverride && atHome && nearbyBanker && activeCraft?.recipe) {
       const toWithdrawForCraft: Partial<Record<string, number>> = {};
       const storageRec = storageRecord as Record<string, number>;
@@ -1476,7 +1683,7 @@ connect({
       const toWithdrawFromStorage: Partial<Record<string, number>> = {};
       for (const [itemId, qty] of Object.entries(storageRecord)) {
         if (itemId === 'copperCoin' || typeof qty !== 'number' || qty <= 0) continue;
-        if (!keepItems.has(itemId)) toWithdrawFromStorage[itemId] = qty;
+        if (!protectedItems.has(itemId)) toWithdrawFromStorage[itemId] = qty;
       }
       if (Object.keys(toWithdrawFromStorage).length > 0) {
         withdrawOverride = { type: "withdraw", items: toWithdrawFromStorage, banker: nearbyBanker };
@@ -1504,6 +1711,9 @@ connect({
       gearToEquip,
       recipeToCraft,
       finishingHomeChores,
+      nearbyTree,
+      isHarvesting,
+      attackingMonster,
     });
 
     // Track decision stability for intent conflict detection.
@@ -1528,6 +1738,7 @@ connect({
       if (d.type === "equip") return "equip";
       if (d.type === "craft") return "craft";
       if (d.type === "eat") return "eat";
+      if (d.type === "harvest") return "harvest";
       return "move"; // recover, return-home-idle, return-home, explore, and drop produce a move/idle intent
     };
     const expectedIntent = decisionToIntentType(decision);
@@ -1550,6 +1761,7 @@ connect({
       !(decision.type === "buy" && serverIntentType === "move") &&
       !(decision.type === "deposit" && serverIntentType === "move") &&
       !(decision.type === "withdraw" && serverIntentType === "move") &&
+      !(decision.type === "harvest" && serverIntentType === "move") &&
       // After any decision change, give the server time to acknowledge the new
       // intent before treating a mismatch as a problem.
       decisionStableTicks > INTENT_TRANSITION_GRACE_TICKS;
@@ -1697,6 +1909,10 @@ connect({
       }
       case "explore":
         return player.move(decision.to);
+      case "harvest": {
+        const target = heartbeat.gameObjects?.[decision.targetId] as Tree | undefined;
+        return target ? player.harvest(target) : player.idle();
+      }
     }
   },
 });

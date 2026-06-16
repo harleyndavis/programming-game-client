@@ -26,4 +26,6 @@ export type UpgradePlanItem = {
     requirements: UpgradeRequirement[];
     recipeId: RECIPE | null;
     canBuy: boolean;
+    /** True when this is the next craft target the bot is actively working toward. */
+    isNextCraft: boolean;
 };
