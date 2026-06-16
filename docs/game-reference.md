@@ -87,11 +87,10 @@ Each player has a personal bank vault (`player.storage`) accessible through bank
 
 ## Arena
 
-There is no explicit match-start or match-end event.
+There is no explicit match-start or match-end event. There is a onEvent type "arena" that has the event duration. The onTicks for arena seem to start coming in for them before the onEvent. But it lasts for 60 seconds from the OnEvent.
+Arena is exclusively 1v1 currently.
 
-**Detecting match start:** when an arena heartbeat arrives and the arena timer has advanced, a new match has begun. Log this tick as the match-start boundary and close out the previous match (win/loss/tie) at the same time. If no arena combat log exists yet (cold start), skip the close-out.
-
-**Detecting match end:** if 60 seconds have elapsed since the last arena tick, assume the match has ended. Arena match duration is fixed at 60 seconds.
+NPCs, Players, and Monsters are all valid targets in the arena.
 
 ---
 
