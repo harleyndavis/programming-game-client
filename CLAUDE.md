@@ -47,6 +47,28 @@ When searching src files, only search the root src files and node_modules/progra
  -Never search other node_modules/ directories.
  -Never pass a search path or glob that would match files outside the root or node_modules/programming-game/src.
 
+## Git workflow
+
+Main branch is protected — no direct pushes. All changes land via PR.
+
+### Agent tasks
+
+Every agent working on a code change **must** use `isolation: "worktree"` when spawned. This puts the agent on its own branch and leaves main untouched until a PR is reviewed and merged.
+
+### Parallelism rules
+
+Tasks that touch `index.ts` (extractions, wiring) are **sequential** — merge one PR before starting the next. Merge conflicts on `index.ts` are painful and avoidable.
+
+Tasks that only create new files in `src/` with no `index.ts` edits can run in parallel safely.
+
+### Recommended refactor sequence
+
+When extracting a module from `index.ts`:
+1. Agent creates the new `src/<module>.ts` file (no `index.ts` changes) → PR → merge
+2. Agent wires the module into `index.ts`, removing the extracted logic → PR → merge
+
+This keeps each PR small and conflict-free.
+
 ## Agent skills
 
 ### Issue tracker

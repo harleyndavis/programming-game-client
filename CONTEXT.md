@@ -13,6 +13,20 @@ HP"). Goals are non-blocking: compatible activities (healing, shopping,
 equipping) compete for the action slot each tick rather than running in strict
 sequence.
 
+### Module architecture
+`index.ts` is being decomposed into layered modules to keep the entry point thin and let agents work on separate concerns without colliding on the same file. Dependency flows one direction:
+
+- **Memory** (`src/memory.ts`) — dumb store. Reads and writes world facts (merchant inventory, drop tables, explored cells, heat map sightings, quests). No opinions about what to do with the data; nothing that makes decisions should need to be imported by it.
+- **Character** (`src/character.ts`) — inventory weight, storage info, stat parsing from the heartbeat, and survival wants (e.g. "want a buffer of 6 chicken meat"). Owns "what does the character currently have and need."
+- **Planners** (`src/upgrade-planner.ts`, `src/quest-planner.ts`) — decompose a long-term goal into needs and, where viable, concrete acquisition paths. The upgrade planner determines the next gear target and returns every viable path (buy and/or craft) for it; paths with no known ingredient source are suppressed entirely rather than surfaced as unscored options. Planners never call each other directly — see **Need**.
+- **Pathfinding** (`src/pathfinding.ts`) — peer module, not a planner. Exposes `travelCost(from, to)` for scoring (threat-weighted, used by decisions and planners alike) and `computePath(from, to)` returning a `Path` handle for execution. The handle self-heals: `path.nextWaypoint(currentPos)` recomputes internally if the bot drifts off course, if heat map data changes near the remaining route, or after a distance-based fallback — callers never manage staleness themselves. A path belongs to whichever planner/decision requested it and is tied to that goal, not to what the bot is currently doing — it stays warm while the bot detours (e.g. to fight a monster encountered en route) and is only discarded when the owning planner changes its target. Threat zones are circular regions, not a grid, so routing around them is tangent-point geometry, not search (no A*/navmesh needed) — but it must plan the whole route up front, since picking the locally-safest direction each step can walk into a pocket boxed in by higher threat on every remaining side.
+- **Decisions** (`src/decisions.ts`) — the scoring engine described below. Takes a context (current world state, threat level) and a flat list of fully-resolved candidate actions, scores them, picks the winner. Arena and overworld share the same engine — arena is modeled as always presenting max threat level (see **Threat level**) rather than needing separate scoring rules.
+
+### Need (demand aggregation)
+A want for a quantity of an item, reported independently by a producer (an upgrade plan, a quest, a survival want from Character) without that producer knowing who else wants the same item. Needs from every source are merged by a generic, domain-ignorant aggregation step into a per-item total value. A resolver then matches reachable sources (a monster that drops the item, a resource node) to the aggregate, so a single hunt or harvest that satisfies multiple unrelated goals at once (e.g. a quest needs pinewood logs and crafting also needs pinewood logs) is valued correctly instead of being chased twice. Planners and the resolver only ever read the aggregate, never each other — this keeps the dependency graph flat even though real need sources are mutually circular (a quest can both need and produce items that crafting also needs and produces).
+
+**Open question:** needs from different sources don't share a value unit yet — market value (sellable items, has a coin price), stat-delta value (gear upgrades), and survival urgency (calorie deficit, which should spike sharply near zero rather than scale linearly) aren't directly comparable. Treat this as an empirical tuning problem once the bot is running, not something to resolve on paper — per ADR-0001, scoring weights are observable parameters, not constants to get right in advance.
+
 ### Action net value
 Actions are not scored on immediate reward alone. Net value accounts for:
 
@@ -58,6 +72,8 @@ history and heat map data. Drives two decisions:
    when resources (HP, consumables, TP/MP) are fully stocked.
 
 Unknown entities default to high threat until data is collected.
+
+**Arena threat level:** Arena matches always present maximum threat. There is no home to retreat to, no healer, and no option to avoid the fight. The decision engine does not need separate arena scoring rules — it receives max threat as context, and the existing threat-driven logic (spend TP, MP, and consumables freely; do not hold back) follows naturally.
 
 ### Exploration trigger
 The bot expands its search radius when progression is blocked — specifically
@@ -220,24 +236,39 @@ Persistent knowledge about the game world accumulated across ticks and across
 restarts. Stored in SQLite (`better-sqlite3`) — ACID transactions prevent
 corruption on crash, WAL mode allows concurrent reads during writes, and SQL
 aggregates (AVG, SUM/COUNT, bounding-box queries) are a natural fit for drop
-rates, combat averages, and heat map proximity lookups. Five categories:
+rates, combat averages, and heat map proximity lookups. Categories:
 
 - **Safe locations** — discovered towns, healers, and player-built structures
   where the bot can recover. Not limited to (0, 0).
 - **Merchant knowledge** — location, inventory, and prices for every merchant
   ever encountered, including ones discovered far from home.
-- **World heat map** — spatial record of where monsters, resources, and NPCs
-  were observed, with timestamps. Observations expire if not re-confirmed after
-  a set duration. Used to guide exploration and target-farming routes.
+- **Explored cells** — a sparse grid (cell size derived from
+  `player.stats.sightRange`, observed as 10 at baseline but status-dependent,
+  so record the sight range used at the time of each observation rather than
+  hardcoding it) marking which areas have been visually covered. World extent
+  is unconfirmed — exploration has reached at least (1000, 1000) without
+  finding a boundary — so this stores visited cells sparsely, not a bounded
+  dense array.
+- **World heat map** — spatial sightings of monsters, resources (trees, ore),
+  crafting stations, and NPCs, linked to explored-cell coordinates, with a
+  confirmation count and last-seen timestamp. There is no separate "permanent
+  fixture" table: whether trees/ore relocate on respawn and where the smelter
+  is are both unconfirmed, so everything starts as an expiring sighting and
+  earns confidence through repeated re-confirmation rather than being assumed
+  permanent on first sight. Used to guide exploration, assess route danger,
+  and identify target-farming zones.
 - **Combat history** — per monster type: HP (available directly from heartbeat
   units), average damage dealt per hit to the player (not in client data —
   inferred from player HP-delta during combat; may vary), and kill count. Used
   to decide whether to engage a monster or flee, and to estimate fight
-  survivability.
+  survivability. Not spatial — kept separate from heat map sightings.
 - **Drop tables** — per monster type: total kills and per-item drop counts,
   from which drop rates are derived. Enables target-farming for crafting
   ingredients and helps prioritise gear upgrade paths based on realistic
   ingredient acquisition cost.
+- **Quests** — accepted/available quests, keyed to the giving NPC rather than
+  a position: requirements, reward, and status. Not part of the heat map —
+  quests aren't a geographic fact.
 
 Currently absent — the bot only knows what is in the current heartbeat tick.
 
