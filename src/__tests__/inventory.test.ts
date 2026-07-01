@@ -135,7 +135,7 @@ describe('computeItemsToSell', () => {
   };
 
   const quests: QuestMap = {
-    quest1: { steps: [{ type: 'turn_in', requiredItems: { ratPelt: 3 } }] },
+    quest1: { id: 'quest1', start_npc: 'npc1', end_npc: 'npc1', name: 'Quest 1', steps: [{ type: 'turn_in', target: 'npc1', requiredItems: { ratPelt: 3 }, position: {} }] },
   };
 
   it('returns empty when no surplus', () => {

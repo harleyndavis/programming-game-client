@@ -21,6 +21,7 @@ sequence.
 - **`src/equipment.ts`** — gear upgrade planning (target selection, chaining, merchant sourcing)
 - **`src/craft.ts`** — crafting target selection
 - **`src/trade.ts`** — merchant/banker helpers (best sell price, storage fees)
+- **`src/quests.ts`** — quest helpers (completable quest detection, turn-in NPC lookup, reward evaluation, best-quest-to-accept selection)
 
 The following modules remain in `index.ts` and will be extracted when the architecture supports them (tracked in the linked issues):
 
@@ -169,11 +170,11 @@ ingredients (e.g. rat pelts for leather armor) would make them disappear from
 the upgrade targets → they'd drop from `keepItems` → the non-protected withdraw
 would pull them back → deposit → infinite cycle.
 
-**Decision priority chain (line 1412):**
+**Decision priority chain (line ~1116):**
 1. Coin withdraw (for purchase deficit)
 2. Non-protected item withdraw (for selling)
 3. Deposit (coins + keepItems)
-4. `decide()` — equip, craft, buy, sell, or return-home
+4. `decide()` — equip, craft, buy, turn-in quest, sell, accept quest, or return-home
 
 Note: `decide()`'s `recoveringAtHome` branch now includes a sell check (line
 625), so withdrawn non-protected items are sold during recovery instead of
@@ -281,11 +282,20 @@ Currently absent — the bot only knows what is in the current heartbeat tick.
 
 ### Quest
 A task accepted from an NPC that yields a reward (coins, items) on completion.
-Quests are not a separate track — they compete in the same utility scoring
-system as selling or crafting. A turn-in quest that pays better per item than
-selling should be preferred. A quest that provides a crafting ingredient cheaper
-than any other route should be pursued when that ingredient is on the upgrade
-path.
+The bot tracks active quests via `player.quests` (`ActiveQuests`) and accepts
+opportunistically from nearby quest-giver NPCs when there is capacity (max 5).
+Turn-in happens when all required items are in inventory and the turn-in NPC
+is visible. Both actions are gated on NPC proximity — no pathfinding to
+quest-givers (tracked in #8).
+
+**Decision order:** Turn-in is checked before selling in the home chores
+chain (`equip → craft → buy → turnIn → sell`), so quest items are consumed
+by the turn-in instead of being sold for coin. Quest acceptance runs when
+idle and not busy — after harvesting, before exploring. Reward evaluation
+is simple: sum of reward item quantities.
+
+**Available quests** from nearby NPCs are rendered in the dashboard Quests
+tab alongside active quest progress (kill step counts, turn-in requirements).
 
 ### Merchant trade model
 See `docs/game-reference.md` → *Merchants* for the full price-list structure (`trades.selling` / `trades.buying`). When deciding where to sell an item, compare `buying.price` across all visible merchants. The deprecated `wants`/`offers` fields should be ignored.

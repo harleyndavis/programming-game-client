@@ -521,78 +521,142 @@ interface WorldNpc {
   availableQuests: Record<string, AvailableQuest>;
 }
 
-const renderQuests = (npcs: WorldNpc[] | null | undefined) => {
+type ActiveQuestStep = {
+  type?: string;
+  targets?: Record<string, { required?: number; killed?: number }>;
+  requiredItems?: Record<string, number>;
+  position?: { x?: number; y?: number };
+  completed?: boolean;
+  target?: string;
+};
+
+type ActiveQuestData = {
+  id?: string;
+  name?: string;
+  start_npc?: string;
+  end_npc?: string;
+  steps?: ActiveQuestStep[];
+};
+
+const renderActiveQuests = (rawQuests: Record<string, ActiveQuestData> | null | undefined) => {
   if (!questsListEl) return;
-  if (!npcs || npcs.length === 0) {
-    questsListEl.innerHTML = '<div class="list-row"><span class="list-title" style="opacity:0.5;">No NPCs nearby.</span></div>';
+  if (!rawQuests || Object.keys(rawQuests).length === 0) {
     return;
   }
-  const questRows: Array<{ npcName: string; quest: AvailableQuest }> = [];
-  for (const npc of npcs) {
-    const aq = npc.availableQuests || {};
-    const npcName = formatItemName(npc.name || npc.id);
-    for (const questId of Object.keys(aq)) {
-      questRows.push({ npcName, quest: aq[questId] });
-    }
-  }
-  if (questRows.length === 0) {
-    questsListEl.innerHTML = '<div class="list-row"><span class="list-title" style="opacity:0.5;">None of the nearby NPCs offer quests.</span></div>';
-    return;
-  }
-  questsListEl.innerHTML = questRows.map(({ npcName, quest }) => {
-    const gatherReqs: Record<string, number> = {};
-    const killReqs: Record<string, number> = {};
-    let turnInItems: Record<string, number> = {};
-    const steps: NpcQuestStep[] = quest.steps || [];
+  const html = Object.values(rawQuests).map((quest) => {
+    const steps = quest.steps || [];
+    const killProgress: string[] = [];
+    const turnInItems: Record<string, number> = {};
     for (const step of steps) {
-      if (step.type === 'gather' && 'targets' in step) {
-        for (const [item, count] of Object.entries(step.targets)) {
-          if (typeof count === 'number') gatherReqs[item] = (gatherReqs[item] || 0) + count;
+      if (step.type === 'kill' && step.targets) {
+        for (const [monster, info] of Object.entries(step.targets)) {
+          const req = typeof info === 'object' && info !== null ? (info.required ?? 0) : 0;
+          const killed = typeof info === 'object' && info !== null ? (info.killed ?? 0) : 0;
+          killProgress.push(escapeHtml(formatItemName(monster)) + ' <span class="quest-req-count">' + String(killed) + '/' + String(req) + '</span>');
         }
       }
-      if (step.type === 'kill' && 'targets' in step) {
-        for (const [monster, count] of Object.entries(step.targets)) {
-          if (typeof count === 'number') killReqs[monster] = (killReqs[monster] || 0) + count;
-        }
-      }
-      if (step.type === 'turn_in' && 'requiredItems' in step && step.requiredItems) {
+      if (step.type === 'turn_in' && step.requiredItems) {
         for (const [item, count] of Object.entries(step.requiredItems)) {
-          if (typeof count === 'number') turnInItems[item] = (turnInItems[item] || 0) + count;
+          if (typeof count === 'number') turnInItems[item] = count;
         }
       }
     }
-    const allReqs = { ...gatherReqs };
-    for (const [item, count] of Object.entries(turnInItems)) {
-      if (count) allReqs[item] = (allReqs[item] || 0) + count;
-    }
-    const rewards = quest.rewards?.items || {};
-    const reqsHtml = Object.keys(allReqs).length > 0
-      ? '<div class="quest-reqs">' + Object.entries(allReqs).map(([item, count]) =>
+    const turnInHtml = Object.keys(turnInItems).length > 0
+      ? '<div class="quest-reqs">Turn in: ' + Object.entries(turnInItems).map(([item, count]) =>
         '<span class="quest-req-item">' + escapeHtml(lookupItemName(item)) + ' <span class="quest-req-count">×' + escapeHtml(String(count)) + '</span></span>'
       ).join('') + '</div>'
       : '';
-    const killHtml = Object.keys(killReqs).length > 0
-      ? '<div class="quest-kills">' + Object.entries(killReqs).map(([monster, count]) =>
-        '<span class="quest-kill-item">Kill ' + escapeHtml(formatItemName(monster)) + ' <span class="quest-req-count">×' + escapeHtml(String(count)) + '</span></span>'
-      ).join('') + '</div>'
-      : '';
-    const rewardsHtml = Object.keys(rewards).length > 0
-      ? '<div class="quest-rewards">Rewards: ' + Object.entries(rewards).map(([item, count]) =>
-        '<span class="quest-reward-item">' + escapeHtml(lookupItemName(item)) + ' <span class="quest-reward-count">×' + escapeHtml(String(count)) + '</span></span>'
-      ).join('') + '</div>'
-      : '';
     return (
-      '<div class="list-row quest-entry">' +
+      '<div class="list-row quest-entry quest-active">' +
       '<div style="flex:1">' +
-      '<div class="list-title">' + escapeHtml(quest.name || formatItemName(quest.id)) + '</div>' +
-      '<div class="list-meta">' + escapeHtml(npcName) + (quest.repeatable ? ' · Repeatable' : '') + '</div>' +
-      reqsHtml +
-      killHtml +
-      rewardsHtml +
+      '<div class="list-title">' + escapeHtml(quest.name || formatItemName(quest.id || '')) + ' <span class="quest-active-badge">ACTIVE</span></div>' +
+      '<div class="list-meta">Turn in at: ' + escapeHtml(quest.end_npc || '?') + '</div>' +
+      (killProgress.length > 0 ? '<div class="quest-kills">' + killProgress.join(', ') + '</div>' : '') +
+      turnInHtml +
       '</div>' +
       '</div>'
     );
   }).join("");
+  questsListEl.innerHTML = '<div class="quest-section-header">Active Quests</div>' + html;
+};
+
+const renderQuests = (npcs: WorldNpc[] | null | undefined) => {
+  if (!questsListEl) return;
+  const activeHtml = questsListEl.innerHTML;
+  const availableHtml = (() => {
+    if (!npcs || npcs.length === 0) {
+      return '';
+    }
+    const questRows: Array<{ npcName: string; quest: AvailableQuest }> = [];
+    for (const npc of npcs) {
+      const aq = npc.availableQuests || {};
+      const npcName = formatItemName(npc.name || npc.id);
+      for (const questId of Object.keys(aq)) {
+        questRows.push({ npcName, quest: aq[questId] });
+      }
+    }
+    if (questRows.length === 0) return '';
+    return questRows.map(({ npcName, quest }) => {
+      const gatherReqs: Record<string, number> = {};
+      const killReqs: Record<string, number> = {};
+      let turnInItems: Record<string, number> = {};
+      const steps: NpcQuestStep[] = quest.steps || [];
+      for (const step of steps) {
+        if (step.type === 'gather' && 'targets' in step) {
+          for (const [item, count] of Object.entries(step.targets)) {
+            if (typeof count === 'number') gatherReqs[item] = (gatherReqs[item] || 0) + count;
+          }
+        }
+        if (step.type === 'kill' && 'targets' in step) {
+          for (const [monster, count] of Object.entries(step.targets)) {
+            if (typeof count === 'number') killReqs[monster] = (killReqs[monster] || 0) + count;
+          }
+        }
+        if (step.type === 'turn_in' && 'requiredItems' in step && step.requiredItems) {
+          for (const [item, count] of Object.entries(step.requiredItems)) {
+            if (typeof count === 'number') turnInItems[item] = (turnInItems[item] || 0) + count;
+          }
+        }
+      }
+      const allReqs = { ...gatherReqs };
+      for (const [item, count] of Object.entries(turnInItems)) {
+        if (count) allReqs[item] = (allReqs[item] || 0) + count;
+      }
+      const rewards = quest.rewards?.items || {};
+      const reqsHtml = Object.keys(allReqs).length > 0
+        ? '<div class="quest-reqs">' + Object.entries(allReqs).map(([item, count]) =>
+          '<span class="quest-req-item">' + escapeHtml(lookupItemName(item)) + ' <span class="quest-req-count">×' + escapeHtml(String(count)) + '</span></span>'
+        ).join('') + '</div>'
+        : '';
+      const killHtml = Object.keys(killReqs).length > 0
+        ? '<div class="quest-kills">' + Object.entries(killReqs).map(([monster, count]) =>
+          '<span class="quest-kill-item">Kill ' + escapeHtml(formatItemName(monster)) + ' <span class="quest-req-count">×' + escapeHtml(String(count)) + '</span></span>'
+        ).join('') + '</div>'
+        : '';
+      const rewardsHtml = Object.keys(rewards).length > 0
+        ? '<div class="quest-rewards">Rewards: ' + Object.entries(rewards).map(([item, count]) =>
+          '<span class="quest-reward-item">' + escapeHtml(lookupItemName(item)) + ' <span class="quest-reward-count">×' + escapeHtml(String(count)) + '</span></span>'
+        ).join('') + '</div>'
+        : '';
+      return (
+        '<div class="list-row quest-entry">' +
+        '<div style="flex:1">' +
+        '<div class="list-title">' + escapeHtml(quest.name || formatItemName(quest.id)) + '</div>' +
+        '<div class="list-meta">' + escapeHtml(npcName) + (quest.repeatable ? ' · Repeatable' : '') + '</div>' +
+        reqsHtml +
+        killHtml +
+        rewardsHtml +
+        '</div>' +
+        '</div>'
+      );
+    }).join("");
+  })();
+  if (!activeHtml && !availableHtml) {
+    questsListEl.innerHTML = '<div class="list-row"><span class="list-title" style="opacity:0.5;">No NPCs nearby.</span></div>';
+    return;
+  }
+  const sep = activeHtml && availableHtml ? '<div class="quest-section-header" style="margin-top:12px;">Available Quests</div>' : '';
+  questsListEl.innerHTML = activeHtml + sep + (availableHtml || '<div class="list-row"><span class="list-title" style="opacity:0.5;">None of the nearby NPCs offer quests.</span></div>');
 };
 
 const renderMobs = (mobs: unknown[] | null | undefined) => {
@@ -623,10 +687,11 @@ const renderObjects = (objects: unknown[] | null | undefined) => {
   }, "No world objects recorded yet.");
 };
 
-const renderWorld = (world: unknown, upgradePlans: unknown) => {
+const renderWorld = (world: unknown, upgradePlans: unknown, rawQuests: Record<string, ActiveQuestData> | null | undefined) => {
   const w = (world || {}) as Record<string, unknown>;
   renderUpgradePlans(upgradePlans);
   renderNpcs(w["npcs"] as unknown[] | null);
+  renderActiveQuests(rawQuests);
   renderQuests(w["npcs"] as WorldNpc[] | null);
   renderMobs(w["mobs"] as unknown[] | null);
   renderObjects(w["objects"] as unknown[] | null);
@@ -839,7 +904,7 @@ const render = (payload: any) => {
     outputRaw.textContent = JSON.stringify(rawWithoutItems, null, 2);
   }
 
-  renderWorld(payload.world, payload.upgradePlans);
+  renderWorld(payload.world, payload.upgradePlans, (payload.raw?.player as Record<string, unknown> | undefined)?.quests as Record<string, ActiveQuestData> | undefined);
 
   // ── Events ──────────────────────────────────────────────────────────────────
   // Each category arrives from the server as its own buffer. renderEvents() just

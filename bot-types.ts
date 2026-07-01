@@ -1,10 +1,10 @@
 import { Items } from 'programming-game/items';
 import { RECIPE } from 'programming-game/recipes';
-import type { PlayerEquipment } from 'programming-game/types';
+import type { PlayerEquipment, ActiveQuests } from 'programming-game/types';
 
 // ── Shared structural types ──────────────────────────────────────────────────
 
-export type QuestMap = Record<string, { steps: Array<{ type: string; requiredItems?: Partial<Record<string, number>> }> }>;
+export type QuestMap = ActiveQuests;
 
 export type RecipeList = ReadonlyArray<{
   id?: string;

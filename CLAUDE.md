@@ -28,6 +28,7 @@ Modules here are shared across the bot, future `src/memory/`, `src/decisions/`, 
 | `src/equipment.ts` | Gear upgrade planning: `computeUpgradeTargets`, `computeDifficultyTier`, `canObtainChain`, `getChainedIngredients`, `getTargetItemsToKeep`, `getEquippedRecipeInputs`, `computeTargetsToBuyFromMerchant`, `findGearToEquip`. |
 | `src/craft.ts` | Crafting target selection: `findCraftableTarget`, `findNextCraftTarget`. |
 | `src/trade.ts` | Merchant/banker helpers: `findBestSellMerchant`, `collectVisibleMerchants`, `collectAllMerchantSelling`, `getStorageFeeInfo`. |
+| `src/quests.ts` | Quest helpers: `findCompletableQuest`, `findTurnInNpc`, `evaluateQuest`, `findBestQuestToAccept`, `findQuestGivers`. |
 
 ### Game client SDK (`node_modules/programming-game`)
 

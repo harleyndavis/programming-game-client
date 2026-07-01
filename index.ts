@@ -1,6 +1,6 @@
 import { connect } from "programming-game";
 import { config } from "dotenv";
-import { UNIT_TYPE, NPC_TYPE, ClientSideUnit, ClientSideNPC, ClientSideMonster, GameObject, Tree } from "programming-game/types";
+import { UNIT_TYPE, NPC_TYPE, ClientSideUnit, ClientSideNPC, ClientSideMonster, GameObject, Tree, ActiveQuest } from "programming-game/types";
 import { createDashboard } from "./dashboard";
 import { toDashboardSnapshot } from "./snapshot";
 import { UpgradePlanItem, QuestMap, RecipeList, ItemMap, UpgradeTarget } from "./bot-types";
@@ -10,6 +10,7 @@ import { ENCUMBRANCE_THRESHOLD, getInventoryWeight, findHeaviestInventoryItem, f
 import { getChainedIngredients, canObtainChain, computeDifficultyTier, computeUpgradeTargets, getTargetItemsToKeep, getEquippedRecipeInputs, computeTargetsToBuyFromMerchant, findGearToEquip } from "./src/equipment";
 import { findCraftableTarget, findNextCraftTarget } from "./src/craft";
 import { findBestSellMerchant } from "./src/trade";
+import { findCompletableQuest, findTurnInNpc, findBestQuestToAccept, findQuestGivers } from "./src/quests";
 
 config({
   path: ".env",
@@ -109,7 +110,9 @@ type Decision =
   | { type: "withdraw"; items: Partial<Record<string, number>>; banker: ClientSideUnit }
   | { type: "attack"; targetId: string; distance: number }
   | { type: "explore"; to: { x: number; y: number } }
-  | { type: "harvest"; targetId: string };
+  | { type: "harvest"; targetId: string }
+  | { type: "acceptQuest"; npc: ClientSideNPC; questId: string }
+  | { type: "turnInQuest"; npc: ClientSideNPC; questId: string };
 
 /** Returns true when two decisions are meaningfully different. */
 const decisionChanged = (prev: Decision | null, next: Decision): boolean => {
@@ -132,6 +135,10 @@ const decisionChanged = (prev: Decision | null, next: Decision): boolean => {
     return prev.item !== next.item;
   if (next.type === "harvest" && prev.type === "harvest")
     return prev.targetId !== next.targetId;
+  if (next.type === "acceptQuest" && prev.type === "acceptQuest")
+    return prev.questId !== next.questId;
+  if (next.type === "turnInQuest" && prev.type === "turnInQuest")
+    return prev.questId !== next.questId;
   return false;
 };
 
@@ -212,8 +219,10 @@ const decide = (opts: {
   attackingMonster:
   | { unit: { id: string; position: { x: number; y: number } }; distance: number }
   | undefined;
+  completableQuest: { quest: ActiveQuest; npc: ClientSideNPC } | null;
+  questToAccept: { npc: ClientSideNPC; quest: ClientSideNPC['availableQuests'][string] } | null;
 }): Decision => {
-  const { playerHp, maxHp, lowHpThreshold, playerPosition, nearbyMonster, isEncumbered, sellOpportunity, heaviestInventoryItem, playerCalories, maxCalories, cheapestFood, isHunting, huntRadius, nearbyHuntTarget, nearbyThreat, upgradesPlan, gearToEquip, recipeToCraft, finishingHomeChores, nearbyTree, isHarvesting, attackingMonster } = opts;
+  const { playerHp, maxHp, lowHpThreshold, playerPosition, nearbyMonster, isEncumbered, sellOpportunity, heaviestInventoryItem, playerCalories, maxCalories, cheapestFood, isHunting, huntRadius, nearbyHuntTarget, nearbyThreat, upgradesPlan, gearToEquip, recipeToCraft, finishingHomeChores, nearbyTree, isHarvesting, attackingMonster, completableQuest, questToAccept } = opts;
 
   if (playerHp <= 0) return { type: "respawn" };
 
@@ -225,6 +234,7 @@ const decide = (opts: {
       if (upgradesPlan.length > 0) {
         return { type: "buy", items: upgradesPlan[0].items, merchant: upgradesPlan[0].merchant };
       }
+      if (completableQuest) return { type: "turnInQuest", npc: completableQuest.npc, questId: completableQuest.quest.id };
       if (sellOpportunity) return { type: "sell", items: sellOpportunity.items, merchant: sellOpportunity.merchant };
     }
     return { type: "return-home-recover" };
@@ -261,7 +271,9 @@ const decide = (opts: {
     if (upgradesPlan.length > 0) {
       return { type: "buy", items: upgradesPlan[0].items, merchant: upgradesPlan[0].merchant };
     }
+    if (completableQuest) return { type: "turnInQuest", npc: completableQuest.npc, questId: completableQuest.quest.id };
     if (sellOpportunity) return { type: "sell", items: sellOpportunity.items, merchant: sellOpportunity.merchant };
+    if (questToAccept) return { type: "acceptQuest", npc: questToAccept.npc, questId: questToAccept.quest.id };
     return { type: "return-home-idle" };
   }
   // Attack nearby monsters when not busy.
@@ -275,6 +287,8 @@ const decide = (opts: {
     }
     return { type: "explore", to: nearbyTree.obj.position! };
   }
+  // Accept available quests when not busy.
+  if (questToAccept) return { type: "acceptQuest", npc: questToAccept.npc, questId: questToAccept.quest.id };
   const dir = EXPLORE_DIRECTIONS[exploreDirectionIndex];
   return { type: "explore", to: { x: playerPosition.x + dir.x * 10, y: playerPosition.y + dir.y * 10 } };
 };
@@ -420,6 +434,14 @@ disconnectFromGame = connect({
       lastAttackerTicksLeft = LAST_ATTACKER_TICK_TIMEOUT;
       pushEvent(combatEventBuffer, EVENT_BUFFER_SIZE, eventName, evt);
       logger.addExtra('attacked', { attacker: evt.attacker, damage: evt.damage, hp: evt.hp });
+    } else if (eventName === 'acceptedQuest') {
+      logger.addExtra('acceptedQuest', { questId: evt.quest?.id, questName: evt.quest?.name });
+    } else if (eventName === 'completedQuest') {
+      logger.addExtra('completedQuest', { questId: evt.questId, questName: evt.questName });
+    } else if (eventName === 'questUpdate') {
+      logger.addExtra('questUpdate', { questId: evt.quest?.id, name: evt.quest?.name });
+    } else if (eventName === 'questAvailable') {
+      logger.addExtra('questAvailable', { npcId: evt.npcId, questId: evt.quest?.id, name: evt.quest?.name });
     } else if (eventName === 'storageCharged') {
       logger.addExtra('storageCharged', { coinsLeft: evt.coinsLeft, charged: evt.charged });
     } else if (eventName === 'storageEmptied') {
@@ -1091,6 +1113,29 @@ disconnectFromGame = connect({
       }
     }
 
+    // ── Quest checks ─────────────────────────────────────────────────────────
+    // Check for completable quests (all required items in inventory) with nearby
+    // turn-in NPCs. Also find available quests to accept from nearby givers.
+    const activeQuests = (player.quests ?? {}) as QuestMap;
+    const visibleNpcs = Object.values(heartbeat.units).filter(
+      (u): u is ClientSideNPC => u.type === UNIT_TYPE.npc && isFinitePosition(u.position),
+    );
+    const completableQuestResult = findCompletableQuest(activeQuests, player.inventory ?? {});
+    const completableQuest: { quest: ActiveQuest; npc: ClientSideNPC } | null =
+      completableQuestResult
+        ? (() => {
+          const npc = findTurnInNpc(completableQuestResult, visibleNpcs);
+          return npc ? { quest: completableQuestResult, npc } : null;
+        })()
+        : null;
+    const questGivers = findQuestGivers(visibleNpcs);
+    const questToAccept: { npc: ClientSideNPC; quest: ClientSideNPC['availableQuests'][string] } | null =
+      atHome || !isHunting
+        ? findBestQuestToAccept(questGivers, activeQuests, 5)
+        : null;
+    if (completableQuest) tickExtras.completableQuest = { questId: completableQuest.quest.id, npcId: completableQuest.npc.id };
+    if (questToAccept) tickExtras.questToAccept = { questId: questToAccept.quest.id, npcId: questToAccept.npc.id };
+
     const decision = withdrawOverride ?? depositOverride ?? decide({
       playerHp,
       maxHp,
@@ -1114,6 +1159,8 @@ disconnectFromGame = connect({
       nearbyTree,
       isHarvesting,
       attackingMonster,
+      completableQuest,
+      questToAccept,
     });
 
     // Track decision stability for intent conflict detection.
@@ -1139,6 +1186,8 @@ disconnectFromGame = connect({
       if (d.type === "craft") return "craft";
       if (d.type === "eat") return "eat";
       if (d.type === "harvest") return "harvest";
+      if (d.type === "acceptQuest") return "acceptQuest";
+      if (d.type === "turnInQuest") return "turnInQuest";
       return "move"; // recover, return-home-idle, return-home, explore, and drop produce a move/idle intent
     };
     const expectedIntent = decisionToIntentType(decision);
@@ -1162,6 +1211,8 @@ disconnectFromGame = connect({
       !(decision.type === "deposit" && serverIntentType === "move") &&
       !(decision.type === "withdraw" && serverIntentType === "move") &&
       !(decision.type === "harvest" && serverIntentType === "move") &&
+      !(decision.type === "acceptQuest" && serverIntentType === "move") &&
+      !(decision.type === "turnInQuest" && serverIntentType === "move") &&
       // After any decision change, give the server time to acknowledge the new
       // intent before treating a mismatch as a problem.
       decisionStableTicks > INTENT_TRANSITION_GRACE_TICKS;
@@ -1313,6 +1364,10 @@ disconnectFromGame = connect({
         const target = heartbeat.gameObjects?.[decision.targetId] as Tree | undefined;
         return target ? player.harvest(target) : player.idle();
       }
+      case "acceptQuest":
+        return player.acceptQuest(decision.npc as any, decision.questId as any);
+      case "turnInQuest":
+        return player.turnInQuest(decision.npc as any, decision.questId as any);
     }
   },
 });
