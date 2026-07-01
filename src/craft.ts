@@ -39,6 +39,40 @@ export const findNextCraftTarget = (targets: UpgradeTarget[]): UpgradeTarget | n
   return targets[0] ?? null;
 };
 
+export function findCraftableFromList(
+  itemIds: string[],
+  inventory: Partial<Record<string, number>>,
+  recipes: RecipeList,
+): { itemId: string; recipe: { id: string; input: Partial<Record<string, number>>; required: readonly string[] } } | null {
+  for (const itemId of itemIds) {
+    const recipe = recipes.find(r => itemId in (r.output ?? {}) && r.station == null);
+    if (!recipe) continue;
+    let canCraft = true;
+    for (const [inputId, qty] of Object.entries(recipe.input ?? {})) {
+      if ((inventory[inputId] ?? 0) < (qty ?? 0)) { canCraft = false; break; }
+    }
+    if (canCraft) {
+      for (const toolId of recipe.required ?? []) {
+        if ((inventory[toolId as string] ?? 0) < 1) { canCraft = false; break; }
+      }
+    }
+    if (canCraft) {
+      return {
+        itemId,
+        recipe: { id: recipe.id!, input: recipe.input as Partial<Record<string, number>>, required: recipe.required ?? [] },
+      };
+    }
+    const subRecipe: { id: string; input: Partial<Record<string, number>>; required: readonly string[] } = {
+      id: recipe.id!,
+      input: recipe.input as Partial<Record<string, number>>,
+      required: recipe.required ?? [],
+    };
+    const subStep = findCraftableSubStep(subRecipe, inventory, recipes, new Set<string>());
+    if (subStep && subStep.recipe) return { itemId: subStep.recipeId, recipe: subStep.recipe };
+  }
+  return null;
+}
+
 export const findCraftableSubStep = (
   recipe: NonNullable<UpgradeTarget['recipe']>,
   inventory: Partial<Record<string, number>>,

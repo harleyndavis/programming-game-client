@@ -1,6 +1,6 @@
 import { connect } from "programming-game";
 import { config } from "dotenv";
-import { UNIT_TYPE, NPC_TYPE, ClientSideUnit, ClientSideNPC, ClientSideMonster, GameObject, Tree, ActiveQuest } from "programming-game/types";
+import { UNIT_TYPE, NPC_TYPE, ClientSideUnit, ClientSideNPC, ClientSideMonster, GameObject, Tree, MiningNode, ActiveQuest } from "programming-game/types";
 import { createDashboard } from "./dashboard";
 import { toDashboardSnapshot } from "./snapshot";
 import { UpgradePlanItem, QuestMap, RecipeList, ItemMap, UpgradeTarget } from "./bot-types";
@@ -8,7 +8,8 @@ import * as logger from "./src/logger";
 import { isFiniteNumber, isFinitePosition, distanceBetween } from "./src/utils";
 import { ENCUMBRANCE_THRESHOLD, getInventoryWeight, findHeaviestInventoryItem, findCheapestFood, computeItemsToSell } from "./src/inventory";
 import { getChainedIngredients, canObtainChain, computeDifficultyTier, computeUpgradeTargets, getTargetItemsToKeep, getEquippedRecipeInputs, computeTargetsToBuyFromMerchant, findGearToEquip } from "./src/equipment";
-import { findCraftableTarget, findNextCraftTarget } from "./src/craft";
+import { findCraftableTarget, findNextCraftTarget, findCraftableFromList } from "./src/craft";
+import { getHarvestableTarget, getMissingHarvestToolIds, collectHarvestToolItemIds } from "./src/harvest";
 import { findBestSellMerchant } from "./src/trade";
 import { findCompletableQuest, findTurnInNpc, findBestQuestToAccept, findQuestGivers } from "./src/quests";
 
@@ -213,8 +214,9 @@ const decide = (opts: {
   upgradesPlan: Array<{ items: Partial<Record<string, number>>; merchant: ClientSideUnit }>;
   gearToEquip: { item: string; slot: string } | null;
   recipeToCraft: UpgradeTarget | null;
+  toolToCraft: { itemId: string; recipe: { id: string; input: Partial<Record<string, number>>; required: readonly string[] } } | null;
   finishingHomeChores: boolean;
-  nearbyTree: { obj: Tree; distance: number } | undefined;
+  harvestTarget: { target: Tree | MiningNode; distance: number } | null;
   isHarvesting: boolean;
   attackingMonster:
   | { unit: { id: string; position: { x: number; y: number } }; distance: number }
@@ -222,7 +224,7 @@ const decide = (opts: {
   completableQuest: { quest: ActiveQuest; npc: ClientSideNPC } | null;
   questToAccept: { npc: ClientSideNPC; quest: ClientSideNPC['availableQuests'][string] } | null;
 }): Decision => {
-  const { playerHp, maxHp, lowHpThreshold, playerPosition, nearbyMonster, isEncumbered, sellOpportunity, heaviestInventoryItem, playerCalories, maxCalories, cheapestFood, isHunting, huntRadius, nearbyHuntTarget, nearbyThreat, upgradesPlan, gearToEquip, recipeToCraft, finishingHomeChores, nearbyTree, isHarvesting, attackingMonster, completableQuest, questToAccept } = opts;
+  const { playerHp, maxHp, lowHpThreshold, playerPosition, nearbyMonster, isEncumbered, sellOpportunity, heaviestInventoryItem, playerCalories, maxCalories, cheapestFood, isHunting, huntRadius, nearbyHuntTarget, nearbyThreat, upgradesPlan, gearToEquip, recipeToCraft, toolToCraft, finishingHomeChores, harvestTarget, isHarvesting, attackingMonster, completableQuest, questToAccept } = opts;
 
   if (playerHp <= 0) return { type: "respawn" };
 
@@ -231,6 +233,7 @@ const decide = (opts: {
     if (distanceBetween(playerPosition, HOME_POSITION) < HOME_CHORES_CLEAR_RADIUS) {
       if (gearToEquip) return { type: "equip", item: gearToEquip.item, slot: gearToEquip.slot };
       if (recipeToCraft) return { type: "craft", recipeId: recipeToCraft.recipe!.id };
+      if (toolToCraft) return { type: "craft", recipeId: toolToCraft.recipe.id };
       if (upgradesPlan.length > 0) {
         return { type: "buy", items: upgradesPlan[0].items, merchant: upgradesPlan[0].merchant };
       }
@@ -269,6 +272,7 @@ const decide = (opts: {
   if (idlingAtHome || finishingHomeChores) {
     if (gearToEquip) return { type: "equip", item: gearToEquip.item, slot: gearToEquip.slot };
     if (recipeToCraft) return { type: "craft", recipeId: recipeToCraft.recipe!.id };
+    if (toolToCraft) return { type: "craft", recipeId: toolToCraft.recipe.id };
     if (upgradesPlan.length > 0) {
       return { type: "buy", items: upgradesPlan[0].items, merchant: upgradesPlan[0].merchant };
     }
@@ -280,13 +284,12 @@ const decide = (opts: {
   // Attack nearby monsters when not busy.
   if (nearbyMonster)
     return { type: "attack", targetId: nearbyMonster.unit.id, distance: nearbyMonster.distance };
-  // Try harvesting nearby trees when not busy.
-  if (nearbyTree && !isHarvesting) {
-    const treeDist = distanceBetween(playerPosition, nearbyTree.obj.position!);
-    if (treeDist < 1.0) {
-      return { type: "harvest", targetId: nearbyTree.obj.id };
+  // Try harvesting nearby trees or mining nodes when not busy.
+  if (harvestTarget && !isHarvesting) {
+    if (harvestTarget.distance < 1.0) {
+      return { type: "harvest", targetId: harvestTarget.target.id };
     }
-    return { type: "explore", to: nearbyTree.obj.position! };
+    return { type: "explore", to: harvestTarget.target.position! };
   }
   // Accept available quests when not busy.
   if (questToAccept) return { type: "acceptQuest", npc: questToAccept.npc, questId: questToAccept.quest.id };
@@ -640,19 +643,24 @@ disconnectFromGame = connect({
       stickyTargetLostTicks = 0;
     }
 
-    // Scan for nearby harvestable trees, only if we have a felling axe equipped.
-    const hasFellingAxe = (player.equipment?.weapon
-      && heartbeat.items?.[player.equipment.weapon]?.type === 'fellingAxe') ?? false;
+    // Scan for nearby harvestable objects (trees, mining nodes) given equipped weapon.
+    const harvestTarget = getHarvestableTarget(
+      heartbeat.gameObjects ?? {},
+      (player.equipment ?? {}) as Record<string, string | null | undefined>,
+      heartbeat.items ?? {},
+      playerPosition,
+    );
     const treeObjects = Object.values(heartbeat.gameObjects ?? {}).filter(
       (obj): obj is Tree => obj.type === 'tree' && isFinitePosition(obj.position),
     );
-    const nearbyTree = hasFellingAxe
-      ? treeObjects
-        .map((obj) => ({ obj, distance: distanceBetween(playerPosition, obj.position!) }))
-        .sort((a, b) => a.distance - b.distance)[0]
-      : undefined;
     if (treeObjects.length > 0) {
       tickExtras.treesFound = treeObjects.map(t => ({ id: t.id, treeType: t.treeType, pos: t.position }));
+    }
+    const miningNodeObjects = Object.values(heartbeat.gameObjects ?? {}).filter(
+      (obj): obj is MiningNode => obj.type === 'miningNode' && isFinitePosition(obj.position),
+    );
+    if (miningNodeObjects.length > 0) {
+      tickExtras.miningNodesFound = miningNodeObjects.map(n => ({ id: n.id, oreType: n.oreType, pos: n.position }));
     }
     const isHarvesting = player.action === 'harvest';
     if (isHarvesting && player.actionStart) {
@@ -887,9 +895,7 @@ disconnectFromGame = connect({
           if (itemCatalog?.[req]?.type) toolItemIds.add(req);
         }
       }
-      for (const [itemId, def] of Object.entries(itemCatalog ?? {})) {
-        if (def?.type === 'fellingAxe' || def?.type === 'pickaxe') toolItemIds.add(itemId);
-      }
+      collectHarvestToolItemIds(itemCatalog ?? {}).forEach(id => toolItemIds!.add(id));
     }
     const protectedItems = new Set(Array.from(keepItems).concat(Array.from(recoveryItems), Array.from(toolItemIds)));
     const atHome = recoveringAtHome || idlingAtHome || finishingHomeChores;
@@ -1005,6 +1011,15 @@ disconnectFromGame = connect({
       ? findCraftableTarget(upgradeTargets, player.inventory ?? {}, recipesArray)
       : null;
 
+    const missingHarvestTools = getMissingHarvestToolIds(
+      (player.equipment ?? {}) as Record<string, string | null | undefined>,
+      player.inventory ?? {},
+      heartbeat.items as Record<string, { type?: string }>,
+    );
+    const toolToCraft = atHome && missingHarvestTools.length > 0
+      ? findCraftableFromList(missingHarvestTools, player.inventory ?? {}, recipesArray)
+      : null;
+
     const upgradePlanItems: UpgradePlanItem[] = upgradeTargets.map((target, index) => {
       const inventory = (player.inventory ?? {}) as Record<string, number>;
       const equipped = (player.equipment ?? {}) as Record<string, string | null | undefined>;
@@ -1070,6 +1085,7 @@ disconnectFromGame = connect({
       const hasChores =
         gearToEquip !== null ||
         recipeToCraft !== null ||
+        toolToCraft !== null ||
         activeCraft !== null ||
         upgradesPlan.length > 0;
       if (!hasChores) finishingHomeChores = false;
@@ -1173,8 +1189,9 @@ disconnectFromGame = connect({
       upgradesPlan,
       gearToEquip,
       recipeToCraft,
+      toolToCraft,
       finishingHomeChores,
-      nearbyTree,
+      harvestTarget,
       isHarvesting,
       attackingMonster,
       completableQuest,
@@ -1379,7 +1396,7 @@ disconnectFromGame = connect({
       case "explore":
         return player.move(decision.to);
       case "harvest": {
-        const target = heartbeat.gameObjects?.[decision.targetId] as Tree | undefined;
+        const target = heartbeat.gameObjects?.[decision.targetId] as Tree | MiningNode | undefined;
         return target ? player.harvest(target) : player.idle();
       }
       case "acceptQuest": {
