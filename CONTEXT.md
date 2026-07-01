@@ -14,13 +14,20 @@ equipping) compete for the action slot each tick rather than running in strict
 sequence.
 
 ### Module architecture
-`index.ts` is being decomposed into layered modules to keep the entry point thin and let agents work on separate concerns without colliding on the same file. Dependency flows one direction:
+`index.ts` has been partially decomposed (per ADR-0003 conservative extraction) into pure-function libraries. `index.ts` remains the orchestrator, owning all mutable state and decision logic. Dependency flows one direction — modules import from `utils`/`bot-types` only, never from each other:
 
-- **Memory** (`src/memory.ts`) — dumb store. Reads and writes world facts (merchant inventory, drop tables, explored cells, heat map sightings, quests). No opinions about what to do with the data; nothing that makes decisions should need to be imported by it.
-- **Character** (`src/character.ts`) — inventory weight, storage info, stat parsing from the heartbeat, and survival wants (e.g. "want a buffer of 6 chicken meat"). Owns "what does the character currently have and need."
-- **Planners** (`src/upgrade-planner.ts`, `src/quest-planner.ts`) — decompose a long-term goal into needs and, where viable, concrete acquisition paths. The upgrade planner determines the next gear target and returns every viable path (buy and/or craft) for it; paths with no known ingredient source are suppressed entirely rather than surfaced as unscored options. Planners never call each other directly — see **Need**.
-- **Pathfinding** (`src/pathfinding.ts`) — peer module, not a planner. Exposes `travelCost(from, to)` for scoring (threat-weighted, used by decisions and planners alike) and `computePath(from, to)` returning a `Path` handle for execution. The handle self-heals: `path.nextWaypoint(currentPos)` recomputes internally if the bot drifts off course, if heat map data changes near the remaining route, or after a distance-based fallback — callers never manage staleness themselves. A path belongs to whichever planner/decision requested it and is tied to that goal, not to what the bot is currently doing — it stays warm while the bot detours (e.g. to fight a monster encountered en route) and is only discarded when the owning planner changes its target. Threat zones are circular regions, not a grid, so routing around them is tangent-point geometry, not search (no A*/navmesh needed) — but it must plan the whole route up front, since picking the locally-safest direction each step can walk into a pocket boxed in by higher threat on every remaining side.
-- **Decisions** (`src/decisions.ts`) — the scoring engine described below. Takes a context (current world state, threat level) and a flat list of fully-resolved candidate actions, scores them, picks the winner. Arena and overworld share the same engine — arena is modeled as always presenting max threat level (see **Threat level**) rather than needing separate scoring rules.
+- **`src/utils.ts`** — pure-function helpers (`distanceBetween`, `isFiniteNumber`, `isFinitePosition`)
+- **`src/inventory.ts`** — inventory/storage queries (weight, sellables, food)
+- **`src/equipment.ts`** — gear upgrade planning (target selection, chaining, merchant sourcing)
+- **`src/craft.ts`** — crafting target selection
+- **`src/trade.ts`** — merchant/banker helpers (best sell price, storage fees)
+
+The following modules remain in `index.ts` and will be extracted when the architecture supports them (tracked in the linked issues):
+
+- **Memory** (`src/memory.ts`, tracked in #6) — dumb store for world facts (merchant inventory, drop tables, heat map, combat history). No opinions.
+- **Decisions** (`src/decisions.ts`, tracked in #7) — utility scoring engine replacing the current priority-stack `decide()`
+- **Pathfinding** (`src/pathfinding.ts`, tracked in #8) — threat-aware routing. Threat zones are circular regions, not a grid, so routing is tangent-point geometry, not search.
+- **Planners** (`src/upgrade-planner.ts`, `src/quest-planner.ts`) — decompose long-term goals into needs and acquisition paths. Planners never call each other directly — see **Need** below.
 
 ### Need (demand aggregation)
 A want for a quantity of an item, reported independently by a producer (an upgrade plan, a quest, a survival want from Character) without that producer knowing who else wants the same item. Needs from every source are merged by a generic, domain-ignorant aggregation step into a per-item total value. A resolver then matches reachable sources (a monster that drops the item, a resource node) to the aggregate, so a single hunt or harvest that satisfies multiple unrelated goals at once (e.g. a quest needs pinewood logs and crafting also needs pinewood logs) is valued correctly instead of being chased twice. Planners and the resolver only ever read the aggregate, never each other — this keeps the dependency graph flat even though real need sources are mutually circular (a quest can both need and produce items that crafting also needs and produces).

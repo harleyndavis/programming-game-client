@@ -23,6 +23,11 @@ Modules here are shared across the bot, future `src/memory/`, `src/decisions/`, 
 | File | Role |
 |---|---|
 | `src/logger.ts` | Structured per-tick JSON logging to `overworld.log` / `arena.log`, death snapshots to `deaths/`, and a 60-tick circular buffer copied (not cleared) into each death file. All bot modules should import this for observability. |
+| `src/utils.ts` | Pure-function helpers: `distanceBetween`, `isFiniteNumber`, `isFinitePosition`. |
+| `src/inventory.ts` | Inventory/storage queries: `getInventoryWeight`, `findHeaviestInventoryItem`, `findCheapestFood`, `computeItemsToSell`. |
+| `src/equipment.ts` | Gear upgrade planning: `computeUpgradeTargets`, `computeDifficultyTier`, `canObtainChain`, `getChainedIngredients`, `getTargetItemsToKeep`, `getEquippedRecipeInputs`, `computeTargetsToBuyFromMerchant`, `findGearToEquip`. |
+| `src/craft.ts` | Crafting target selection: `findCraftableTarget`, `findNextCraftTarget`. |
+| `src/trade.ts` | Merchant/banker helpers: `findBestSellMerchant`, `collectVisibleMerchants`, `collectAllMerchantSelling`, `getStorageFeeInfo`. |
 
 ### Game client SDK (`node_modules/programming-game`)
 

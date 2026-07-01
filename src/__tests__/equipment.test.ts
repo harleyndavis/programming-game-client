@@ -8,7 +8,7 @@ import {
   getEquippedRecipeInputs,
   computeTargetsToBuyFromMerchant,
   findGearToEquip,
-} from '../gear';
+} from '../equipment';
 import type { ItemMap, RecipeList, UpgradeTarget } from '../../bot-types';
 
 const makeRecipe = (overrides: Partial<RecipeList[number]> = {}): RecipeList[number] => ({
