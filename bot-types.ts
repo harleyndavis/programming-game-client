@@ -2,6 +2,41 @@ import { Items } from 'programming-game/items';
 import { RECIPE } from 'programming-game/recipes';
 import type { PlayerEquipment } from 'programming-game/types';
 
+// ── Shared structural types ──────────────────────────────────────────────────
+
+export type QuestMap = Record<string, { steps: Array<{ type: string; requiredItems?: Partial<Record<string, number>> }> }>;
+
+export type RecipeList = ReadonlyArray<{
+  id?: string;
+  input: Partial<Record<string, number>>;
+  output: Partial<Record<string, number>>;
+  required?: readonly string[];
+  station?: string | null;
+}>;
+
+export type ItemMap = Record<string, {
+  type?: string;
+  weight?: number;
+  calories?: number;
+  stats?: { defense?: number };
+  damage?: number;
+  attacksPerSecond?: number;
+  ammoType?: string;
+}>;
+
+export type UpgradeTarget = {
+  itemId: string;
+  slot: string;
+  tier: number;
+  gain: number;
+  reachable: boolean;
+  recipe: {
+    id: string;
+    input: Partial<Record<string, number>>;
+    required: readonly string[];
+  } | null;
+};
+
 /**
  * A single ingredient requirement for an upgrade plan, tracking how many the
  * bot currently has vs. how many are needed.

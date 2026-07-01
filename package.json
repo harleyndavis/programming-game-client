@@ -8,6 +8,8 @@
     "stop": "pm2 stop bot",
     "restart": "npm run typecheck && pm2 delete bot && pm2 start ecosystem.config.js",
     "logs": "pm2 logs bot",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
   },
   "keywords": [],
@@ -21,6 +23,7 @@
     "typescript": "^5.3.3"
   },
   "devDependencies": {
-    "pm2": "^7.0.1"
+    "pm2": "^7.0.1",
+    "vitest": "^4.1.9"
   }
 }
