@@ -64,6 +64,7 @@ type SnapshotMeta = {
     depositMessage: string;
     nearbyBankers: number;
     nearbyMerchants: number;
+    questRewards: Record<string, { items: Record<string, number> }>;
 };
 
 const toPosition = (position?: Position): Position | null => {
@@ -183,6 +184,7 @@ export const toDashboardSnapshot = (heartbeat: SnapshotHeartbeat, meta: Snapshot
         unitCount: units.length,
         monstersVisible: units.filter((u) => u.type === UNIT_TYPE.monster).length,
         units,
+        questRewards: meta.questRewards,
         // Pass the raw heartbeat through unmodified so the dashboard can show
         // exactly what the server sent, rather than our processed version.
         raw: heartbeat as unknown as Record<string, unknown>,

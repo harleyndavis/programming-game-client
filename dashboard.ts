@@ -104,6 +104,8 @@ export type DashboardSnapshot = {
     world?: WorldState;
     /** Bot upgrade plans — managed separately via updateUpgradePlans(). */
     upgradePlans?: UpgradePlanItem[];
+    /** Quest rewards captured at acceptance time (server doesn't include them on active quests). */
+    questRewards?: Record<string, { items: Record<string, number> }>;
     /** Recent raw server events captured by onEvent, kept in separate per-category buffers. */
     storageEvents?: RawEvent[];
     harvestEvents?: RawEvent[];
