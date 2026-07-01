@@ -536,12 +536,17 @@ type ActiveQuestData = {
   start_npc?: string;
   end_npc?: string;
   steps?: ActiveQuestStep[];
+  rewards?: {
+    items?: Record<string, number>;
+  };
 };
 
-const renderActiveQuests = (rawQuests: Record<string, ActiveQuestData> | null | undefined) => {
-  if (!questsListEl) return;
+const renderActiveQuests = (
+  rawQuests: Record<string, ActiveQuestData> | null | undefined,
+  questRewards: Record<string, { items: Record<string, number> }>,
+): string => {
   if (!rawQuests || Object.keys(rawQuests).length === 0) {
-    return;
+    return '';
   }
   const html = Object.values(rawQuests).map((quest) => {
     const steps = quest.steps || [];
@@ -566,6 +571,12 @@ const renderActiveQuests = (rawQuests: Record<string, ActiveQuestData> | null | 
         '<span class="quest-req-item">' + escapeHtml(lookupItemName(item)) + ' <span class="quest-req-count">×' + escapeHtml(String(count)) + '</span></span>'
       ).join('') + '</div>'
       : '';
+    const rewards = questRewards[quest.id || '']?.items || {};
+    const rewardsHtml = Object.keys(rewards).length > 0
+      ? '<div class="quest-rewards">Rewards: ' + Object.entries(rewards).map(([item, count]) =>
+        '<span class="quest-reward-item">' + escapeHtml(lookupItemName(item)) + ' <span class="quest-reward-count">×' + escapeHtml(String(count)) + '</span></span>'
+      ).join('') + '</div>'
+      : '';
     return (
       '<div class="list-row quest-entry quest-active">' +
       '<div style="flex:1">' +
@@ -573,16 +584,16 @@ const renderActiveQuests = (rawQuests: Record<string, ActiveQuestData> | null | 
       '<div class="list-meta">Turn in at: ' + escapeHtml(quest.end_npc || '?') + '</div>' +
       (killProgress.length > 0 ? '<div class="quest-kills">' + killProgress.join(', ') + '</div>' : '') +
       turnInHtml +
+      rewardsHtml +
       '</div>' +
       '</div>'
     );
   }).join("");
-  questsListEl.innerHTML = '<div class="quest-section-header">Active Quests</div>' + html;
+  return '<div class="quest-section-header">Active Quests</div>' + html;
 };
 
-const renderQuests = (npcs: WorldNpc[] | null | undefined) => {
+const renderQuests = (npcs: WorldNpc[] | null | undefined, activeHtml: string) => {
   if (!questsListEl) return;
-  const activeHtml = questsListEl.innerHTML;
   const availableHtml = (() => {
     if (!npcs || npcs.length === 0) {
       return '';
@@ -651,8 +662,12 @@ const renderQuests = (npcs: WorldNpc[] | null | undefined) => {
       );
     }).join("");
   })();
-  if (!activeHtml && !availableHtml) {
-    questsListEl.innerHTML = '<div class="list-row"><span class="list-title" style="opacity:0.5;">No NPCs nearby.</span></div>';
+  if (!npcs || npcs.length === 0) {
+    if (!activeHtml) {
+      questsListEl.innerHTML = '<div class="list-row"><span class="list-title" style="opacity:0.5;">No NPCs nearby.</span></div>';
+      return;
+    }
+    questsListEl.innerHTML = activeHtml;
     return;
   }
   const sep = activeHtml && availableHtml ? '<div class="quest-section-header" style="margin-top:12px;">Available Quests</div>' : '';
@@ -687,12 +702,12 @@ const renderObjects = (objects: unknown[] | null | undefined) => {
   }, "No world objects recorded yet.");
 };
 
-const renderWorld = (world: unknown, upgradePlans: unknown, rawQuests: Record<string, ActiveQuestData> | null | undefined) => {
+const renderWorld = (world: unknown, upgradePlans: unknown, rawQuests: Record<string, ActiveQuestData> | null | undefined, questRewards: Record<string, { items: Record<string, number> }>) => {
   const w = (world || {}) as Record<string, unknown>;
   renderUpgradePlans(upgradePlans);
   renderNpcs(w["npcs"] as unknown[] | null);
-  renderActiveQuests(rawQuests);
-  renderQuests(w["npcs"] as WorldNpc[] | null);
+  const activeHtml = renderActiveQuests(rawQuests, questRewards);
+  renderQuests(w["npcs"] as WorldNpc[] | null, activeHtml);
   renderMobs(w["mobs"] as unknown[] | null);
   renderObjects(w["objects"] as unknown[] | null);
 };
@@ -904,7 +919,7 @@ const render = (payload: any) => {
     outputRaw.textContent = JSON.stringify(rawWithoutItems, null, 2);
   }
 
-  renderWorld(payload.world, payload.upgradePlans, (payload.raw?.player as Record<string, unknown> | undefined)?.quests as Record<string, ActiveQuestData> | undefined);
+  renderWorld(payload.world, payload.upgradePlans, (payload.raw?.player as Record<string, unknown> | undefined)?.quests as Record<string, ActiveQuestData> | undefined, payload.questRewards || {});
 
   // ── Events ──────────────────────────────────────────────────────────────────
   // Each category arrives from the server as its own buffer. renderEvents() just

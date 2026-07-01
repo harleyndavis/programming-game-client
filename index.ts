@@ -51,10 +51,10 @@ const EXPLORE_DIRECTIONS = [
   { x: -1, y: -1 },  // NW
 ];
 
+const questRewards: Record<string, { items: Record<string, number> }> = {};
+let toolItemIds: Set<string> | null = null;
 let recoveringAtHome = false;
 let idlingAtHome = false;
-// Set when a home visit begins (recovery or manual idle); cleared only once
-// HP is full AND all pending tasks (equip, buy, sell) are finished.
 let finishingHomeChores = false;
 
 
@@ -236,6 +236,7 @@ const decide = (opts: {
       }
       if (completableQuest) return { type: "turnInQuest", npc: completableQuest.npc, questId: completableQuest.quest.id };
       if (sellOpportunity) return { type: "sell", items: sellOpportunity.items, merchant: sellOpportunity.merchant };
+      if (questToAccept) return { type: "acceptQuest", npc: questToAccept.npc, questId: questToAccept.quest.id };
     }
     return { type: "return-home-recover" };
   }
@@ -437,6 +438,7 @@ disconnectFromGame = connect({
     } else if (eventName === 'acceptedQuest') {
       logger.addExtra('acceptedQuest', { questId: evt.quest?.id, questName: evt.quest?.name });
     } else if (eventName === 'completedQuest') {
+      delete questRewards[evt.questId];
       logger.addExtra('completedQuest', { questId: evt.questId, questName: evt.questName });
     } else if (eventName === 'questUpdate') {
       logger.addExtra('questUpdate', { questId: evt.quest?.id, name: evt.quest?.name });
@@ -873,9 +875,23 @@ disconnectFromGame = connect({
       if (itemId) lastEquipment[slot] = itemId;
     }
     const recoveryItems = getEquippedRecipeInputs(lastEquipment, recipesArray);
-    // Union of upgrade-target inputs and equipped-gear recraft inputs — both
-    // must be protected from selling and kept in storage as a death buffer.
-    const protectedItems = new Set(Array.from(keepItems).concat(Array.from(recoveryItems)));
+    // Tool IDs are computed once from recipe required arrays + harvesting weapon
+    // types. Recipes and the item catalog don't change after the initial heartbeat.
+    if (toolItemIds === null) {
+      toolItemIds = new Set<string>();
+      const itemCatalog = heartbeat.items as Record<string, { type?: string }> | undefined;
+      for (const recipe of recipesArray) {
+        if (!recipe.required) continue;
+        for (const req of recipe.required) {
+          if (typeof req !== 'string') continue;
+          if (itemCatalog?.[req]?.type) toolItemIds.add(req);
+        }
+      }
+      for (const [itemId, def] of Object.entries(itemCatalog ?? {})) {
+        if (def?.type === 'fellingAxe' || def?.type === 'pickaxe') toolItemIds.add(itemId);
+      }
+    }
+    const protectedItems = new Set(Array.from(keepItems).concat(Array.from(recoveryItems), Array.from(toolItemIds)));
     const atHome = recoveringAtHome || idlingAtHome || finishingHomeChores;
 
     // The upgrade target we'd craft next from combined (storage + pocket) inventory.
@@ -1025,6 +1041,7 @@ disconnectFromGame = connect({
         depositMessage: lastDepositMessage,
         nearbyBankers: visibleBankers.length,
         nearbyMerchants: visibleMerchants.length,
+        questRewards,
       }),
       storageFee: {
         coinsInStorage: storageCoins,
@@ -1129,9 +1146,10 @@ disconnectFromGame = connect({
         })()
         : null;
     const questGivers = findQuestGivers(visibleNpcs);
+    const maxActiveQuests = typeof heartbeat.constants?.maxActiveQuests === "number" ? heartbeat.constants.maxActiveQuests : 5;
     const questToAccept: { npc: ClientSideNPC; quest: ClientSideNPC['availableQuests'][string] } | null =
       atHome || !isHunting
-        ? findBestQuestToAccept(questGivers, activeQuests, 5)
+        ? findBestQuestToAccept(questGivers, activeQuests, maxActiveQuests)
         : null;
     if (completableQuest) tickExtras.completableQuest = { questId: completableQuest.quest.id, npcId: completableQuest.npc.id };
     if (questToAccept) tickExtras.questToAccept = { questId: questToAccept.quest.id, npcId: questToAccept.npc.id };
@@ -1364,8 +1382,13 @@ disconnectFromGame = connect({
         const target = heartbeat.gameObjects?.[decision.targetId] as Tree | undefined;
         return target ? player.harvest(target) : player.idle();
       }
-      case "acceptQuest":
+      case "acceptQuest": {
+        const availableQuest = decision.npc?.availableQuests?.[decision.questId];
+        if (availableQuest?.rewards?.items) {
+          questRewards[decision.questId] = { items: { ...availableQuest.rewards.items } };
+        }
         return player.acceptQuest(decision.npc as any, decision.questId as any);
+      }
       case "turnInQuest":
         return player.turnInQuest(decision.npc as any, decision.questId as any);
     }
