@@ -37,6 +37,7 @@ Extract only the modules that are provably self-contained pure function librarie
 | `src/equipment.ts` | `computeUpgradeTargets`, `computeDifficultyTier`, `canObtainChain`, `getChainedIngredients`, `getTargetItemsToKeep`, `getEquippedRecipeInputs`, `computeTargetsToBuyFromMerchant`, `findGearToEquip` | utils, bot-types |
 | `src/craft.ts` | `findCraftableTarget`, `findNextCraftTarget`, `findCraftableSubStep` | utils, bot-types |
 | `src/trade.ts` | `findBestSellMerchant` | bot-types, `programming-game/types` |
+| `src/quests.ts` | `findCompletableQuest`, `findTurnInNpc`, `evaluateQuest`, `findBestQuestToAccept`, `findQuestGivers` | bot-types, `programming-game/types` |
 
 **Dependency rule:** `utils` and `bot-types` at the bottom. Domain modules (`inventory`, `equipment`, `craft`, `trade`) import from `utils`/`bot-types` only — never from each other. `index.ts` imports from all of them.
 
@@ -109,7 +110,7 @@ Add section comments and reorganize inline. No new files.
 
 ## Action Items
 
-1. [ ] Expand `bot-types.ts` with shared structural types (`RecipeList`, `ItemMap`, `QuestMap`, `UpgradeTarget`)
+1. [x] Expand `bot-types.ts` with shared structural types (`RecipeList`, `ItemMap`, `QuestMap` → `ActiveQuests`, `UpgradeTarget`)
 2. [ ] Create `src/utils.ts`
 3. [ ] Create `src/inventory.ts`
 4. [ ] Create `src/equipment.ts`
@@ -117,3 +118,4 @@ Add section comments and reorganize inline. No new files.
 6. [ ] Create `src/trade.ts`
 7. [ ] Single wiring PR: update `index.ts` imports, delete extracted inline code
 8. [ ] Update issue #14 to reflect revised scope and link this ADR
+9. [x] Create `src/quests.ts` (extracted quest logic — follow-up to initial extraction wave)
