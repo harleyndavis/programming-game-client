@@ -34,18 +34,18 @@ Extract only the modules that are provably self-contained pure function librarie
 | `src/utils.ts` | `distanceBetween`, `isFiniteNumber`, `isFinitePosition` | nothing |
 | `bot-types.ts` (expanded) | `RecipeList`, `ItemMap`, `QuestMap`, `UpgradeTarget`, existing dashboard types | nothing domain-specific |
 | `src/inventory.ts` | `getInventoryWeight`, `isEncumbered`, `findHeaviestInventoryItem`, `computeDeposit`, `computeWithdrawForCraft`, `computeWithdrawForPurchase`, `computeWithdrawToSell`, `computeStorageFee` | utils, bot-types |
-| `src/gear.ts` | `computeUpgradeTargets`, `computeDifficultyTier`, `canObtainChain`, `getChainedIngredients`, `getTargetItemsToKeep`, `getEquippedRecipeInputs`, `computeTargetsToBuyFromMerchant`, `findGearToEquip` | utils, bot-types |
+| `src/equipment.ts` | `computeUpgradeTargets`, `computeDifficultyTier`, `canObtainChain`, `getChainedIngredients`, `getTargetItemsToKeep`, `getEquippedRecipeInputs`, `computeTargetsToBuyFromMerchant`, `findGearToEquip` | utils, bot-types |
 | `src/craft.ts` | `findCraftableTarget`, `findNextCraftTarget`, `findCraftableSubStep` | utils, bot-types |
 | `src/trade.ts` | `findBestSellMerchant` | bot-types, `programming-game/types` |
 
-**Dependency rule:** `utils` and `bot-types` at the bottom. Domain modules (`inventory`, `gear`, `craft`, `trade`) import from `utils`/`bot-types` only — never from each other. `index.ts` imports from all of them.
+**Dependency rule:** `utils` and `bot-types` at the bottom. Domain modules (`inventory`, `equipment`, `craft`, `trade`) import from `utils`/`bot-types` only — never from each other. `index.ts` imports from all of them.
 
 ### What stays in index.ts
 
 - All mutable state: `recoveringAtHome`, `huntTier`, `stickyTargetId`, `depositInProgress`, `lastEquipment`, arena bookkeeping, etc.
 - `decide()` and the full priority-stack decision logic
 - The tick loop, event handlers, and `connect()` wiring
-- `keepItems` aggregation (union of `gear.ts` + `craft.ts` outputs)
+- `keepItems` aggregation (union of `equipment.ts` + `craft.ts` outputs)
 - Override priority chain: `withdrawOverride ?? depositOverride ?? decide()`
 - Arena logic
 
@@ -101,7 +101,7 @@ Add section comments and reorganize inline. No new files.
 
 ## Consequences
 
-- Agents working on gear progression go to `src/gear.ts`; agents working on recipe logic go to `src/craft.ts`; agents working on storage go to `src/inventory.ts` — without reading the full tick loop
+- Agents working on gear progression go to `src/equipment.ts`; agents working on recipe logic go to `src/craft.ts`; agents working on storage go to `src/inventory.ts` — without reading the full tick loop
 - `index.ts` shrinks meaningfully but remains the largest file; this is acceptable until the needs aggregation and utility scoring rewrite create the right home for the orchestration logic
 - The `decide()` rewrite (issue #7) will likely extract `decisions.ts` at that time, shaped correctly for scored candidates rather than as a copy of the current priority stack
 - The needs/produces aggregation (part of issue #6/#7) will eventually replace index.ts's manual `keepItems` union and enable the planner modules to be independent — that is the trigger for the next extraction phase
@@ -112,7 +112,7 @@ Add section comments and reorganize inline. No new files.
 1. [ ] Expand `bot-types.ts` with shared structural types (`RecipeList`, `ItemMap`, `QuestMap`, `UpgradeTarget`)
 2. [ ] Create `src/utils.ts`
 3. [ ] Create `src/inventory.ts`
-4. [ ] Create `src/gear.ts`
+4. [ ] Create `src/equipment.ts`
 5. [ ] Create `src/craft.ts`
 6. [ ] Create `src/trade.ts`
 7. [ ] Single wiring PR: update `index.ts` imports, delete extracted inline code

@@ -11,19 +11,27 @@ If any of these files don't exist, **proceed silently**. Don't flag their absenc
 
 ## File structure
 
-**Current state** — all source files live at the root (no `src/` yet):
+**Current state** — bot logic lives at the root; extracted modules live in `src/`:
 
 ```
 /
 ├── CONTEXT.md           ← domain model and glossary
 ├── CLAUDE.md            ← codebase map and agent instructions
 ├── docs/adr/            ← architecture decision records
-├── index.ts             ← bot entry point (start here for logic work)
+├── index.ts             ← bot entry point (orchestrator, owns state + decide())
 ├── bot-types.ts         ← bot-specific TypeScript types
 ├── snapshot.ts          ← heartbeat → DashboardSnapshot adapter
 ├── dashboard.ts         ← HTTP server for the dashboard UI
 ├── dashboard-client.ts  ← browser-side dashboard script
 ├── dashboard.html / .css
+├── src/
+│   ├── logger.ts        ← structured per-tick logging + death snapshots
+│   ├── utils.ts         ← pure-function helpers
+│   ├── inventory.ts     ← inventory/storage queries
+│   ├── equipment.ts     ← gear upgrade planning
+│   ├── craft.ts         ← crafting target selection
+│   ├── trade.ts         ← merchant/banker helpers
+│   └── __tests__/       ← unit tests (Vitest)
 └── node_modules/programming-game/   ← READ-ONLY game client SDK
     └── src/
         ├── types.ts         ← all server-side types (heartbeat, units, etc.)
