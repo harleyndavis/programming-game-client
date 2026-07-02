@@ -9,7 +9,8 @@ import {
   getSafeLocations,
   findNearestSafeLocation,
   recordMerchant,
-  getMerchantPrices,
+  getMerchantTrades,
+  getLastKnownPosition,
   recordExploredCell,
   isCellExplored,
   getExploredCells,
@@ -78,8 +79,7 @@ describe('openMemoryDb', () => {
         'schema_version',
         'safe_locations',
         'entities',
-        'merchants',
-        'merchant_prices',
+        'merchant_trades',
         'explored_cells',
         'heat_map',
         'combat_history',
@@ -188,12 +188,19 @@ describe('safe locations', () => {
 });
 
 describe('merchant knowledge', () => {
-  it('references its entity catalog entry, keyed by the NPC\'s own name (not its shared npcType)', () => {
+  it('references its entity catalog entry, keyed by the NPC\'s own name (not its shared npcType) — no separate merchants table', () => {
     const db = openMemoryDb(':memory:');
     recordMerchant(db, makeMerchantNpc(), 1000);
     const entity = getEntity(db, 'npc', 'Wandering Trader');
-    const row = db.prepare('SELECT entity_id FROM merchants WHERE name = ?').get('Wandering Trader') as { entity_id: number };
-    expect(row.entity_id).toBe(entity?.id);
+    expect(entity).not.toBeNull();
+    db.close();
+  });
+
+  it('also records a heat_map sighting, so a position is always available — no separate merchants.x/y', () => {
+    const db = openMemoryDb(':memory:');
+    recordMerchant(db, makeMerchantNpc(), 1000);
+    const entity = getEntity(db, 'npc', 'Wandering Trader');
+    expect(getLastKnownPosition(db, entity!.id)).toEqual({ x: 5, y: 5 });
     db.close();
   });
 
@@ -211,18 +218,21 @@ describe('merchant knowledge', () => {
   it('records a merchant unit and its buying/selling prices', () => {
     const db = openMemoryDb(':memory:');
     recordMerchant(db, makeMerchantNpc(), 1000);
-    const buyOffers = getMerchantPrices(db, 'copperOre');
+    const entity = getEntity(db, 'npc', 'Wandering Trader');
+    const buyOffers = getMerchantTrades(db, 'copperOre');
     expect(buyOffers).toEqual([
       {
+        entityId: entity?.id,
         merchantName: 'Wandering Trader',
         position: { x: 5, y: 5 },
         buying: { price: 2, quantity: 50 },
         selling: undefined,
       },
     ]);
-    const sellOffers = getMerchantPrices(db, 'copperIngot');
+    const sellOffers = getMerchantTrades(db, 'copperIngot');
     expect(sellOffers).toEqual([
       {
+        entityId: entity?.id,
         merchantName: 'Wandering Trader',
         position: { x: 5, y: 5 },
         buying: undefined,
@@ -248,9 +258,16 @@ describe('merchant knowledge', () => {
       } as any),
       2000,
     );
-    const offers = getMerchantPrices(db, 'copperOre');
+    const entity = getEntity(db, 'npc', 'Wandering Trader');
+    const offers = getMerchantTrades(db, 'copperOre');
     expect(offers).toEqual([
-      { merchantName: 'Wandering Trader', position: { x: 9, y: 9 }, buying: { price: 3, quantity: 40 }, selling: undefined },
+      {
+        entityId: entity?.id,
+        merchantName: 'Wandering Trader',
+        position: { x: 9, y: 9 },
+        buying: { price: 3, quantity: 40 },
+        selling: undefined,
+      },
     ]);
     db.close();
   });
@@ -258,7 +275,7 @@ describe('merchant knowledge', () => {
   it('returns an empty array for an item no known merchant trades', () => {
     const db = openMemoryDb(':memory:');
     recordMerchant(db, makeMerchantNpc(), 1000);
-    expect(getMerchantPrices(db, 'pinewoodLog')).toEqual([]);
+    expect(getMerchantTrades(db, 'pinewoodLog')).toEqual([]);
     db.close();
   });
 });
@@ -350,6 +367,22 @@ describe('heat map sightings', () => {
     const [sighting] = getHeatMapSightings(db, { entityType: 'monster' });
     const entity = getEntity(db, 'monster', Monsters.rat);
     expect(sighting.entityId).toBe(entity?.id);
+    db.close();
+  });
+});
+
+describe('getLastKnownPosition', () => {
+  it('returns the freshest sighted cell for an entity', () => {
+    const db = openMemoryDb(':memory:');
+    const entityId = recordMonsterSighting(db, makeMonster(), 1000);
+    recordMonsterSighting(db, makeMonster({ position: { x: 200, y: 200 } } as any), 2000);
+    expect(getLastKnownPosition(db, entityId)).toEqual({ x: 200, y: 200 });
+    db.close();
+  });
+
+  it('returns null for an entity never sighted', () => {
+    const db = openMemoryDb(':memory:');
+    expect(getLastKnownPosition(db, 999)).toBeNull();
     db.close();
   });
 });

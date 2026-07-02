@@ -36,25 +36,6 @@ CREATE TABLE IF NOT EXISTS entities (
   UNIQUE (entity_type, entity_name)
 );
 
-CREATE TABLE IF NOT EXISTS merchants (
-  name          TEXT    PRIMARY KEY,
-  entity_id     INTEGER NOT NULL REFERENCES entities(id),
-  x             REAL    NOT NULL,
-  y             REAL    NOT NULL,
-  last_seen_at  INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS merchant_prices (
-  merchant_name  TEXT    NOT NULL REFERENCES merchants(name),
-  item           TEXT    NOT NULL,
-  buy_price      INTEGER,
-  buy_qty        INTEGER,
-  sell_price     INTEGER,
-  sell_qty       INTEGER,
-  last_seen_at   INTEGER NOT NULL,
-  PRIMARY KEY (merchant_name, item)
-);
-
 CREATE TABLE IF NOT EXISTS explored_cells (
   cell_x         INTEGER NOT NULL,
   cell_y         INTEGER NOT NULL,
@@ -70,6 +51,17 @@ CREATE TABLE IF NOT EXISTS heat_map (
   observation_count  INTEGER NOT NULL DEFAULT 1,
   last_seen_at       INTEGER NOT NULL,
   PRIMARY KEY (entity_id, x, y)
+);
+
+CREATE TABLE IF NOT EXISTS merchant_trades (
+  entity_id      INTEGER NOT NULL REFERENCES entities(id),
+  item           TEXT    NOT NULL,
+  buy_price      INTEGER,
+  buy_qty        INTEGER,
+  sell_price     INTEGER,
+  sell_qty       INTEGER,
+  last_seen_at   INTEGER NOT NULL,
+  PRIMARY KEY (entity_id, item)
 );
 
 CREATE TABLE IF NOT EXISTS combat_history (
@@ -96,13 +88,12 @@ CREATE TABLE IF NOT EXISTS drop_counts (
 );
 
 CREATE TABLE IF NOT EXISTS quests (
-  npc_name      TEXT    NOT NULL,
+  entity_id     INTEGER NOT NULL REFERENCES entities(id),
   quest_id      TEXT    NOT NULL,
   status        TEXT    NOT NULL,
-  entity_id     INTEGER NOT NULL REFERENCES entities(id),
   quest_json    TEXT    NOT NULL,
   last_seen_at  INTEGER NOT NULL,
-  PRIMARY KEY (npc_name, quest_id)
+  PRIMARY KEY (entity_id, quest_id)
 );
 `;
 
@@ -125,15 +116,21 @@ export const openMemoryDb = (path: string): Database.Database => {
 };
 
 // ── Entity catalog ───────────────────────────────────────────────────────
-// The canonical registry of every distinct entity type/species/subtype the
-// bot has ever observed — one row per (entityType, entityName). Pure
-// identity, nothing else: no position, no timestamp. Heat map sightings,
-// merchants, quests, combat history, and drop tables all reference an
-// entity by id here instead of duplicating the type/name pair across every
-// row; each of those tables already tracks its own "when" (last_seen_at /
-// last_updated_at) for its own context, so the catalog doesn't need to.
-// This is what answers "what kinds of trees/ore/NPCs/monsters have we
-// seen" — heat_map stays purely about where/when.
+// The canonical registry of every distinct entity the bot has ever observed
+// — one row per (entityType, entityName). Pure identity, nothing else: no
+// position, no timestamp. Heat map sightings, merchant trades, quests,
+// combat history, and drop tables all reference an entity by id here
+// instead of duplicating the type/name pair across every row; each of
+// those tables already tracks its own "when" for its own context, so the
+// catalog doesn't need to.
+//
+// What entityName holds depends on whether individuals of that type are
+// unique or interchangeable. Monsters and resources are interchangeable
+// instances of a species/type (monster.monsterId; treeType/oreType — many
+// different rat instances, or many different pine trees, all collapse
+// into one entity), but NPCs are individually named, persistent characters
+// — the entity is npc.name (e.g. "Aigor the Merchant"), never npcType,
+// which is a shared role rather than an identity.
 
 export type EntityType = 'monster' | 'npc' | 'resource' | 'station';
 
@@ -237,78 +234,6 @@ export const findNearestSafeLocation = (
   return nearest;
 };
 
-// ── Merchant knowledge ───────────────────────────────────────────────────
-
-export type MerchantPriceOffer = {
-  merchantName: string;
-  position: Position;
-  buying: { price: number; quantity: number } | undefined;
-  selling: { price: number; quantity: number } | undefined;
-};
-
-/** Records a merchant's position and every item it's currently seen buying/selling. */
-export const recordMerchant = (db: Database.Database, npc: ClientSideNPC, now: number): void => {
-  // NPCs are individually named, persistent characters (unlike monsters, which are
-  // interchangeable instances of a species) — the entity is this specific NPC, keyed
-  // by name, not the 'merchant' role every row in this table shares.
-  const entityId = getOrCreateEntity(db, 'npc', npc.name);
-
-  db.prepare(
-    `INSERT INTO merchants (name, entity_id, x, y, last_seen_at)
-     VALUES (@name, @entityId, @x, @y, @now)
-     ON CONFLICT(name) DO UPDATE SET
-       entity_id = excluded.entity_id,
-       x = excluded.x,
-       y = excluded.y,
-       last_seen_at = excluded.last_seen_at`,
-  ).run({ name: npc.name, entityId, x: npc.position.x, y: npc.position.y, now });
-
-  const buying = npc.trades?.buying ?? {};
-  const selling = npc.trades?.selling ?? {};
-  const items = new Set<string>([...Object.keys(buying), ...Object.keys(selling)]);
-
-  const upsertPrice = db.prepare(
-    `INSERT INTO merchant_prices (merchant_name, item, buy_price, buy_qty, sell_price, sell_qty, last_seen_at)
-     VALUES (@merchantName, @item, @buyPrice, @buyQty, @sellPrice, @sellQty, @now)
-     ON CONFLICT(merchant_name, item) DO UPDATE SET
-       buy_price = COALESCE(excluded.buy_price, merchant_prices.buy_price),
-       buy_qty = COALESCE(excluded.buy_qty, merchant_prices.buy_qty),
-       sell_price = COALESCE(excluded.sell_price, merchant_prices.sell_price),
-       sell_qty = COALESCE(excluded.sell_qty, merchant_prices.sell_qty),
-       last_seen_at = excluded.last_seen_at`,
-  );
-
-  for (const item of Array.from(items)) {
-    const buyOffer = (buying as Record<string, { price: number; quantity: number } | undefined>)[item];
-    const sellOffer = (selling as Record<string, { price: number; quantity: number } | undefined>)[item];
-    upsertPrice.run({
-      merchantName: npc.name,
-      item,
-      buyPrice: buyOffer?.price ?? null,
-      buyQty: buyOffer?.quantity ?? null,
-      sellPrice: sellOffer?.price ?? null,
-      sellQty: sellOffer?.quantity ?? null,
-      now,
-    });
-  }
-};
-
-export const getMerchantPrices = (db: Database.Database, item: Items): MerchantPriceOffer[] =>
-  db
-    .prepare(
-      `SELECT mp.merchant_name, mp.buy_price, mp.buy_qty, mp.sell_price, mp.sell_qty, m.x, m.y
-       FROM merchant_prices mp
-       JOIN merchants m ON m.name = mp.merchant_name
-       WHERE mp.item = ?`,
-    )
-    .all(item)
-    .map((row: any) => ({
-      merchantName: row.merchant_name,
-      position: { x: row.x, y: row.y },
-      buying: row.buy_price != null ? { price: row.buy_price, quantity: row.buy_qty } : undefined,
-      selling: row.sell_price != null ? { price: row.sell_price, quantity: row.sell_qty } : undefined,
-    }));
-
 // ── Explored cells ───────────────────────────────────────────────────────
 
 export type ExploredCell = {
@@ -375,13 +300,14 @@ export type HeatMapSighting = {
   lastSeenAt: number;
 };
 
+/** Records a sighting and returns the entity's id, so callers can reuse it without a second lookup. */
 const recordSighting = (
   db: Database.Database,
   entityType: EntityType,
   entityName: string,
   position: Position,
   now: number,
-): void => {
+): number => {
   const entityId = getOrCreateEntity(db, entityType, entityName);
   const x = Math.floor(position.x);
   const y = Math.floor(position.y);
@@ -392,10 +318,11 @@ const recordSighting = (
        observation_count = observation_count + 1,
        last_seen_at = excluded.last_seen_at`,
   ).run({ entityId, x, y, now });
+  return entityId;
 };
 
 /** Records a monster sighting, keyed by the SDK's `monsterId` — never a bot-invented label. */
-export const recordMonsterSighting = (db: Database.Database, monster: ClientSideMonster, now: number): void =>
+export const recordMonsterSighting = (db: Database.Database, monster: ClientSideMonster, now: number): number =>
   recordSighting(db, 'monster', monster.monsterId, monster.position, now);
 
 /**
@@ -404,7 +331,7 @@ export const recordMonsterSighting = (db: Database.Database, monster: ClientSide
  * type the way monsters are, so each one gets its own entity rather than sharing a
  * `npcType` bucket with every other NPC of the same role.
  */
-export const recordNpcSighting = (db: Database.Database, npc: ClientSideNPC, now: number): void =>
+export const recordNpcSighting = (db: Database.Database, npc: ClientSideNPC, now: number): number =>
   recordSighting(db, 'npc', npc.name, npc.position, now);
 
 const resourceSightingParts = (object: GameObject): { entityType: EntityType; entityName: string } => {
@@ -421,9 +348,9 @@ const resourceSightingParts = (object: GameObject): { entityType: EntityType; en
 };
 
 /** Records a resource/station sighting from a raw `GameObject` — tree, mining node, or crafting station. */
-export const recordResourceSighting = (db: Database.Database, object: GameObject, now: number): void => {
+export const recordResourceSighting = (db: Database.Database, object: GameObject, now: number): number => {
   const { entityType, entityName } = resourceSightingParts(object);
-  recordSighting(db, entityType, entityName, object.position, now);
+  return recordSighting(db, entityType, entityName, object.position, now);
 };
 
 export const getHeatMapSightings = (
@@ -458,6 +385,79 @@ export const getHeatMapSightings = (
       lastSeenAt: row.last_seen_at,
     }));
 };
+
+/** The freshest known cell position for an entity, or null if it's never been sighted. */
+export const getLastKnownPosition = (db: Database.Database, entityId: number): Position | null => {
+  const row = db
+    .prepare('SELECT x, y FROM heat_map WHERE entity_id = ? ORDER BY last_seen_at DESC LIMIT 1')
+    .get(entityId) as { x: number; y: number } | undefined;
+  return row ? { x: row.x, y: row.y } : null;
+};
+
+// ── Merchant knowledge ───────────────────────────────────────────────────
+// No standalone "merchants" table — position is heat_map's job (recordMerchant
+// records a sighting too, so a merchant's prices are never captured without
+// also capturing where it was seen), and identity is the entity catalog's job.
+// This table holds only what's specific to being a merchant: per-item trades.
+
+export type MerchantTradeOffer = {
+  entityId: number;
+  merchantName: string;
+  position: Position | null;
+  buying: { price: number; quantity: number } | undefined;
+  selling: { price: number; quantity: number } | undefined;
+};
+
+/** Records a merchant sighting and every item it's currently seen buying/selling. */
+export const recordMerchant = (db: Database.Database, npc: ClientSideNPC, now: number): void => {
+  const entityId = recordNpcSighting(db, npc, now);
+
+  const buying = npc.trades?.buying ?? {};
+  const selling = npc.trades?.selling ?? {};
+  const items = new Set<string>([...Object.keys(buying), ...Object.keys(selling)]);
+
+  const upsertTrade = db.prepare(
+    `INSERT INTO merchant_trades (entity_id, item, buy_price, buy_qty, sell_price, sell_qty, last_seen_at)
+     VALUES (@entityId, @item, @buyPrice, @buyQty, @sellPrice, @sellQty, @now)
+     ON CONFLICT(entity_id, item) DO UPDATE SET
+       buy_price = COALESCE(excluded.buy_price, merchant_trades.buy_price),
+       buy_qty = COALESCE(excluded.buy_qty, merchant_trades.buy_qty),
+       sell_price = COALESCE(excluded.sell_price, merchant_trades.sell_price),
+       sell_qty = COALESCE(excluded.sell_qty, merchant_trades.sell_qty),
+       last_seen_at = excluded.last_seen_at`,
+  );
+
+  for (const item of Array.from(items)) {
+    const buyOffer = (buying as Record<string, { price: number; quantity: number } | undefined>)[item];
+    const sellOffer = (selling as Record<string, { price: number; quantity: number } | undefined>)[item];
+    upsertTrade.run({
+      entityId,
+      item,
+      buyPrice: buyOffer?.price ?? null,
+      buyQty: buyOffer?.quantity ?? null,
+      sellPrice: sellOffer?.price ?? null,
+      sellQty: sellOffer?.quantity ?? null,
+      now,
+    });
+  }
+};
+
+export const getMerchantTrades = (db: Database.Database, item: Items): MerchantTradeOffer[] =>
+  db
+    .prepare(
+      `SELECT mt.entity_id, mt.buy_price, mt.buy_qty, mt.sell_price, mt.sell_qty, e.entity_name
+       FROM merchant_trades mt
+       JOIN entities e ON e.id = mt.entity_id
+       WHERE mt.item = ?`,
+    )
+    .all(item)
+    .map((row: any) => ({
+      entityId: row.entity_id,
+      merchantName: row.entity_name,
+      position: getLastKnownPosition(db, row.entity_id),
+      buying: row.buy_price != null ? { price: row.buy_price, quantity: row.buy_qty } : undefined,
+      selling: row.sell_price != null ? { price: row.sell_price, quantity: row.sell_qty } : undefined,
+    }));
 
 // ── Combat history ───────────────────────────────────────────────────────
 
@@ -582,9 +582,10 @@ export const getDropRates = (db: Database.Database, monsterId: Monsters): DropRa
 };
 
 // ── Quests ───────────────────────────────────────────────────────────────
-// Keyed by giving NPC rather than a position — quests aren't a geographic
-// fact. The SDK quest object is persisted verbatim (as JSON) and rehydrated
-// on read, rather than re-derived into a bespoke requirements/reward schema.
+// Keyed by giving NPC entity rather than a position — quests aren't a
+// geographic fact. The SDK quest object is persisted verbatim (as JSON)
+// and rehydrated on read, rather than re-derived into a bespoke
+// requirements/reward schema.
 
 export type AvailableQuest = ClientSideNPC['availableQuests'][string];
 
@@ -594,7 +595,6 @@ export type QuestSighting = {
   npcName: string;
   questId: string;
   status: QuestSightingStatus;
-  /** The giving NPC's entity — always resolvable, since npcName is always known. */
   entityId: number;
   quest: ActiveQuest | AvailableQuest;
   lastSeenAt: number;
@@ -609,18 +609,17 @@ export const recordQuestSighting = (
 ): void => {
   const entityId = getOrCreateEntity(db, 'npc', npcName);
   db.prepare(
-    `INSERT INTO quests (npc_name, quest_id, status, entity_id, quest_json, last_seen_at)
-     VALUES (@npcName, @questId, @status, @entityId, @questJson, @now)
-     ON CONFLICT(npc_name, quest_id) DO UPDATE SET
+    `INSERT INTO quests (entity_id, quest_id, status, quest_json, last_seen_at)
+     VALUES (@entityId, @questId, @status, @questJson, @now)
+     ON CONFLICT(entity_id, quest_id) DO UPDATE SET
        status = excluded.status,
-       entity_id = excluded.entity_id,
        quest_json = excluded.quest_json,
        last_seen_at = excluded.last_seen_at`,
-  ).run({ npcName, questId: quest.id, status, entityId, questJson: JSON.stringify(quest), now });
+  ).run({ entityId, questId: quest.id, status, questJson: JSON.stringify(quest), now });
 };
 
-const toQuestSighting = (row: any): QuestSighting => ({
-  npcName: row.npc_name,
+const toQuestSighting = (npcName: string, row: any): QuestSighting => ({
+  npcName,
   questId: row.quest_id,
   status: row.status,
   entityId: row.entity_id,
@@ -633,11 +632,19 @@ export const getQuestSighting = (
   npcName: string,
   questId: string,
 ): QuestSighting | null => {
+  const entity = getEntity(db, 'npc', npcName);
+  if (!entity) return null;
   const row = db
-    .prepare('SELECT * FROM quests WHERE npc_name = ? AND quest_id = ?')
-    .get(npcName, questId);
-  return row ? toQuestSighting(row) : null;
+    .prepare('SELECT * FROM quests WHERE entity_id = ? AND quest_id = ?')
+    .get(entity.id, questId);
+  return row ? toQuestSighting(npcName, row) : null;
 };
 
-export const getKnownQuestsForNpc = (db: Database.Database, npcName: string): QuestSighting[] =>
-  db.prepare('SELECT * FROM quests WHERE npc_name = ?').all(npcName).map(toQuestSighting);
+export const getKnownQuestsForNpc = (db: Database.Database, npcName: string): QuestSighting[] => {
+  const entity = getEntity(db, 'npc', npcName);
+  if (!entity) return [];
+  return db
+    .prepare('SELECT * FROM quests WHERE entity_id = ?')
+    .all(entity.id)
+    .map((row) => toQuestSighting(npcName, row));
+};

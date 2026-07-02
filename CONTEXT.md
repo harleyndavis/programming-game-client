@@ -281,22 +281,27 @@ rates, combat averages, and heat map proximity lookups. Categories:
   `npc.name` (e.g. "Aigor the Merchant"), never `npcType`, which is a shared
   role rather than an identity (keying on it would collapse every merchant
   in the world into one indistinguishable entity). World heat map, combat
-  history, drop tables, merchant knowledge, and quests all reference a
-  catalog entry by id (`entity_id`) rather than duplicating the type/name
-  pair across every row. Answers "what kinds of monsters/trees/ore — or
+  history, drop tables, merchant trades, and quests all reference a catalog
+  entry by id (`entity_id`) — never by name, so there is no `npc_name` or
+  `merchant_name` column anywhere duplicating what `entities.entity_name`
+  already holds for that id. Answers "what kinds of monsters/trees/ore — or
   which named NPCs — have we ever seen" as a standalone query, decoupled
   from the heat map's purely spatial "where/when" concern. Room to extend:
   if an entity type accumulates detail nothing else needs (e.g. harvest
   yields for trees/ore, which NPCs never have), that becomes its own table
-  keyed by the catalog's id — merchant knowledge and quests are already
-  this pattern: per-individual-NPC detail tables (individual identity
-  matters here, since different named merchants can offer different prices,
-  or different named NPCs can each give their own quests) that reference
-  their NPC's own entity.
+  keyed by the catalog's id — merchant trades and quests are already this
+  pattern: per-individual-NPC detail tables (individual identity matters
+  here, since different named merchants can offer different prices, or
+  different named NPCs can each give their own quests) that reference their
+  NPC's own entity and nothing else about it — no position, no name; those
+  live in the entity catalog and the heat map respectively.
 - **Safe locations** — discovered towns, healers, and player-built structures
   where the bot can recover. Not limited to (0, 0).
-- **Merchant knowledge** — location, inventory, and prices for every merchant
-  ever encountered, including ones discovered far from home.
+- **Merchant trades** — per-item buy/sell price and quantity for every
+  merchant NPC ever encountered (keyed to its entity, never a separate
+  `merchants` table — position comes from the heat map, since a merchant is
+  first and foremost an NPC sighting), including ones discovered far from
+  home.
 - **Explored cells** — a sparse grid (cell size derived from
   `player.stats.sightRange`, observed as 10 at baseline but status-dependent,
   so record the sight range used at the time of each observation rather than
