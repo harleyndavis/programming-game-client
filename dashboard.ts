@@ -1,6 +1,6 @@
 import { createServer, IncomingMessage, ServerResponse } from "http";
 import { ClientSideNPC, ClientSideMonster, GameObject } from "programming-game/types";
-import { UpgradePlanItem } from "./bot-types";
+import { UpgradePlanItem, ToolPlanItem } from "./bot-types";
 import { readFileSync } from "fs";
 import { join } from "path";
 import { ModuleKind, ScriptTarget, transpileModule } from "typescript";
@@ -102,8 +102,10 @@ export type DashboardSnapshot = {
     storageFee?: StorageFeeInfo;
     /** Accumulated world knowledge — managed separately via updateWorld(). */
     world?: WorldState;
-    /** Bot upgrade plans — managed separately via updateUpgradePlans(). */
+    /** Bot equipment upgrade plans. */
     upgradePlans?: UpgradePlanItem[];
+    /** Bot tool crafting plans — managed alongside upgradePlans. */
+    toolPlans?: ToolPlanItem[];
     /** Quest rewards captured at acceptance time (server doesn't include them on active quests). */
     questRewards?: Record<string, { items: Record<string, number> }>;
     /** Recent raw server events captured by onEvent, kept in separate per-category buffers. */
@@ -187,6 +189,7 @@ export const createDashboard = (port: number) => {
         raw: {},
         world: { npcs: [], mobs: [], objects: [] },
         upgradePlans: [],
+        toolPlans: [],
     };
 
     /**
@@ -452,6 +455,7 @@ export const createDashboard = (port: number) => {
                 serverState: mergeNonNull(latestSnapshot.serverState, snapshot.serverState),
                 world: snapshot.world ?? latestSnapshot.world,
                 upgradePlans: snapshot.upgradePlans ?? latestSnapshot.upgradePlans,
+                toolPlans: snapshot.toolPlans ?? latestSnapshot.toolPlans,
             };
             broadcastSnapshot(latestSnapshot);
         },

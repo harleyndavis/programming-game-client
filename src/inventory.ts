@@ -79,9 +79,15 @@ export const computeItemsToSell = (opts: {
   items: ItemMap;
   quests: QuestMap;
   keepItems: Set<string>;
+  /**
+   * Quantity-bounded keeps: for items listed here, keep this many and sell the
+   * surplus even when the item is in keepItems. Without this, chain-protected
+   * ingredients (e.g. ratPelt for lightLeather) are hoarded without limit.
+   */
+  keepQuantities?: Partial<Record<string, number>>;
   maxCalories: number;
 }): Partial<Record<string, number>> => {
-  const { inventory, items, quests, keepItems, maxCalories } = opts;
+  const { inventory, items, quests, keepItems, keepQuantities, maxCalories } = opts;
 
   const questItems = getQuestItems(quests);
   const foodToKeep = computeFoodToKeep(inventory, items, maxCalories);
@@ -91,6 +97,12 @@ export const computeItemsToSell = (opts: {
     if (typeof qty !== 'number' || qty <= 0) continue;
     if (items[itemId]?.type === 'currency') continue;
     const pocketQty = Math.max(foodToKeep[itemId] ?? 0, questItems[itemId] ?? 0);
+    const boundedKeep = keepQuantities?.[itemId];
+    if (typeof boundedKeep === 'number') {
+      const surplus = qty - Math.max(pocketQty, boundedKeep);
+      if (surplus > 0) toSell[itemId] = surplus;
+      continue;
+    }
     const surplus = qty - pocketQty;
     if (surplus <= 0) continue;
     if (!keepItems.has(itemId)) toSell[itemId] = surplus;

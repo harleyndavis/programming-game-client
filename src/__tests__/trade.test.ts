@@ -154,4 +154,11 @@ describe('getStorageFeeInfo', () => {
     // availableWithdrawal = 0 - 1 * 100 = -100 → 0
     expect(info.availableWithdrawal).toBe(0);
   });
+
+  it('caps the buffer at half the coins so a heavy hoard cannot lock everything', () => {
+    // 200,000 weight of pelts → feePerCharge 500+ → raw buffer ≫ 9,000 coins
+    const info = getStorageFeeInfo({ copperCoin: 9000, ratPelt: 400000 }, items, 100);
+    expect(info.minCoins).toBe(4500);
+    expect(info.availableWithdrawal).toBe(4500);
+  });
 });

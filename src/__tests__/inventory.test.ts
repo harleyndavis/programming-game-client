@@ -202,4 +202,55 @@ describe('computeItemsToSell', () => {
     expect(result).not.toHaveProperty('copperOre');
     expect(result.ratPelt).toBe(2);
   });
+
+  it('sells surplus beyond keepQuantities even for keepItems-protected items', () => {
+    const result = computeItemsToSell({
+      inventory: { ratPelt: 30 },
+      items,
+      quests: {},
+      keepItems: new Set(['ratPelt']),
+      keepQuantities: { ratPelt: 5 },
+      maxCalories: 0,
+    });
+    expect(result.ratPelt).toBe(25);
+  });
+
+  it('keeps everything when quantity is within the keepQuantities bound', () => {
+    const result = computeItemsToSell({
+      inventory: { ratPelt: 5 },
+      items,
+      quests: {},
+      keepItems: new Set(['ratPelt']),
+      keepQuantities: { ratPelt: 5 },
+      maxCalories: 0,
+    });
+    expect(result).not.toHaveProperty('ratPelt');
+  });
+
+  it('keepQuantities of 0 sells the full stack of a protected item', () => {
+    const result = computeItemsToSell({
+      inventory: { ratPelt: 8 },
+      items,
+      quests: {},
+      keepItems: new Set(['ratPelt']),
+      keepQuantities: { ratPelt: 0 },
+      maxCalories: 0,
+    });
+    expect(result.ratPelt).toBe(8);
+  });
+
+  it('quest turn-in quantities still win over a smaller keepQuantities bound', () => {
+    const quests: QuestMap = {
+      q1: { id: 'q1', steps: [{ type: 'turn_in', requiredItems: { ratPelt: 6 } }] },
+    } as unknown as QuestMap;
+    const result = computeItemsToSell({
+      inventory: { ratPelt: 10 },
+      items,
+      quests,
+      keepItems: new Set(['ratPelt']),
+      keepQuantities: { ratPelt: 2 },
+      maxCalories: 0,
+    });
+    expect(result.ratPelt).toBe(4);
+  });
 });

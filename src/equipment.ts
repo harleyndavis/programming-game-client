@@ -1,4 +1,5 @@
 import type { ItemMap, RecipeList, UpgradeTarget } from "../bot-types";
+import { getChainedIngredients, canObtainChain, computeDifficultyTier } from "./plan";
 
 const ITEM_TYPE_TO_SLOT: Partial<Record<string, string>> = {
   helm: 'helm', chest: 'chest', legs: 'legs', feet: 'feet', hands: 'hands',
@@ -14,79 +15,6 @@ const BUYABLE_SLOTS = new Set(['helm', 'chest', 'legs', 'feet', 'hands', 'weapon
 
 const WEAPON_AMMO_REQUIREMENT: Partial<Record<string, string>> = {
   bow: 'arrow',
-};
-
-export const getChainedIngredients = (
-  targetItemId: string,
-  recipes: RecipeList,
-  visited = new Set<string>(),
-): Set<string> => {
-  if (visited.has(targetItemId)) return new Set();
-  visited.add(targetItemId);
-  const result = new Set<string>();
-  const recipe = recipes.find(r => targetItemId in r.output);
-  if (!recipe) return result;
-  for (const inputId of Object.keys(recipe.input)) {
-    result.add(inputId);
-    getChainedIngredients(inputId, recipes, visited).forEach(id => result.add(id));
-  }
-  return result;
-};
-
-export const canObtainChain = (
-  itemId: string,
-  inventory: Partial<Record<string, number>>,
-  allMerchantSelling: Record<string, { price: number; quantity: number } | undefined>,
-  recipes: RecipeList,
-  visited = new Set<string>(),
-): boolean => {
-  if (visited.has(itemId)) return false;
-  const next = new Set(visited);
-  next.add(itemId);
-  if ((inventory[itemId] ?? 0) > 0) return true;
-  const offer = allMerchantSelling[itemId];
-  if (offer && offer.quantity > 0) return true;
-  const recipe = recipes.find(r => itemId in r.output && r.station == null);
-  if (recipe) {
-    return (
-      Object.keys(recipe.input).every(id => canObtainChain(id, inventory, allMerchantSelling, recipes, next)) &&
-      (recipe.required ?? []).every(id => canObtainChain(id as string, inventory, allMerchantSelling, recipes, next))
-    );
-  }
-  return false;
-};
-
-export const computeDifficultyTier = (opts: {
-  itemId: string;
-  recipe: UpgradeTarget['recipe'] | null;
-  allMerchantSelling: Record<string, { price: number; quantity: number } | undefined>;
-  inventory: Partial<Record<string, number>>;
-  playerCoins: number;
-  recipes: RecipeList;
-}): number => {
-  const { itemId, recipe, allMerchantSelling, inventory, playerCoins, recipes } = opts;
-  const offer = allMerchantSelling[itemId];
-  const inMerchant = !!offer && offer.quantity > 0;
-
-  const buyTier: number = inMerchant ? (offer!.price <= playerCoins ? 1 : 3) : Infinity;
-
-  let craftTier: number = Infinity;
-  if (recipe) {
-    const inv = inventory as Record<string, number>;
-    const hasAllIngredients = Object.entries(recipe.input).every(([id, qty]) => (inv[id] ?? 0) >= (qty ?? 0));
-    const hasAllTools = recipe.required.every(id => (inv[id] ?? 0) >= 1);
-    if (hasAllIngredients && hasAllTools) {
-      craftTier = 2;
-    } else {
-      const allObtainable =
-        Object.keys(recipe.input).every(id => canObtainChain(id, inventory, allMerchantSelling, recipes)) &&
-        recipe.required.every(id => canObtainChain(id as string, inventory, allMerchantSelling, recipes));
-      craftTier = allObtainable ? 4 : 5;
-    }
-  }
-
-  const best = Math.min(buyTier, craftTier);
-  return best === Infinity ? 5 : best;
 };
 
 export const computeUpgradeTargets = (opts: {
