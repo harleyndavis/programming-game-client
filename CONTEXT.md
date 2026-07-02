@@ -24,10 +24,10 @@ sequence.
 - **`src/harvest.ts`** — harvest target/tool planning (missing tools, their crafting-chain prerequisites, craftable ingredient shortfalls)
 - **`src/trade.ts`** — merchant/banker helpers (best sell price, storage fees)
 - **`src/quests.ts`** — quest helpers (completable quest detection, turn-in NPC lookup, reward evaluation with need/stocked-aware scoring, best-quest-to-accept selection, pending turn-in item tracking, stalled-quest abandonment)
+- **`src/memory.ts`** — SQLite-backed (`better-sqlite3`) dumb store for world facts (safe locations, merchant knowledge, explored cells, world heat map, combat history, drop tables, quests), tracked in #6. No opinions — records what it's told, callers interpret. Not new code extracted from `index.ts`; built directly against ADR-0002's module stack, so it is not yet wired into the tick loop (no `index.ts` changes landed with it — see ADR-0003's "create the file, don't touch `index.ts`" sequencing).
 
 The following modules remain in `index.ts` and will be extracted when the architecture supports them (tracked in the linked issues):
 
-- **Memory** (`src/memory.ts`, tracked in #6) — dumb store for world facts (merchant inventory, drop tables, heat map, combat history). No opinions.
 - **Decisions** (`src/decisions.ts`, tracked in #7) — utility scoring engine replacing the current priority-stack `decide()`
 - **Pathfinding** (`src/pathfinding.ts`, tracked in #8) — threat-aware routing. Threat zones are circular regions, not a grid, so routing is tangent-point geometry, not search.
 - **Planners** (`src/upgrade-planner.ts`, `src/quest-planner.ts`) — decompose long-term goals into needs and acquisition paths. Planners never call each other directly — see **Need** below.
@@ -297,10 +297,14 @@ rates, combat averages, and heat map proximity lookups. Categories:
   ingredients and helps prioritise gear upgrade paths based on realistic
   ingredient acquisition cost.
 - **Quests** — accepted/available quests, keyed to the giving NPC rather than
-  a position: requirements, reward, and status. Not part of the heat map —
-  quests aren't a geographic fact.
+  a position, with a status (`available`/`active`). The SDK's own quest object
+  (`ActiveQuest`, or an NPC's `availableQuests` entry) is persisted verbatim
+  rather than re-derived into a bespoke requirements/reward schema. Not part
+  of the heat map — quests aren't a geographic fact.
 
-Currently absent — the bot only knows what is in the current heartbeat tick.
+Implemented in `src/memory.ts` (tracked in #6) as a store only — not yet wired
+into the tick loop, so the bot still only *acts* on what's in the current
+heartbeat tick until a follow-up PR adds write/read call sites.
 
 ### Quest
 A task accepted from an NPC that yields a reward (coins, items) on completion.
