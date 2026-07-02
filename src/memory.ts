@@ -5,6 +5,7 @@ import type {
   ClientSideMonster,
   GameObject,
   ActiveQuest,
+  NPC_TYPE,
 } from 'programming-game/types';
 import type { Items } from 'programming-game/items';
 import type { Monsters } from 'programming-game/monsters';
@@ -29,8 +30,18 @@ CREATE TABLE IF NOT EXISTS safe_locations (
   PRIMARY KEY (name, type)
 );
 
+CREATE TABLE IF NOT EXISTS entities (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  entity_type    TEXT    NOT NULL,
+  entity_name    TEXT    NOT NULL,
+  first_seen_at  INTEGER NOT NULL,
+  last_seen_at   INTEGER NOT NULL,
+  UNIQUE (entity_type, entity_name)
+);
+
 CREATE TABLE IF NOT EXISTS merchants (
   name          TEXT    PRIMARY KEY,
+  entity_id     INTEGER NOT NULL REFERENCES entities(id),
   x             REAL    NOT NULL,
   y             REAL    NOT NULL,
   last_seen_at  INTEGER NOT NULL
@@ -56,17 +67,16 @@ CREATE TABLE IF NOT EXISTS explored_cells (
 );
 
 CREATE TABLE IF NOT EXISTS heat_map (
-  entity_type        TEXT    NOT NULL,
-  entity_name        TEXT    NOT NULL,
+  entity_id          INTEGER NOT NULL REFERENCES entities(id),
   x                  INTEGER NOT NULL,
   y                  INTEGER NOT NULL,
   observation_count  INTEGER NOT NULL DEFAULT 1,
   last_seen_at       INTEGER NOT NULL,
-  PRIMARY KEY (entity_type, entity_name, x, y)
+  PRIMARY KEY (entity_id, x, y)
 );
 
 CREATE TABLE IF NOT EXISTS combat_history (
-  monster_id             TEXT    PRIMARY KEY,
+  entity_id              INTEGER PRIMARY KEY REFERENCES entities(id),
   monster_hp             INTEGER NOT NULL DEFAULT 0,
   kill_count             INTEGER NOT NULL DEFAULT 0,
   hits_received          INTEGER NOT NULL DEFAULT 0,
@@ -75,23 +85,24 @@ CREATE TABLE IF NOT EXISTS combat_history (
 );
 
 CREATE TABLE IF NOT EXISTS monster_kills (
-  monster_id       TEXT    PRIMARY KEY,
+  entity_id        INTEGER PRIMARY KEY REFERENCES entities(id),
   total_kills      INTEGER NOT NULL DEFAULT 0,
   last_updated_at  INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS drop_counts (
-  monster_id     TEXT    NOT NULL REFERENCES monster_kills(monster_id),
+  entity_id      INTEGER NOT NULL REFERENCES entities(id),
   item           TEXT    NOT NULL,
   count          INTEGER NOT NULL DEFAULT 0,
   last_seen_at   INTEGER NOT NULL,
-  PRIMARY KEY (monster_id, item)
+  PRIMARY KEY (entity_id, item)
 );
 
 CREATE TABLE IF NOT EXISTS quests (
   npc_name      TEXT    NOT NULL,
   quest_id      TEXT    NOT NULL,
   status        TEXT    NOT NULL,
+  entity_id     INTEGER REFERENCES entities(id),
   quest_json    TEXT    NOT NULL,
   last_seen_at  INTEGER NOT NULL,
   PRIMARY KEY (npc_name, quest_id)
@@ -114,6 +125,67 @@ export const openMemoryDb = (path: string): Database.Database => {
   }
   migrate(db);
   return db;
+};
+
+// ── Entity catalog ───────────────────────────────────────────────────────
+// The canonical registry of every distinct entity type/species/subtype the
+// bot has ever observed — one row per (entityType, entityName), independent
+// of where or how many times it's been seen. Heat map sightings, merchants,
+// quests, combat history, and drop tables all reference an entity by id
+// here instead of duplicating the type/name pair across every row. This is
+// what answers "what kinds of trees/ore/NPCs/monsters have we seen" —
+// heat_map stays purely about where/when.
+
+export type EntityType = 'monster' | 'npc' | 'resource' | 'station';
+
+export type Entity = {
+  id: number;
+  entityType: EntityType;
+  entityName: string;
+  firstSeenAt: number;
+  lastSeenAt: number;
+};
+
+/** Looks up (or creates) the catalog row for an entity type/name, returning its id. */
+const getOrCreateEntity = (
+  db: Database.Database,
+  entityType: EntityType,
+  entityName: string,
+  now: number,
+): number => {
+  const row = db
+    .prepare(
+      `INSERT INTO entities (entity_type, entity_name, first_seen_at, last_seen_at)
+       VALUES (@entityType, @entityName, @now, @now)
+       ON CONFLICT(entity_type, entity_name) DO UPDATE SET last_seen_at = excluded.last_seen_at
+       RETURNING id`,
+    )
+    .get({ entityType, entityName, now }) as { id: number };
+  return row.id;
+};
+
+const toEntity = (row: any): Entity => ({
+  id: row.id,
+  entityType: row.entity_type,
+  entityName: row.entity_name,
+  firstSeenAt: row.first_seen_at,
+  lastSeenAt: row.last_seen_at,
+});
+
+export const getEntity = (db: Database.Database, entityType: EntityType, entityName: string): Entity | null => {
+  const row = db
+    .prepare('SELECT * FROM entities WHERE entity_type = ? AND entity_name = ?')
+    .get(entityType, entityName);
+  return row ? toEntity(row) : null;
+};
+
+/** Lists every entity type/name the bot has ever seen, optionally filtered to one entityType. */
+export const getKnownEntities = (db: Database.Database, filter: { entityType?: EntityType } = {}): Entity[] => {
+  const where = filter.entityType ? 'WHERE entity_type = @entityType' : '';
+  return db
+    .prepare(`SELECT * FROM entities ${where}`)
+    .all(filter.entityType ? { entityType: filter.entityType } : {})
+    .map(toEntity);
 };
 
 // ── Safe locations ───────────────────────────────────────────────────────
@@ -187,11 +259,17 @@ export type MerchantPriceOffer = {
 
 /** Records a merchant's position and every item it's currently seen buying/selling. */
 export const recordMerchant = (db: Database.Database, npc: ClientSideNPC, now: number): void => {
+  const entityId = getOrCreateEntity(db, 'npc', npc.npcType, now);
+
   db.prepare(
-    `INSERT INTO merchants (name, x, y, last_seen_at)
-     VALUES (@name, @x, @y, @now)
-     ON CONFLICT(name) DO UPDATE SET x = excluded.x, y = excluded.y, last_seen_at = excluded.last_seen_at`,
-  ).run({ name: npc.name, x: npc.position.x, y: npc.position.y, now });
+    `INSERT INTO merchants (name, entity_id, x, y, last_seen_at)
+     VALUES (@name, @entityId, @x, @y, @now)
+     ON CONFLICT(name) DO UPDATE SET
+       entity_id = excluded.entity_id,
+       x = excluded.x,
+       y = excluded.y,
+       last_seen_at = excluded.last_seen_at`,
+  ).run({ name: npc.name, entityId, x: npc.position.x, y: npc.position.y, now });
 
   const buying = npc.trades?.buying ?? {};
   const selling = npc.trades?.selling ?? {};
@@ -293,11 +371,12 @@ export const getExploredCells = (db: Database.Database): ExploredCell[] =>
 // Every sighting starts as an expiring observation and earns confidence
 // through re-confirmation — there's no separate "permanent fixture" table,
 // since whether resources/stations relocate on respawn isn't confirmed yet.
-
-export type HeatMapEntityType = 'monster' | 'npc' | 'resource' | 'station';
+// Purely spatial: "where/when have we seen this entity" — see the entity
+// catalog above for "have we ever seen this at all".
 
 export type HeatMapSighting = {
-  entityType: HeatMapEntityType;
+  entityId: number;
+  entityType: EntityType;
   entityName: string;
   position: Position;
   observationCount: number;
@@ -306,20 +385,21 @@ export type HeatMapSighting = {
 
 const recordSighting = (
   db: Database.Database,
-  entityType: HeatMapEntityType,
+  entityType: EntityType,
   entityName: string,
   position: Position,
   now: number,
 ): void => {
+  const entityId = getOrCreateEntity(db, entityType, entityName, now);
   const x = Math.floor(position.x);
   const y = Math.floor(position.y);
   db.prepare(
-    `INSERT INTO heat_map (entity_type, entity_name, x, y, observation_count, last_seen_at)
-     VALUES (@entityType, @entityName, @x, @y, 1, @now)
-     ON CONFLICT(entity_type, entity_name, x, y) DO UPDATE SET
+    `INSERT INTO heat_map (entity_id, x, y, observation_count, last_seen_at)
+     VALUES (@entityId, @x, @y, 1, @now)
+     ON CONFLICT(entity_id, x, y) DO UPDATE SET
        observation_count = observation_count + 1,
        last_seen_at = excluded.last_seen_at`,
-  ).run({ entityType, entityName, x, y, now });
+  ).run({ entityId, x, y, now });
 };
 
 /** Records a monster sighting, keyed by the SDK's `monsterId` — never a bot-invented label. */
@@ -330,9 +410,7 @@ export const recordMonsterSighting = (db: Database.Database, monster: ClientSide
 export const recordNpcSighting = (db: Database.Database, npc: ClientSideNPC, now: number): void =>
   recordSighting(db, 'npc', npc.npcType, npc.position, now);
 
-const resourceSightingParts = (
-  object: GameObject,
-): { entityType: HeatMapEntityType; entityName: string } => {
+const resourceSightingParts = (object: GameObject): { entityType: EntityType; entityName: string } => {
   switch (object.type) {
     case 'tree':
       return { entityType: 'resource', entityName: object.treeType };
@@ -353,23 +431,29 @@ export const recordResourceSighting = (db: Database.Database, object: GameObject
 
 export const getHeatMapSightings = (
   db: Database.Database,
-  filter: { entityType?: HeatMapEntityType; entityName?: string } = {},
+  filter: { entityType?: EntityType; entityName?: string } = {},
 ): HeatMapSighting[] => {
   const clauses: string[] = [];
   const params: Record<string, string> = {};
   if (filter.entityType) {
-    clauses.push('entity_type = @entityType');
+    clauses.push('e.entity_type = @entityType');
     params.entityType = filter.entityType;
   }
   if (filter.entityName) {
-    clauses.push('entity_name = @entityName');
+    clauses.push('e.entity_name = @entityName');
     params.entityName = filter.entityName;
   }
   const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
   return db
-    .prepare(`SELECT * FROM heat_map ${where}`)
+    .prepare(
+      `SELECT h.*, e.entity_type, e.entity_name
+       FROM heat_map h
+       JOIN entities e ON e.id = h.entity_id
+       ${where}`,
+    )
     .all(params)
     .map((row: any) => ({
+      entityId: row.entity_id,
       entityType: row.entity_type,
       entityName: row.entity_name,
       position: { x: row.x, y: row.y },
@@ -399,41 +483,51 @@ export const recordCombatHit = (
   damageToPlayer: number,
   now: number,
 ): void => {
+  const entityId = getOrCreateEntity(db, 'monster', monsterId, now);
   db.prepare(
-    `INSERT INTO combat_history (monster_id, monster_hp, kill_count, hits_received, total_damage_received, last_updated_at)
-     VALUES (@monsterId, @monsterHp, 0, 1, @damageToPlayer, @now)
-     ON CONFLICT(monster_id) DO UPDATE SET
+    `INSERT INTO combat_history (entity_id, monster_hp, kill_count, hits_received, total_damage_received, last_updated_at)
+     VALUES (@entityId, @monsterHp, 0, 1, @damageToPlayer, @now)
+     ON CONFLICT(entity_id) DO UPDATE SET
        monster_hp = excluded.monster_hp,
        hits_received = hits_received + 1,
        total_damage_received = total_damage_received + excluded.total_damage_received,
        last_updated_at = excluded.last_updated_at`,
-  ).run({ monsterId, monsterHp, damageToPlayer, now });
+  ).run({ entityId, monsterHp, damageToPlayer, now });
 };
 
 /** Records a kill, bumping both survivability tracking (combat_history) and the drop-rate denominator (monster_kills). */
 export const recordMonsterKill = (db: Database.Database, monsterId: Monsters, now: number): void => {
-  db.prepare(
-    `INSERT INTO combat_history (monster_id, monster_hp, kill_count, hits_received, total_damage_received, last_updated_at)
-     VALUES (@monsterId, 0, 1, 0, 0, @now)
-     ON CONFLICT(monster_id) DO UPDATE SET
-       kill_count = kill_count + 1,
-       last_updated_at = excluded.last_updated_at`,
-  ).run({ monsterId, now });
+  const entityId = getOrCreateEntity(db, 'monster', monsterId, now);
 
   db.prepare(
-    `INSERT INTO monster_kills (monster_id, total_kills, last_updated_at)
-     VALUES (@monsterId, 1, @now)
-     ON CONFLICT(monster_id) DO UPDATE SET
+    `INSERT INTO combat_history (entity_id, monster_hp, kill_count, hits_received, total_damage_received, last_updated_at)
+     VALUES (@entityId, 0, 1, 0, 0, @now)
+     ON CONFLICT(entity_id) DO UPDATE SET
+       kill_count = kill_count + 1,
+       last_updated_at = excluded.last_updated_at`,
+  ).run({ entityId, now });
+
+  db.prepare(
+    `INSERT INTO monster_kills (entity_id, total_kills, last_updated_at)
+     VALUES (@entityId, 1, @now)
+     ON CONFLICT(entity_id) DO UPDATE SET
        total_kills = total_kills + 1,
        last_updated_at = excluded.last_updated_at`,
-  ).run({ monsterId, now });
+  ).run({ entityId, now });
 };
 
 export const getCombatHistory = (db: Database.Database, monsterId: Monsters): CombatStats | null => {
-  const row = db.prepare('SELECT * FROM combat_history WHERE monster_id = ?').get(monsterId) as any;
+  const row = db
+    .prepare(
+      `SELECT ch.*, e.entity_name
+       FROM combat_history ch
+       JOIN entities e ON e.id = ch.entity_id
+       WHERE e.entity_type = 'monster' AND e.entity_name = ?`,
+    )
+    .get(monsterId) as any;
   if (!row) return null;
   return {
-    monsterId: row.monster_id,
+    monsterId: row.entity_name,
     monsterHp: row.monster_hp,
     killCount: row.kill_count,
     hitsReceived: row.hits_received,
@@ -458,28 +552,31 @@ export const recordDrop = (
   items: Partial<Record<Items, number>>,
   now: number,
 ): void => {
+  const entityId = getOrCreateEntity(db, 'monster', monsterId, now);
   const upsert = db.prepare(
-    `INSERT INTO drop_counts (monster_id, item, count, last_seen_at)
-     VALUES (@monsterId, @item, @count, @now)
-     ON CONFLICT(monster_id, item) DO UPDATE SET
+    `INSERT INTO drop_counts (entity_id, item, count, last_seen_at)
+     VALUES (@entityId, @item, @count, @now)
+     ON CONFLICT(entity_id, item) DO UPDATE SET
        count = count + excluded.count,
        last_seen_at = excluded.last_seen_at`,
   );
   for (const [item, count] of Object.entries(items)) {
     if (typeof count !== 'number' || count <= 0) continue;
-    upsert.run({ monsterId, item, count, now });
+    upsert.run({ entityId, item, count, now });
   }
 };
 
 /** Drop rate per item = accumulated count / total kills, computed at query time — see issue #6. */
 export const getDropRates = (db: Database.Database, monsterId: Monsters): DropRate[] => {
+  const entity = getEntity(db, 'monster', monsterId);
+  if (!entity) return [];
   const kills = db
-    .prepare('SELECT total_kills FROM monster_kills WHERE monster_id = ?')
-    .get(monsterId) as { total_kills: number } | undefined;
+    .prepare('SELECT total_kills FROM monster_kills WHERE entity_id = ?')
+    .get(entity.id) as { total_kills: number } | undefined;
   if (!kills || kills.total_kills <= 0) return [];
   return db
-    .prepare('SELECT item, count FROM drop_counts WHERE monster_id = ? ORDER BY item')
-    .all(monsterId)
+    .prepare('SELECT item, count FROM drop_counts WHERE entity_id = ? ORDER BY item')
+    .all(entity.id)
     .map((row: any) => ({
       item: row.item,
       count: row.count,
@@ -500,31 +597,44 @@ export type QuestSighting = {
   npcName: string;
   questId: string;
   status: QuestSightingStatus;
+  /** The giving NPC's entity (npcType), when known at record time — see recordQuestSighting. */
+  entityId: number | null;
   quest: ActiveQuest | AvailableQuest;
   lastSeenAt: number;
 };
 
+/**
+ * `npcType` is optional because it isn't always known when a quest is recorded — an
+ * `ActiveQuest` only carries `start_npc`/`end_npc` names, not the giving NPC's type,
+ * unless that NPC is currently visible (as it is when recording an *available* quest
+ * straight off `ClientSideNPC.availableQuests`). Pass it whenever it's on hand; the
+ * entity link fills in the first time it is.
+ */
 export const recordQuestSighting = (
   db: Database.Database,
   npcName: string,
   quest: ActiveQuest | AvailableQuest,
   status: QuestSightingStatus,
   now: number,
+  npcType?: NPC_TYPE,
 ): void => {
+  const entityId = npcType ? getOrCreateEntity(db, 'npc', npcType, now) : null;
   db.prepare(
-    `INSERT INTO quests (npc_name, quest_id, status, quest_json, last_seen_at)
-     VALUES (@npcName, @questId, @status, @questJson, @now)
+    `INSERT INTO quests (npc_name, quest_id, status, entity_id, quest_json, last_seen_at)
+     VALUES (@npcName, @questId, @status, @entityId, @questJson, @now)
      ON CONFLICT(npc_name, quest_id) DO UPDATE SET
        status = excluded.status,
+       entity_id = COALESCE(excluded.entity_id, quests.entity_id),
        quest_json = excluded.quest_json,
        last_seen_at = excluded.last_seen_at`,
-  ).run({ npcName, questId: quest.id, status, questJson: JSON.stringify(quest), now });
+  ).run({ npcName, questId: quest.id, status, entityId, questJson: JSON.stringify(quest), now });
 };
 
 const toQuestSighting = (row: any): QuestSighting => ({
   npcName: row.npc_name,
   questId: row.quest_id,
   status: row.status,
+  entityId: row.entity_id,
   quest: JSON.parse(row.quest_json),
   lastSeenAt: row.last_seen_at,
 });

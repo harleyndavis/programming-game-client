@@ -1,8 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import { Monsters } from 'programming-game/monsters';
+import { NPC_TYPE } from 'programming-game/types';
 import type { ClientSideNPC, ClientSideMonster, GameObject, ActiveQuest } from 'programming-game/types';
 import {
   openMemoryDb,
+  getEntity,
+  getKnownEntities,
   recordSafeLocation,
   getSafeLocations,
   findNearestSafeLocation,
@@ -75,6 +78,7 @@ describe('openMemoryDb', () => {
       expect.arrayContaining([
         'schema_version',
         'safe_locations',
+        'entities',
         'merchants',
         'merchant_prices',
         'explored_cells',
@@ -97,6 +101,43 @@ describe('openMemoryDb', () => {
     const rows = db2.prepare('SELECT version FROM schema_version').all();
     expect(rows.length).toBe(1);
     db2.close();
+  });
+});
+
+describe('entity catalog', () => {
+  it('is populated by a sighting write, independent of location', () => {
+    const db = openMemoryDb(':memory:');
+    recordMonsterSighting(db, makeMonster(), 1000);
+    const entity = getEntity(db, 'monster', Monsters.rat);
+    expect(entity).toMatchObject({ entityType: 'monster', entityName: Monsters.rat, firstSeenAt: 1000, lastSeenAt: 1000 });
+    db.close();
+  });
+
+  it('is shared across every write path that touches the same entity — a heat_map sighting and a combat hit resolve to the same row', () => {
+    const db = openMemoryDb(':memory:');
+    recordMonsterSighting(db, makeMonster(), 1000);
+    recordCombatHit(db, Monsters.rat, 12, 3, 2000);
+    const entities = getKnownEntities(db, { entityType: 'monster' });
+    expect(entities.length).toBe(1);
+    expect(entities[0].lastSeenAt).toBe(2000);
+    db.close();
+  });
+
+  it('getKnownEntities lists distinct entity types/names seen, independent of where', () => {
+    const db = openMemoryDb(':memory:');
+    recordResourceSighting(db, makeTree(), 1000);
+    recordResourceSighting(db, makeTree({ id: 'tree-2', treeType: 'oak', position: { x: 99, y: 99 } } as any), 1000);
+    recordMonsterSighting(db, makeMonster(), 1000);
+    const resources = getKnownEntities(db, { entityType: 'resource' });
+    expect(resources.map((e) => e.entityName).sort()).toEqual(['oak', 'pine']);
+    expect(getKnownEntities(db).length).toBe(3);
+    db.close();
+  });
+
+  it('getEntity returns null for an entity never seen', () => {
+    const db = openMemoryDb(':memory:');
+    expect(getEntity(db, 'monster', Monsters.troll)).toBeNull();
+    db.close();
   });
 });
 
@@ -236,6 +277,7 @@ describe('heat map sightings', () => {
     const sightings = getHeatMapSightings(db, { entityType: 'monster' });
     expect(sightings).toEqual([
       {
+        entityId: expect.any(Number),
         entityType: 'monster',
         entityName: Monsters.rat,
         position: { x: 100, y: -40 },
@@ -279,6 +321,15 @@ describe('heat map sightings', () => {
     const rats = getHeatMapSightings(db, { entityType: 'monster', entityName: Monsters.rat });
     expect(rats.length).toBe(1);
     expect(rats[0].entityName).toBe(Monsters.rat);
+    db.close();
+  });
+
+  it("sighting's entityId matches the entity catalog row, so other entity_id-keyed tables can cross-reference it", () => {
+    const db = openMemoryDb(':memory:');
+    recordMonsterSighting(db, makeMonster(), 1000);
+    const [sighting] = getHeatMapSightings(db, { entityType: 'monster' });
+    const entity = getEntity(db, 'monster', Monsters.rat);
+    expect(sighting.entityId).toBe(entity?.id);
     db.close();
   });
 });
@@ -372,7 +423,26 @@ describe('quests memory', () => {
     const db = openMemoryDb(':memory:');
     recordQuestSighting(db, 'Elder', quest, 'active', 1000);
     const sighting = getQuestSighting(db, 'Elder', 'q1');
-    expect(sighting).toEqual({ npcName: 'Elder', questId: 'q1', status: 'active', quest, lastSeenAt: 1000 });
+    expect(sighting).toEqual({ npcName: 'Elder', questId: 'q1', status: 'active', entityId: null, quest, lastSeenAt: 1000 });
+    db.close();
+  });
+
+  it('links to the entity catalog when the giving NPC type is known', () => {
+    const db = openMemoryDb(':memory:');
+    recordQuestSighting(db, 'Elder', quest, 'available', 1000, NPC_TYPE.guard);
+    const sighting = getQuestSighting(db, 'Elder', 'q1');
+    const entity = getEntity(db, 'npc', 'guard');
+    expect(sighting?.entityId).toBe(entity?.id);
+    db.close();
+  });
+
+  it('keeps the existing entity link when a later sighting omits npcType', () => {
+    const db = openMemoryDb(':memory:');
+    recordQuestSighting(db, 'Elder', quest, 'available', 1000, NPC_TYPE.guard);
+    recordQuestSighting(db, 'Elder', quest, 'active', 2000);
+    const sighting = getQuestSighting(db, 'Elder', 'q1');
+    expect(sighting?.entityId).not.toBeNull();
+    expect(sighting?.status).toBe('active');
     db.close();
   });
 
