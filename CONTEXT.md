@@ -273,12 +273,15 @@ rates, combat averages, and heat map proximity lookups. Categories:
   or ore type, a station subtype). Pure identity — no position, no
   timestamp; every table that references it already tracks its own "when"
   for its own context (`heat_map.last_seen_at`, `combat_history.last_updated_at`,
-  etc.), so the catalog doesn't duplicate that. Merchant knowledge, world
-  heat map, combat history, drop tables, and quests all reference a catalog
-  entry by id rather than duplicating the type/name pair across every row.
-  Answers "what kinds of monsters/NPCs/trees/ore have we ever seen" as a
-  standalone query, decoupled from the heat map's purely spatial
-  "where/when" concern. Room to extend:
+  etc.), so the catalog doesn't duplicate that. World heat map, combat
+  history, drop tables, and quests all reference a catalog entry by id
+  rather than duplicating the type/name pair across every row. Merchant
+  knowledge does not — every row there is a merchant NPC by construction, so
+  a link would always resolve to the same trivial `('npc', 'merchant')`
+  entry; only reference the catalog where the entity type/name actually
+  varies per row. Answers "what kinds of monsters/NPCs/trees/ore have we
+  ever seen" as a standalone query, decoupled from the heat map's purely
+  spatial "where/when" concern. Room to extend:
   if an entity type accumulates detail nothing else needs (e.g. harvest
   yields for trees/ore, which NPCs never have), that becomes its own table
   keyed by the catalog's id — no need to force unrelated types into one
