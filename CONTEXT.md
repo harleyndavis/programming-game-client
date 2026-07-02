@@ -274,20 +274,20 @@ rates, combat averages, and heat map proximity lookups. Categories:
   timestamp; every table that references it already tracks its own "when"
   for its own context (`heat_map.last_seen_at`, `combat_history.last_updated_at`,
   etc.), so the catalog doesn't duplicate that. World heat map, combat
-  history, drop tables, and quests all *store* a catalog reference (`entity_id`)
-  rather than duplicating the type/name pair across every row. Merchant
-  knowledge doesn't store one — every row there is a merchant NPC by
-  construction, so a per-row FK would always resolve to the same trivial
-  `('npc', 'merchant')` entry — but recording a merchant still registers
-  that entry in the catalog as a side effect, since it may be the only write
-  path that ever observes a given merchant. Answers "what kinds of
+  history, drop tables, merchant knowledge, and quests all reference a
+  catalog entry by id (`entity_id`) rather than duplicating the type/name
+  pair across every row — this holds even where the referenced value is
+  constant across all current rows (every merchant references the same
+  `('npc', 'merchant')` entry), because the point is a formal, queryable
+  relationship, not a per-row-varying value. Answers "what kinds of
   monsters/NPCs/trees/ore have we ever seen" as a standalone query,
   decoupled from the heat map's purely spatial "where/when" concern. Room
-  to extend:
-  if an entity type accumulates detail nothing else needs (e.g. harvest
-  yields for trees/ore, which NPCs never have), that becomes its own table
-  keyed by the catalog's id — no need to force unrelated types into one
-  wide schema.
+  to extend: if an entity type accumulates detail nothing else needs (e.g.
+  harvest yields for trees/ore, which NPCs never have), that becomes its
+  own table keyed by the catalog's id — merchant knowledge is exactly this
+  pattern already: a per-individual-instance detail table (unlike monsters,
+  individual merchant identity matters, since different named merchants can
+  offer different prices) that references its `('npc', npcType)` entity.
 - **Safe locations** — discovered towns, healers, and player-built structures
   where the bot can recover. Not limited to (0, 0).
 - **Merchant knowledge** — location, inventory, and prices for every merchant

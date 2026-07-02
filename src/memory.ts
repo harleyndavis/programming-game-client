@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS entities (
 
 CREATE TABLE IF NOT EXISTS merchants (
   name          TEXT    PRIMARY KEY,
+  entity_id     INTEGER NOT NULL REFERENCES entities(id),
   x             REAL    NOT NULL,
   y             REAL    NOT NULL,
   last_seen_at  INTEGER NOT NULL
@@ -248,20 +249,17 @@ export type MerchantPriceOffer = {
 
 /** Records a merchant's position and every item it's currently seen buying/selling. */
 export const recordMerchant = (db: Database.Database, npc: ClientSideNPC, now: number): void => {
-  // Registers ('npc', npcType) in the entity catalog even though merchants
-  // rows don't store the id — recordMerchant may be the only write path that
-  // ever touches a given merchant, so the catalog needs its own side effect
-  // here rather than relying on a heat_map sighting to have happened too.
-  getOrCreateEntity(db, 'npc', npc.npcType);
+  const entityId = getOrCreateEntity(db, 'npc', npc.npcType);
 
   db.prepare(
-    `INSERT INTO merchants (name, x, y, last_seen_at)
-     VALUES (@name, @x, @y, @now)
+    `INSERT INTO merchants (name, entity_id, x, y, last_seen_at)
+     VALUES (@name, @entityId, @x, @y, @now)
      ON CONFLICT(name) DO UPDATE SET
+       entity_id = excluded.entity_id,
        x = excluded.x,
        y = excluded.y,
        last_seen_at = excluded.last_seen_at`,
-  ).run({ name: npc.name, x: npc.position.x, y: npc.position.y, now });
+  ).run({ name: npc.name, entityId, x: npc.position.x, y: npc.position.y, now });
 
   const buying = npc.trades?.buying ?? {};
   const selling = npc.trades?.selling ?? {};

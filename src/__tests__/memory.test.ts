@@ -189,10 +189,12 @@ describe('safe locations', () => {
 });
 
 describe('merchant knowledge', () => {
-  it('registers the npcType in the entity catalog, even though merchants rows do not store an entity_id', () => {
+  it('references its entity catalog entry for npcType', () => {
     const db = openMemoryDb(':memory:');
     recordMerchant(db, makeMerchantNpc(), 1000);
-    expect(getEntity(db, 'npc', 'merchant')).toEqual({ id: expect.any(Number), entityType: 'npc', entityName: 'merchant' });
+    const entity = getEntity(db, 'npc', 'merchant');
+    const row = db.prepare('SELECT entity_id FROM merchants WHERE name = ?').get('Wandering Trader') as { entity_id: number };
+    expect(row.entity_id).toBe(entity?.id);
     db.close();
   });
 
