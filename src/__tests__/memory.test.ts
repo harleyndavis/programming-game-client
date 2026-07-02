@@ -189,6 +189,13 @@ describe('safe locations', () => {
 });
 
 describe('merchant knowledge', () => {
+  it('registers the npcType in the entity catalog, even though merchants rows do not store an entity_id', () => {
+    const db = openMemoryDb(':memory:');
+    recordMerchant(db, makeMerchantNpc(), 1000);
+    expect(getEntity(db, 'npc', 'merchant')).toEqual({ id: expect.any(Number), entityType: 'npc', entityName: 'merchant' });
+    db.close();
+  });
+
   it('records a merchant unit and its buying/selling prices', () => {
     const db = openMemoryDb(':memory:');
     recordMerchant(db, makeMerchantNpc(), 1000);

@@ -248,6 +248,12 @@ export type MerchantPriceOffer = {
 
 /** Records a merchant's position and every item it's currently seen buying/selling. */
 export const recordMerchant = (db: Database.Database, npc: ClientSideNPC, now: number): void => {
+  // Registers ('npc', npcType) in the entity catalog even though merchants
+  // rows don't store the id — recordMerchant may be the only write path that
+  // ever touches a given merchant, so the catalog needs its own side effect
+  // here rather than relying on a heat_map sighting to have happened too.
+  getOrCreateEntity(db, 'npc', npc.npcType);
+
   db.prepare(
     `INSERT INTO merchants (name, x, y, last_seen_at)
      VALUES (@name, @x, @y, @now)
