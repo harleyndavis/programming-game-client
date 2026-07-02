@@ -4,7 +4,10 @@ import {
   collectHarvestToolItemIds,
   getHarvestableTarget,
   getMissingHarvestToolIds,
+  collectHarvestCraftingChainToolIds,
+  collectCraftableInputIngredients,
 } from '../harvest';
+import type { RecipeList } from '../../bot-types';
 
 describe('isHarvestWeaponType', () => {
   it('returns true for fellingAxe', () => {
@@ -188,5 +191,105 @@ describe('getMissingHarvestToolIds', () => {
     const copperAxeIdx = result.indexOf('copperFellingAxe');
     const copperPickIdx = result.indexOf('copperPickaxe');
     expect(Math.max(stoneAxeIdx, stonePickIdx)).toBeLessThan(Math.min(copperAxeIdx, copperPickIdx));
+  });
+});
+
+describe('collectHarvestCraftingChainToolIds', () => {
+  it('returns empty array when the tool has no recipe', () => {
+    expect(collectHarvestCraftingChainToolIds(['unknownItem'], [])).toEqual([]);
+  });
+
+  it('collects a directly required tool', () => {
+    const recipes: RecipeList = [
+      { id: 'axe', input: { pinewoodAxeHandle: 1 }, output: { stoneFellingAxe: 1 }, required: ['stoneCarvingKnife'], station: null },
+    ];
+    const result = collectHarvestCraftingChainToolIds(['stoneFellingAxe'], recipes);
+    expect(result).toContain('stoneCarvingKnife');
+    expect(result).not.toContain('stoneFellingAxe');
+  });
+
+  it('recurses into a required tool\'s own required tool', () => {
+    const recipes: RecipeList = [
+      { id: 'axe', input: {}, output: { stoneFellingAxe: 1 }, required: ['stoneCarvingKnife'], station: null },
+      { id: 'knife', input: { stone: 1 }, output: { stoneCarvingKnife: 1 }, required: ['stoneCutterTools'], station: null },
+    ];
+    const result = collectHarvestCraftingChainToolIds(['stoneFellingAxe'], recipes);
+    expect(result).toContain('stoneCarvingKnife');
+    expect(result).toContain('stoneCutterTools');
+  });
+
+  it('does not collect plain recipe.input ingredients, only recipe.required tools', () => {
+    const recipes: RecipeList = [
+      { id: 'axe', input: { pinewoodAxeHandle: 1 }, output: { stoneFellingAxe: 1 }, required: [], station: null },
+      { id: 'handle', input: { pinewoodLog: 2 }, output: { pinewoodAxeHandle: 1 }, required: ['carvingTool'], station: null },
+    ];
+    const result = collectHarvestCraftingChainToolIds(['stoneFellingAxe'], recipes);
+    expect(result).toEqual(['carvingTool']);
+    expect(result).not.toContain('pinewoodAxeHandle');
+    expect(result).not.toContain('pinewoodLog');
+  });
+
+  it('dedupes a shared required tool across multiple missing harvest tools', () => {
+    const recipes: RecipeList = [
+      { id: 'axe', input: {}, output: { stoneFellingAxe: 1 }, required: ['stoneCarvingKnife'], station: null },
+      { id: 'pick', input: {}, output: { stonePickaxe: 1 }, required: ['stoneCarvingKnife'], station: null },
+    ];
+    const result = collectHarvestCraftingChainToolIds(['stoneFellingAxe', 'stonePickaxe'], recipes);
+    expect(result.filter(id => id === 'stoneCarvingKnife')).toHaveLength(1);
+  });
+});
+
+describe('collectCraftableInputIngredients', () => {
+  it('returns empty for no target items', () => {
+    expect(collectCraftableInputIngredients([], {}, [])).toEqual([]);
+  });
+
+  it('includes a craftable ingredient we are short on', () => {
+    const recipes: RecipeList = [
+      { id: 'axe', input: { pinewoodAxeHandle: 1, stone: 2 }, output: { stoneFellingAxe: 1 }, required: [], station: null },
+      { id: 'handle', input: { pinewoodLog: 2 }, output: { pinewoodAxeHandle: 1 }, required: [], station: null },
+    ];
+    const result = collectCraftableInputIngredients(['stoneFellingAxe'], {}, recipes);
+    // stone has no recipe (not craftable) so it's excluded; only the craftable shortfall is returned
+    expect(result).toEqual(['pinewoodAxeHandle']);
+  });
+
+  it('excludes an ingredient already covered by inventory', () => {
+    const recipes: RecipeList = [
+      { id: 'axe', input: { pinewoodAxeHandle: 1 }, output: { stoneFellingAxe: 1 }, required: [], station: null },
+      { id: 'handle', input: { pinewoodLog: 2 }, output: { pinewoodAxeHandle: 1 }, required: [], station: null },
+    ];
+    const result = collectCraftableInputIngredients(['stoneFellingAxe'], { pinewoodAxeHandle: 1 }, recipes);
+    expect(result).toEqual([]);
+  });
+
+  it('orders deepest dependency before the item that needs it', () => {
+    const recipes: RecipeList = [
+      { id: 'top', input: { mid: 1 }, output: { top: 1 }, required: [], station: null },
+      { id: 'midR', input: { deep: 1 }, output: { mid: 1 }, required: [], station: null },
+      { id: 'deepR', input: { rawMaterial: 1 }, output: { deep: 1 }, required: [], station: null },
+    ];
+    const result = collectCraftableInputIngredients(['top'], {}, recipes);
+    expect(result).toEqual(['deep', 'mid']);
+  });
+
+  it('includes a craftable ingredient reached through a required tool\'s own chain', () => {
+    const recipes: RecipeList = [
+      { id: 'top', input: {}, output: { top: 1 }, required: ['toolX'], station: null },
+      { id: 'toolXR', input: { toolIngredient: 1 }, output: { toolX: 1 }, required: [], station: null },
+      { id: 'ingredientR', input: {}, output: { toolIngredient: 1 }, required: [], station: null },
+    ];
+    const result = collectCraftableInputIngredients(['top'], {}, recipes);
+    expect(result).toContain('toolIngredient');
+  });
+
+  it('dedupes an ingredient shared by multiple targets', () => {
+    const recipes: RecipeList = [
+      { id: 'axe', input: { pinewoodAxeHandle: 1 }, output: { stoneFellingAxe: 1 }, required: [], station: null },
+      { id: 'pick', input: { pinewoodAxeHandle: 1 }, output: { stonePickaxe: 1 }, required: [], station: null },
+      { id: 'handle', input: { pinewoodLog: 2 }, output: { pinewoodAxeHandle: 1 }, required: [], station: null },
+    ];
+    const result = collectCraftableInputIngredients(['stoneFellingAxe', 'stonePickaxe'], {}, recipes);
+    expect(result).toEqual(['pinewoodAxeHandle']);
   });
 });

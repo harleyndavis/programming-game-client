@@ -1,4 +1,5 @@
 import type { Position, Tree, MiningNode, GameObject } from "programming-game/types";
+import type { RecipeList } from "../bot-types";
 import { isFinitePosition, distanceBetween } from "./utils";
 
 export const HARVEST_WEAPON_TYPES = new Set(['fellingAxe', 'pickaxe']);
@@ -50,6 +51,81 @@ export const HARVEST_TOOL_TIER_ORDER: Record<string, number> = {
   copperFellingAxe: 2,
   copperPickaxe: 2,
 };
+
+/**
+ * Walks the no-station recipe chain for each missing harvest tool and collects
+ * every item ID that appears in a `required` array — these are the crafting
+ * tools (e.g. stoneCarvingKnife) and purchasable tools (e.g. stoneCutterTools)
+ * needed as prerequisites before any harvest tool can be made.
+ * Items that are themselves harvest weapons are excluded (they're tracked separately).
+ */
+export function collectHarvestCraftingChainToolIds(
+  missingHarvestToolIds: string[],
+  recipes: RecipeList,
+): string[] {
+  const result = new Set<string>();
+
+  const visit = (itemId: string, seen: Set<string>): void => {
+    if (seen.has(itemId)) return;
+    seen.add(itemId);
+    const recipe = recipes.find(r => itemId in (r.output ?? {}) && r.station == null);
+    if (!recipe) return;
+    for (const reqId of recipe.required ?? []) {
+      const reqStr = String(reqId);
+      if (!HARVEST_WEAPON_TYPES.has(reqStr)) result.add(reqStr);
+      visit(reqStr, seen);
+    }
+    for (const inputId of Object.keys(recipe.input ?? {})) {
+      visit(inputId, seen);
+    }
+  };
+
+  for (const toolId of missingHarvestToolIds) {
+    visit(toolId, new Set());
+  }
+  return Array.from(result);
+}
+
+/**
+ * For each target item (harvest tools + their required-tool prerequisites),
+ * walks recipe inputs recursively and returns craftable ingredient IDs that
+ * we're short on in combinedInventory — in dependency order (deepest dep first).
+ *
+ * Example: stoneFellingAxe needs pinewoodAxeHandle (craftable) + stone (not
+ * craftable). Only pinewoodAxeHandle is returned.  If pinewoodAxeHandle itself
+ * needs a craftable sub-ingredient, that comes out first.
+ */
+export function collectCraftableInputIngredients(
+  targetItemIds: string[],
+  combinedInventory: Partial<Record<string, number>>,
+  recipes: RecipeList,
+): string[] {
+  const result: string[] = [];
+  const visited = new Set<string>();
+
+  const walk = (itemId: string): void => {
+    if (visited.has(itemId)) return;
+    visited.add(itemId);
+
+    const recipe = recipes.find(r => itemId in (r.output ?? {}) && r.station == null);
+    if (!recipe) return;
+
+    for (const reqId of recipe.required ?? []) walk(String(reqId));
+
+    for (const [inputId, qty] of Object.entries(recipe.input ?? {})) {
+      walk(inputId);
+      const have = combinedInventory[inputId] ?? 0;
+      const need = qty ?? 0;
+      if (have < need) {
+        const subRecipe = recipes.find(r => inputId in (r.output ?? {}) && r.station == null);
+        if (subRecipe && !result.includes(inputId)) result.push(inputId);
+      }
+    }
+  };
+
+  for (const itemId of targetItemIds) walk(itemId);
+  return result;
+}
 
 export function getMissingHarvestToolIds(
   equipment: Record<string, string | null | undefined>,

@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { findCraftableTarget, findNextCraftTarget, findCraftableSubStep, findCraftableFromList } from '../craft';
+import {
+  findCraftableTarget,
+  findNextCraftTarget,
+  findCraftableSubStep,
+  findCraftableFromList,
+  computeCraftIngredientsToBuyFromMerchant,
+  isFullyAchievableFromInventory,
+} from '../craft';
 import type { RecipeList, UpgradeTarget } from '../../bot-types';
 
 describe('findCraftableTarget', () => {
@@ -179,5 +186,101 @@ describe('findCraftableFromList', () => {
     ];
     const result = findCraftableFromList(['stoneFellingAxe'], { stone: 1, stoneCutterTools: 1 }, recipes);
     expect(result).toBeNull();
+  });
+});
+
+describe('computeCraftIngredientsToBuyFromMerchant', () => {
+  it('buys a directly-sold missing ingredient', () => {
+    const recipes: RecipeList = [
+      { id: 'axe', input: { pinewoodLog: 2 }, output: { stoneFellingAxe: 1 }, required: [], station: null },
+    ];
+    const basket = computeCraftIngredientsToBuyFromMerchant(
+      ['stoneFellingAxe'], {}, recipes, { pinewoodLog: { price: 5, quantity: 10 } }, 100,
+    );
+    expect(basket).toEqual({ pinewoodLog: 2 });
+  });
+
+  it('recurses into a craftable sub-ingredient the merchant does not sell', () => {
+    const recipes: RecipeList = [
+      { id: 'axe', input: { pinewoodAxeHandle: 1 }, output: { stoneFellingAxe: 1 }, required: [], station: null },
+      { id: 'handle', input: { pinewoodLog: 2 }, output: { pinewoodAxeHandle: 1 }, required: [], station: null },
+    ];
+    const basket = computeCraftIngredientsToBuyFromMerchant(
+      ['stoneFellingAxe'], {}, recipes, { pinewoodLog: { price: 5, quantity: 10 } }, 100,
+    );
+    expect(basket).toEqual({ pinewoodLog: 2 });
+  });
+
+  it('caps purchases at the available coins', () => {
+    const recipes: RecipeList = [
+      { id: 'axe', input: { pinewoodLog: 2 }, output: { stoneFellingAxe: 1 }, required: [], station: null },
+    ];
+    const basket = computeCraftIngredientsToBuyFromMerchant(
+      ['stoneFellingAxe'], {}, recipes, { pinewoodLog: { price: 10, quantity: 10 } }, 15,
+    );
+    expect(basket).toEqual({ pinewoodLog: 1 });
+  });
+
+  it('includes required tools alongside recipe inputs', () => {
+    const recipes: RecipeList = [
+      { id: 'axe', input: { pinewoodLog: 2 }, output: { stoneFellingAxe: 1 }, required: ['stoneCarvingKnife'], station: null },
+    ];
+    const basket = computeCraftIngredientsToBuyFromMerchant(
+      ['stoneFellingAxe'], {}, recipes,
+      { pinewoodLog: { price: 5, quantity: 10 }, stoneCarvingKnife: { price: 20, quantity: 1 } },
+      100,
+    );
+    expect(basket).toEqual({ pinewoodLog: 2, stoneCarvingKnife: 1 });
+  });
+
+  it('skips ingredients already covered by inventory', () => {
+    const recipes: RecipeList = [
+      { id: 'axe', input: { pinewoodLog: 2 }, output: { stoneFellingAxe: 1 }, required: [], station: null },
+    ];
+    const basket = computeCraftIngredientsToBuyFromMerchant(
+      ['stoneFellingAxe'], { pinewoodLog: 2 }, recipes, { pinewoodLog: { price: 5, quantity: 10 } }, 100,
+    );
+    expect(basket).toEqual({});
+  });
+
+  it('leaves the basket empty for an ingredient with no seller and no recipe', () => {
+    const recipes: RecipeList = [
+      { id: 'axe', input: { mysteryOre: 1 }, output: { stoneFellingAxe: 1 }, required: [], station: null },
+    ];
+    const basket = computeCraftIngredientsToBuyFromMerchant(['stoneFellingAxe'], {}, recipes, {}, 100);
+    expect(basket).toEqual({});
+  });
+});
+
+describe('isFullyAchievableFromInventory', () => {
+  it('returns true when inventory directly covers inputs and tools', () => {
+    const recipe = { id: 'r1', input: { stone: 2 }, required: ['hammer'] };
+    expect(isFullyAchievableFromInventory(recipe, { stone: 2, hammer: 1 }, [])).toBe(true);
+  });
+
+  it('returns true when a missing input is craftable from inventory', () => {
+    const recipe = { id: 'axe', input: { pinewoodAxeHandle: 1 }, required: [] };
+    const recipes: RecipeList = [
+      { id: 'handle', input: { pinewoodLog: 2 }, output: { pinewoodAxeHandle: 1 }, required: [], station: null },
+    ];
+    expect(isFullyAchievableFromInventory(recipe, { pinewoodLog: 2 }, recipes)).toBe(true);
+  });
+
+  it('returns false when a missing input has no recipe', () => {
+    const recipe = { id: 'axe', input: { copperOre: 2 }, required: [] };
+    expect(isFullyAchievableFromInventory(recipe, {}, [])).toBe(false);
+  });
+
+  it('returns false when a required tool is missing', () => {
+    const recipe = { id: 'axe', input: {}, required: ['hammer'] };
+    expect(isFullyAchievableFromInventory(recipe, {}, [])).toBe(false);
+  });
+
+  it('returns false when a sub-recipe ingredient is itself unobtainable', () => {
+    const recipe = { id: 'chest', input: { leather: 2 }, required: [] };
+    const recipes: RecipeList = [
+      { id: 'leatherR', input: { ratPelt: 3 }, output: { leather: 1 }, required: [], station: null },
+    ];
+    expect(isFullyAchievableFromInventory(recipe, {}, recipes)).toBe(false);
   });
 });
