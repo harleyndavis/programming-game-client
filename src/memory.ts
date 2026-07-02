@@ -5,7 +5,6 @@ import type {
   ClientSideMonster,
   GameObject,
   ActiveQuest,
-  NPC_TYPE,
 } from 'programming-game/types';
 import type { Items } from 'programming-game/items';
 import type { Monsters } from 'programming-game/monsters';
@@ -100,7 +99,7 @@ CREATE TABLE IF NOT EXISTS quests (
   npc_name      TEXT    NOT NULL,
   quest_id      TEXT    NOT NULL,
   status        TEXT    NOT NULL,
-  entity_id     INTEGER REFERENCES entities(id),
+  entity_id     INTEGER NOT NULL REFERENCES entities(id),
   quest_json    TEXT    NOT NULL,
   last_seen_at  INTEGER NOT NULL,
   PRIMARY KEY (npc_name, quest_id)
@@ -249,7 +248,10 @@ export type MerchantPriceOffer = {
 
 /** Records a merchant's position and every item it's currently seen buying/selling. */
 export const recordMerchant = (db: Database.Database, npc: ClientSideNPC, now: number): void => {
-  const entityId = getOrCreateEntity(db, 'npc', npc.npcType);
+  // NPCs are individually named, persistent characters (unlike monsters, which are
+  // interchangeable instances of a species) — the entity is this specific NPC, keyed
+  // by name, not the 'merchant' role every row in this table shares.
+  const entityId = getOrCreateEntity(db, 'npc', npc.name);
 
   db.prepare(
     `INSERT INTO merchants (name, entity_id, x, y, last_seen_at)
@@ -396,9 +398,14 @@ const recordSighting = (
 export const recordMonsterSighting = (db: Database.Database, monster: ClientSideMonster, now: number): void =>
   recordSighting(db, 'monster', monster.monsterId, monster.position, now);
 
-/** Records an NPC sighting, keyed by its `npcType` (e.g. 'healer', 'merchant'). */
+/**
+ * Records an NPC sighting, keyed by its proper name (e.g. "Aigor the Merchant") — NPCs
+ * are individually named, persistent characters, not interchangeable instances of a
+ * type the way monsters are, so each one gets its own entity rather than sharing a
+ * `npcType` bucket with every other NPC of the same role.
+ */
 export const recordNpcSighting = (db: Database.Database, npc: ClientSideNPC, now: number): void =>
-  recordSighting(db, 'npc', npc.npcType, npc.position, now);
+  recordSighting(db, 'npc', npc.name, npc.position, now);
 
 const resourceSightingParts = (object: GameObject): { entityType: EntityType; entityName: string } => {
   switch (object.type) {
@@ -587,34 +594,26 @@ export type QuestSighting = {
   npcName: string;
   questId: string;
   status: QuestSightingStatus;
-  /** The giving NPC's entity (npcType), when known at record time — see recordQuestSighting. */
-  entityId: number | null;
+  /** The giving NPC's entity — always resolvable, since npcName is always known. */
+  entityId: number;
   quest: ActiveQuest | AvailableQuest;
   lastSeenAt: number;
 };
 
-/**
- * `npcType` is optional because it isn't always known when a quest is recorded — an
- * `ActiveQuest` only carries `start_npc`/`end_npc` names, not the giving NPC's type,
- * unless that NPC is currently visible (as it is when recording an *available* quest
- * straight off `ClientSideNPC.availableQuests`). Pass it whenever it's on hand; the
- * entity link fills in the first time it is.
- */
 export const recordQuestSighting = (
   db: Database.Database,
   npcName: string,
   quest: ActiveQuest | AvailableQuest,
   status: QuestSightingStatus,
   now: number,
-  npcType?: NPC_TYPE,
 ): void => {
-  const entityId = npcType ? getOrCreateEntity(db, 'npc', npcType) : null;
+  const entityId = getOrCreateEntity(db, 'npc', npcName);
   db.prepare(
     `INSERT INTO quests (npc_name, quest_id, status, entity_id, quest_json, last_seen_at)
      VALUES (@npcName, @questId, @status, @entityId, @questJson, @now)
      ON CONFLICT(npc_name, quest_id) DO UPDATE SET
        status = excluded.status,
-       entity_id = COALESCE(excluded.entity_id, quests.entity_id),
+       entity_id = excluded.entity_id,
        quest_json = excluded.quest_json,
        last_seen_at = excluded.last_seen_at`,
   ).run({ npcName, questId: quest.id, status, entityId, questJson: JSON.stringify(quest), now });

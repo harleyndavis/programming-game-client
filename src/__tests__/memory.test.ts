@@ -1,6 +1,5 @@
 import { describe, it, expect } from 'vitest';
 import { Monsters } from 'programming-game/monsters';
-import { NPC_TYPE } from 'programming-game/types';
 import type { ClientSideNPC, ClientSideMonster, GameObject, ActiveQuest } from 'programming-game/types';
 import {
   openMemoryDb,
@@ -189,12 +188,23 @@ describe('safe locations', () => {
 });
 
 describe('merchant knowledge', () => {
-  it('references its entity catalog entry for npcType', () => {
+  it('references its entity catalog entry, keyed by the NPC\'s own name (not its shared npcType)', () => {
     const db = openMemoryDb(':memory:');
     recordMerchant(db, makeMerchantNpc(), 1000);
-    const entity = getEntity(db, 'npc', 'merchant');
+    const entity = getEntity(db, 'npc', 'Wandering Trader');
     const row = db.prepare('SELECT entity_id FROM merchants WHERE name = ?').get('Wandering Trader') as { entity_id: number };
     expect(row.entity_id).toBe(entity?.id);
+    db.close();
+  });
+
+  it('two different merchants are two different entities', () => {
+    const db = openMemoryDb(':memory:');
+    recordMerchant(db, makeMerchantNpc(), 1000);
+    recordMerchant(db, makeMerchantNpc({ name: 'Village Trader', position: { x: 50, y: 50 } } as any), 1000);
+    expect(getKnownEntities(db, { entityType: 'npc' }).map((e) => e.entityName).sort()).toEqual([
+      'Village Trader',
+      'Wandering Trader',
+    ]);
     db.close();
   });
 
@@ -308,11 +318,11 @@ describe('heat map sightings', () => {
     db.close();
   });
 
-  it('records an NPC sighting keyed by npcType', () => {
+  it("records an NPC sighting keyed by the NPC's own name, not its shared npcType", () => {
     const db = openMemoryDb(':memory:');
     recordNpcSighting(db, makeMerchantNpc(), 1000);
     const sightings = getHeatMapSightings(db, { entityType: 'npc' });
-    expect(sightings[0]).toMatchObject({ entityType: 'npc', entityName: 'merchant', position: { x: 5, y: 5 } });
+    expect(sightings[0]).toMatchObject({ entityType: 'npc', entityName: 'Wandering Trader', position: { x: 5, y: 5 } });
     db.close();
   });
 
@@ -433,26 +443,27 @@ describe('quests memory', () => {
     const db = openMemoryDb(':memory:');
     recordQuestSighting(db, 'Elder', quest, 'active', 1000);
     const sighting = getQuestSighting(db, 'Elder', 'q1');
-    expect(sighting).toEqual({ npcName: 'Elder', questId: 'q1', status: 'active', entityId: null, quest, lastSeenAt: 1000 });
+    const entity = getEntity(db, 'npc', 'Elder');
+    expect(sighting).toEqual({ npcName: 'Elder', questId: 'q1', status: 'active', entityId: entity?.id, quest, lastSeenAt: 1000 });
     db.close();
   });
 
-  it('links to the entity catalog when the giving NPC type is known', () => {
+  it("links to the entity catalog entry for the giving NPC's own name, not a shared role", () => {
     const db = openMemoryDb(':memory:');
-    recordQuestSighting(db, 'Elder', quest, 'available', 1000, NPC_TYPE.guard);
+    recordQuestSighting(db, 'Elder', quest, 'available', 1000);
     const sighting = getQuestSighting(db, 'Elder', 'q1');
-    const entity = getEntity(db, 'npc', 'guard');
+    const entity = getEntity(db, 'npc', 'Elder');
     expect(sighting?.entityId).toBe(entity?.id);
     db.close();
   });
 
-  it('keeps the existing entity link when a later sighting omits npcType', () => {
+  it('two different quest-giving NPCs are two different entities', () => {
     const db = openMemoryDb(':memory:');
-    recordQuestSighting(db, 'Elder', quest, 'available', 1000, NPC_TYPE.guard);
-    recordQuestSighting(db, 'Elder', quest, 'active', 2000);
-    const sighting = getQuestSighting(db, 'Elder', 'q1');
-    expect(sighting?.entityId).not.toBeNull();
-    expect(sighting?.status).toBe('active');
+    recordQuestSighting(db, 'Elder', quest, 'active', 1000);
+    recordQuestSighting(db, 'Blacksmith', { ...quest, id: 'q2' }, 'active', 1000);
+    const elder = getQuestSighting(db, 'Elder', 'q1');
+    const blacksmith = getQuestSighting(db, 'Blacksmith', 'q2');
+    expect(elder?.entityId).not.toBe(blacksmith?.entityId);
     db.close();
   });
 

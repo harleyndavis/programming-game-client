@@ -268,26 +268,31 @@ corruption on crash, WAL mode allows concurrent reads during writes, and SQL
 aggregates (AVG, SUM/COUNT, bounding-box queries) are a natural fit for drop
 rates, combat averages, and heat map proximity lookups. Categories:
 
-- **Entity catalog** — the canonical registry of every distinct entity
-  type/species/subtype ever observed (a monster species, an NPC type, a tree
-  or ore type, a station subtype). Pure identity — no position, no
+- **Entity catalog** — the canonical registry of every distinct entity ever
+  observed. Pure identity (`entity_type`, `entity_name`) — no position, no
   timestamp; every table that references it already tracks its own "when"
   for its own context (`heat_map.last_seen_at`, `combat_history.last_updated_at`,
-  etc.), so the catalog doesn't duplicate that. World heat map, combat
+  etc.), so the catalog doesn't duplicate that. What `entity_name` holds
+  depends on whether individuals of that type are unique or interchangeable:
+  monsters and resources are interchangeable instances of a species/type
+  (`monster.monsterId` — many different rat instances all collapse into one
+  `(monster, rat)` row; `treeType`/`oreType` likewise for trees/ore), but
+  NPCs are individually named, persistent characters — the entity is
+  `npc.name` (e.g. "Aigor the Merchant"), never `npcType`, which is a shared
+  role rather than an identity (keying on it would collapse every merchant
+  in the world into one indistinguishable entity). World heat map, combat
   history, drop tables, merchant knowledge, and quests all reference a
   catalog entry by id (`entity_id`) rather than duplicating the type/name
-  pair across every row — this holds even where the referenced value is
-  constant across all current rows (every merchant references the same
-  `('npc', 'merchant')` entry), because the point is a formal, queryable
-  relationship, not a per-row-varying value. Answers "what kinds of
-  monsters/NPCs/trees/ore have we ever seen" as a standalone query,
-  decoupled from the heat map's purely spatial "where/when" concern. Room
-  to extend: if an entity type accumulates detail nothing else needs (e.g.
-  harvest yields for trees/ore, which NPCs never have), that becomes its
-  own table keyed by the catalog's id — merchant knowledge is exactly this
-  pattern already: a per-individual-instance detail table (unlike monsters,
-  individual merchant identity matters, since different named merchants can
-  offer different prices) that references its `('npc', npcType)` entity.
+  pair across every row. Answers "what kinds of monsters/trees/ore — or
+  which named NPCs — have we ever seen" as a standalone query, decoupled
+  from the heat map's purely spatial "where/when" concern. Room to extend:
+  if an entity type accumulates detail nothing else needs (e.g. harvest
+  yields for trees/ore, which NPCs never have), that becomes its own table
+  keyed by the catalog's id — merchant knowledge and quests are already
+  this pattern: per-individual-NPC detail tables (individual identity
+  matters here, since different named merchants can offer different prices,
+  or different named NPCs can each give their own quests) that reference
+  their NPC's own entity.
 - **Safe locations** — discovered towns, healers, and player-built structures
   where the bot can recover. Not limited to (0, 0).
 - **Merchant knowledge** — location, inventory, and prices for every merchant
