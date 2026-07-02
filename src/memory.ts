@@ -53,13 +53,18 @@ CREATE TABLE IF NOT EXISTS heat_map (
   PRIMARY KEY (entity_id, x, y)
 );
 
+-- buying_price/qty: what the merchant pays the PLAYER (player earns this selling to them).
+-- selling_price/qty: what the merchant charges the PLAYER (player pays this buying from them).
+-- Named after the SDK's own trades.buying/trades.selling, not "buy"/"sell", because
+-- those read as the player's verb and are backwards from that perspective — see
+-- docs/game-reference.md -> Merchants.
 CREATE TABLE IF NOT EXISTS merchant_trades (
   entity_id      INTEGER NOT NULL REFERENCES entities(id),
   item           TEXT    NOT NULL,
-  buy_price      INTEGER,
-  buy_qty        INTEGER,
-  sell_price     INTEGER,
-  sell_qty       INTEGER,
+  buying_price   INTEGER,
+  buying_qty     INTEGER,
+  selling_price  INTEGER,
+  selling_qty    INTEGER,
   last_seen_at   INTEGER NOT NULL,
   PRIMARY KEY (entity_id, item)
 );
@@ -404,7 +409,9 @@ export type MerchantTradeOffer = {
   entityId: number;
   merchantName: string;
   position: Position | null;
+  /** What the merchant pays the player — the player earns this selling to them. */
   buying: { price: number; quantity: number } | undefined;
+  /** What the merchant charges the player — the player pays this buying from them. */
   selling: { price: number; quantity: number } | undefined;
 };
 
@@ -417,26 +424,26 @@ export const recordMerchant = (db: Database.Database, npc: ClientSideNPC, now: n
   const items = new Set<string>([...Object.keys(buying), ...Object.keys(selling)]);
 
   const upsertTrade = db.prepare(
-    `INSERT INTO merchant_trades (entity_id, item, buy_price, buy_qty, sell_price, sell_qty, last_seen_at)
-     VALUES (@entityId, @item, @buyPrice, @buyQty, @sellPrice, @sellQty, @now)
+    `INSERT INTO merchant_trades (entity_id, item, buying_price, buying_qty, selling_price, selling_qty, last_seen_at)
+     VALUES (@entityId, @item, @buyingPrice, @buyingQty, @sellingPrice, @sellingQty, @now)
      ON CONFLICT(entity_id, item) DO UPDATE SET
-       buy_price = COALESCE(excluded.buy_price, merchant_trades.buy_price),
-       buy_qty = COALESCE(excluded.buy_qty, merchant_trades.buy_qty),
-       sell_price = COALESCE(excluded.sell_price, merchant_trades.sell_price),
-       sell_qty = COALESCE(excluded.sell_qty, merchant_trades.sell_qty),
+       buying_price = COALESCE(excluded.buying_price, merchant_trades.buying_price),
+       buying_qty = COALESCE(excluded.buying_qty, merchant_trades.buying_qty),
+       selling_price = COALESCE(excluded.selling_price, merchant_trades.selling_price),
+       selling_qty = COALESCE(excluded.selling_qty, merchant_trades.selling_qty),
        last_seen_at = excluded.last_seen_at`,
   );
 
   for (const item of Array.from(items)) {
-    const buyOffer = (buying as Record<string, { price: number; quantity: number } | undefined>)[item];
-    const sellOffer = (selling as Record<string, { price: number; quantity: number } | undefined>)[item];
+    const buyingOffer = (buying as Record<string, { price: number; quantity: number } | undefined>)[item];
+    const sellingOffer = (selling as Record<string, { price: number; quantity: number } | undefined>)[item];
     upsertTrade.run({
       entityId,
       item,
-      buyPrice: buyOffer?.price ?? null,
-      buyQty: buyOffer?.quantity ?? null,
-      sellPrice: sellOffer?.price ?? null,
-      sellQty: sellOffer?.quantity ?? null,
+      buyingPrice: buyingOffer?.price ?? null,
+      buyingQty: buyingOffer?.quantity ?? null,
+      sellingPrice: sellingOffer?.price ?? null,
+      sellingQty: sellingOffer?.quantity ?? null,
       now,
     });
   }
@@ -445,7 +452,7 @@ export const recordMerchant = (db: Database.Database, npc: ClientSideNPC, now: n
 export const getMerchantTrades = (db: Database.Database, item: Items): MerchantTradeOffer[] =>
   db
     .prepare(
-      `SELECT mt.entity_id, mt.buy_price, mt.buy_qty, mt.sell_price, mt.sell_qty, e.entity_name
+      `SELECT mt.entity_id, mt.buying_price, mt.buying_qty, mt.selling_price, mt.selling_qty, e.entity_name
        FROM merchant_trades mt
        JOIN entities e ON e.id = mt.entity_id
        WHERE mt.item = ?`,
@@ -455,8 +462,8 @@ export const getMerchantTrades = (db: Database.Database, item: Items): MerchantT
       entityId: row.entity_id,
       merchantName: row.entity_name,
       position: getLastKnownPosition(db, row.entity_id),
-      buying: row.buy_price != null ? { price: row.buy_price, quantity: row.buy_qty } : undefined,
-      selling: row.sell_price != null ? { price: row.sell_price, quantity: row.sell_qty } : undefined,
+      buying: row.buying_price != null ? { price: row.buying_price, quantity: row.buying_qty } : undefined,
+      selling: row.selling_price != null ? { price: row.selling_price, quantity: row.selling_qty } : undefined,
     }));
 
 // ── Combat history ───────────────────────────────────────────────────────
