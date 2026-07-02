@@ -5,6 +5,7 @@ const outputSnapshot = document.getElementById("outputSnapshot");
 const snapshotTimeEl = document.getElementById("snapshotTime");
 const snapshotBtnEl = document.getElementById("snapshotBtn");
 const upgradePlansListEl = document.getElementById("upgradePlansList");
+const toolPlansListEl = document.getElementById("toolPlansList");
 const npcsListEl = document.getElementById("npcsList");
 const questsListEl = document.getElementById("questsList");
 const mobsListEl = document.getElementById("mobsList");
@@ -403,52 +404,105 @@ const formatPosition = (position: unknown) => {
   return "(" + Math.round(pos.x) + ", " + Math.round(pos.y) + ")";
 };
 
-const renderUpgradePlans = (plans: unknown) => {
-  if (!upgradePlansListEl) return;
+const TIER_LABELS: Record<number, string> = {
+  1: "Buy now",
+  2: "Craft now",
+  3: "Need gold",
+  4: "Obtainable",
+  5: "Blocked",
+};
+
+const renderPlanItemHtml = (plan: Record<string, unknown>) => {
+  const tier = typeof plan.tier === 'number' ? plan.tier : null;
+  const isBlocked = typeof plan.blocked === 'boolean' ? plan.blocked : !(plan.recipeId || plan.canBuy);
+  const acqParts: string[] = [];
+  if (tier !== null) {
+    acqParts.push(TIER_LABELS[tier] ?? `Tier ${tier}`);
+  } else {
+    if (plan.recipeId) acqParts.push("Craftable");
+    if (plan.canBuy) acqParts.push("Buyable");
+  }
+  const acq = acqParts.length > 0 ? acqParts.join(" · ") : "No known acquisition path";
+  const statusClass = plan.completed ? "done"
+    : isBlocked ? "blocked"
+    : tier === 1 ? "status-buy"
+    : tier === 2 ? "status-craft"
+    : tier === 3 ? "status-saving"
+    : "pending";
+  const statusLabel = plan.completed ? "DONE"
+    : isBlocked ? "BLOCKED"
+    : tier === 1 ? "BUY"
+    : tier === 2 ? "CRAFT"
+    : tier === 3 ? "SAVING"
+    : "WAITING";
+  const reqs = ((plan.requirements || []) as unknown[]).map((req) => {
+    const r = req as Record<string, unknown>;
+    const quantity = Number(r["quantity"]) || 0;
+    const have = Number(r["have"]) || 0;
+    const pct = quantity > 0 ? Math.min(100, (have / quantity) * 100) : 0;
+    const done = have >= quantity;
+    return (
+      '<div class="req-row">' +
+      '<span class="req-name">' + escapeHtml(lookupItemName(r["item"])) + '</span>' +
+      '<div class="req-meter"><div class="req-fill' + (done ? " complete" : "") + '" style="width:' + pct.toFixed(1) + '%"></div></div>' +
+      '<span class="req-qty">' + escapeHtml(String(have)) + " / " + escapeHtml(String(quantity)) + '</span>' +
+      '</div>'
+    );
+  }).join("");
+
+  const blockedByItems = Array.isArray(plan.blockedBy) ? plan.blockedBy as Array<{ itemId: string; reason: string }> : [];
+  let blockedByHtml = '';
+  if (isBlocked) {
+    if (blockedByItems.length > 0) {
+      const chips = blockedByItems.map(b =>
+        '<details class="blocker-chip">' +
+        '<summary title="' + escapeHtml(b.reason) + '">' + escapeHtml(lookupItemName(b.itemId)) + '</summary>' +
+        '<div class="blocker-reason">' + escapeHtml(b.reason) + '</div>' +
+        '</details>'
+      ).join('');
+      blockedByHtml = '<div class="blocked-by">Needs: ' + chips + '</div>';
+    } else {
+      blockedByHtml = '<div class="blocked-by blocked-by-unknown">No recipe, not sold at any merchant</div>';
+    }
+  }
+
+  const extraClasses = (plan.completed ? " completed" : "") + (plan.isNextCraft ? " next-craft" : "");
+  return (
+    '<div class="upgrade-entry' + extraClasses + '">' +
+    '<div class="upgrade-header">' +
+    '<span class="upgrade-priority">#' + escapeHtml(String(plan.priority)) + '</span>' +
+    (plan.isNextCraft ? '<span class="next-craft-badge">NEXT</span>' : '') +
+    '<span class="upgrade-name">' + escapeHtml(plan.name || lookupItemName(plan.targetItem)) + '</span>' +
+    '<span class="upgrade-badge">' + escapeHtml(plan.slot || "") + '</span>' +
+    '<span class="upgrade-status ' + statusClass + '">' + statusLabel + '</span>' +
+    '</div>' +
+    '<div class="upgrade-acq">' + escapeHtml(acq) + '</div>' +
+    blockedByHtml +
+    (reqs ? '<div class="upgrade-reqs">' + reqs + '</div>' : '') +
+    '</div>'
+  );
+};
+
+const renderPlanList = (containerEl: HTMLElement | null, plans: unknown, emptyText: string) => {
+  if (!containerEl) return;
   const items = Array.isArray(plans) ? [...plans] : [];
   if (items.length === 0) {
-    upgradePlansListEl.innerHTML = '<div class="list-row"><span class="list-title" style="opacity:0.5;">No upgrade plans — bot will populate this when it has targets.</span></div>';
+    containerEl.innerHTML = '<div class="list-row"><span class="list-title" style="opacity:0.5;">' + escapeHtml(emptyText) + '</span></div>';
     return;
   }
   items.sort((a, b) => {
     if (a.completed !== b.completed) return a.completed ? 1 : -1;
     return (a.priority || 0) - (b.priority || 0);
   });
-  upgradePlansListEl.innerHTML = items.map((plan) => {
-    const acqParts = [];
-    if (plan.recipeId) acqParts.push("Craftable");
-    if (plan.canBuy) acqParts.push("Buyable");
-    const acq = acqParts.length > 0 ? acqParts.join(" · ") : "No known acquisition path";
-    const statusClass = plan.completed ? "done" : (plan.recipeId || plan.canBuy) ? "pending" : "blocked";
-    const statusLabel = plan.completed ? "DONE" : (plan.recipeId || plan.canBuy) ? "PENDING" : "BLOCKED";
-    const reqs = (plan.requirements || []).map((req: Record<string, unknown>) => {
-      const quantity = Number(req["quantity"]) || 0;
-      const have = Number(req["have"]) || 0;
-      const pct = quantity > 0 ? Math.min(100, (have / quantity) * 100) : 0;
-      const done = have >= quantity;
-      return (
-        '<div class="req-row">' +
-        '<span class="req-name">' + escapeHtml(lookupItemName(req["item"])) + '</span>' +
-        '<div class="req-meter"><div class="req-fill' + (done ? " complete" : "") + '" style="width:' + pct.toFixed(1) + '%"></div></div>' +
-        '<span class="req-qty">' + escapeHtml(String(have)) + " / " + escapeHtml(String(quantity)) + '</span>' +
-        '</div>'
-      );
-    }).join("");
-    const extraClasses = (plan.completed ? " completed" : "") + (plan.isNextCraft ? " next-craft" : "");
-    return (
-      '<div class="upgrade-entry' + extraClasses + '">' +
-      '<div class="upgrade-header">' +
-      '<span class="upgrade-priority">#' + escapeHtml(String(plan.priority)) + '</span>' +
-      (plan.isNextCraft ? '<span class="next-craft-badge">NEXT</span>' : '') +
-      '<span class="upgrade-name">' + escapeHtml(plan.name || lookupItemName(plan.targetItem)) + '</span>' +
-      '<span class="upgrade-badge">' + escapeHtml(plan.slot || "") + '</span>' +
-      '<span class="upgrade-status ' + statusClass + '">' + statusLabel + '</span>' +
-      '</div>' +
-      '<div class="upgrade-acq">' + escapeHtml(acq) + '</div>' +
-      (reqs ? '<div class="upgrade-reqs">' + reqs + '</div>' : '') +
-      '</div>'
-    );
-  }).join("");
+  containerEl.innerHTML = items.map(renderPlanItemHtml).join("");
+};
+
+const renderUpgradePlans = (plans: unknown) => {
+  renderPlanList(upgradePlansListEl, plans, 'No upgrade plans — bot will populate this when it has targets.');
+};
+
+const renderToolPlans = (plans: unknown) => {
+  renderPlanList(toolPlansListEl, plans, 'All tools acquired — upgrade plans will show when the bot identifies missing tools.');
 };
 
 const renderWorldList = (containerEl: HTMLElement | null, items: unknown[] | null | undefined, renderRow: (item: any) => string, emptyText: string) => {
@@ -702,9 +756,10 @@ const renderObjects = (objects: unknown[] | null | undefined) => {
   }, "No world objects recorded yet.");
 };
 
-const renderWorld = (world: unknown, upgradePlans: unknown, rawQuests: Record<string, ActiveQuestData> | null | undefined, questRewards: Record<string, { items: Record<string, number> }>) => {
+const renderWorld = (world: unknown, upgradePlans: unknown, toolPlans: unknown, rawQuests: Record<string, ActiveQuestData> | null | undefined, questRewards: Record<string, { items: Record<string, number> }>) => {
   const w = (world || {}) as Record<string, unknown>;
   renderUpgradePlans(upgradePlans);
+  renderToolPlans(toolPlans);
   renderNpcs(w["npcs"] as unknown[] | null);
   const activeHtml = renderActiveQuests(rawQuests, questRewards);
   renderQuests(w["npcs"] as WorldNpc[] | null, activeHtml);
@@ -919,7 +974,7 @@ const render = (payload: any) => {
     outputRaw.textContent = JSON.stringify(rawWithoutItems, null, 2);
   }
 
-  renderWorld(payload.world, payload.upgradePlans, (payload.raw?.player as Record<string, unknown> | undefined)?.quests as Record<string, ActiveQuestData> | undefined, payload.questRewards || {});
+  renderWorld(payload.world, payload.upgradePlans, payload.toolPlans, (payload.raw?.player as Record<string, unknown> | undefined)?.quests as Record<string, ActiveQuestData> | undefined, payload.questRewards || {});
 
   // ── Events ──────────────────────────────────────────────────────────────────
   // Each category arrives from the server as its own buffer. renderEvents() just

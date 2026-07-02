@@ -782,6 +782,15 @@ h1 {
   grid-template-columns: repeat(6, minmax(0, 1fr));
 }
 
+.subsection-header {
+  font-size: 12px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin: 12px 0 8px;
+  padding: 0 4px;
+}
+
 .world-list {
   display: grid;
   gap: 8px;
@@ -860,8 +869,23 @@ h1 {
 }
 
 .upgrade-status.pending {
+  color: #f59e0b;
+  border: 1px solid #f59e0b;
+}
+
+.upgrade-status.status-buy {
+  color: #22c55e;
+  border: 1px solid #22c55e;
+}
+
+.upgrade-status.status-craft {
   color: var(--accent);
   border: 1px solid var(--accent);
+}
+
+.upgrade-status.status-saving {
+  color: #a78bfa;
+  border: 1px solid #a78bfa;
 }
 
 .upgrade-status.blocked {
@@ -872,6 +896,66 @@ h1 {
 .upgrade-acq {
   font-size: 12px;
   color: var(--muted);
+}
+
+.blocked-by {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  margin-top: 4px;
+  font-size: 12px;
+  color: #fca5a5;
+}
+
+.blocked-by-unknown {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.blocker-chip {
+  display: inline-block;
+}
+
+.blocker-chip summary {
+  list-style: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(239, 68, 68, 0.15);
+  border: 1px solid rgba(239, 68, 68, 0.5);
+  color: #fca5a5;
+  cursor: pointer;
+  font-size: 11px;
+  transition: background 100ms;
+}
+
+.blocker-chip summary::before {
+  content: "?";
+  font-size: 9px;
+  opacity: 0.7;
+}
+
+.blocker-chip summary:hover {
+  background: rgba(239, 68, 68, 0.28);
+}
+
+.blocker-chip[open] summary {
+  background: rgba(239, 68, 68, 0.28);
+  border-color: #ef4444;
+}
+
+.blocker-reason {
+  margin-top: 4px;
+  padding: 5px 8px;
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: 6px;
+  font-size: 11px;
+  color: var(--muted);
+  max-width: 280px;
 }
 
 .upgrade-reqs {

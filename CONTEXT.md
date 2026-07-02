@@ -14,14 +14,16 @@ equipping) compete for the action slot each tick rather than running in strict
 sequence.
 
 ### Module architecture
-`index.ts` has been partially decomposed (per ADR-0003 conservative extraction) into pure-function libraries. `index.ts` remains the orchestrator, owning all mutable state and decision logic. Dependency flows one direction — modules import from `utils`/`bot-types` only, never from each other:
+`index.ts` has been partially decomposed (per ADR-0003 conservative extraction) into pure-function libraries. `index.ts` remains the orchestrator, owning all mutable state and decision logic. Dependency flows one direction — modules import from `utils`/`bot-types`/`plan` only, never from each other directly. `plan.ts` was added as a shared acquisition-planning layer (tier/reachability/chain-quantity primitives) once equipment, harvest, and craft planning all needed the same chaining logic — it plays the same role as `utils.ts` but is domain-specific rather than generic:
 
 - **`src/utils.ts`** — pure-function helpers (`distanceBetween`, `isFiniteNumber`, `isFinitePosition`)
+- **`src/plan.ts`** — shared acquisition-planning primitives: ingredient chaining, reachability, difficulty tiers, per-item quantity needs across a set of craft targets
 - **`src/inventory.ts`** — inventory/storage queries (weight, sellables, food)
-- **`src/equipment.ts`** — gear upgrade planning (target selection, chaining, merchant sourcing)
-- **`src/craft.ts`** — crafting target selection
+- **`src/equipment.ts`** — gear upgrade planning (target selection, merchant sourcing); chaining/tier logic delegates to `plan.ts`
+- **`src/craft.ts`** — crafting target selection, sub-step selection, merchant ingredient sourcing
+- **`src/harvest.ts`** — harvest target/tool planning (missing tools, their crafting-chain prerequisites, craftable ingredient shortfalls)
 - **`src/trade.ts`** — merchant/banker helpers (best sell price, storage fees)
-- **`src/quests.ts`** — quest helpers (completable quest detection, turn-in NPC lookup, reward evaluation, best-quest-to-accept selection)
+- **`src/quests.ts`** — quest helpers (completable quest detection, turn-in NPC lookup, reward evaluation with need/stocked-aware scoring, best-quest-to-accept selection, pending turn-in item tracking, stalled-quest abandonment)
 
 The following modules remain in `index.ts` and will be extracted when the architecture supports them (tracked in the linked issues):
 
@@ -142,7 +144,9 @@ before the main `decide()` function runs, but withdraw overrides take priority.
   purchase need are deposited. The `toDeposit.copperCoin` is adjusted by
   subtracting `buyCost`; coins needed for the next purchase stay in inventory.
 - `keepItems` — upgrade ingredients and tools that the bot is reserving for
-  crafting are deposited.
+  crafting are deposited, minus whatever quantity `toSell` is about to sell
+  this tick (otherwise a sellable surplus of a protected item would get
+  deposited and immediately re-withdrawn next tick instead of sold).
 
 **Buy-cost adjustment:** Before the deposit check, `toDeposit.copperCoin` is
 reduced by `buyCost` (the total price of the first merchant's planned
@@ -152,16 +156,35 @@ buyCost), ALL coins are deposited (death-loss avoidance).
 
 **Withdraw (coins):** If at home with a banker, a purchase is planned
 (`buyCost > 0`), the bot lacks enough pocket coins (`playerCoins < buyCost`),
-and storage has enough withdrawable coins (above the 100× fee buffer), the bot
+and storage has enough withdrawable coins (above the fee buffer), the bot
 issues a withdraw override for the exact deficit. This override takes priority
 over deposit.
 
-**Withdraw (non-protected items):** Items in storage that are NOT in `keepItems`
-are withdrawn to inventory for selling. Runs only when no other banking override
-is active.
+**Withdraw (non-protected + surplus-protected items):** Items in storage that
+are NOT in `keepItems` are withdrawn to inventory for selling, up to the full
+carry limit (`maxCarryWeight`) — not the soft `ENCUMBRANCE_THRESHOLD` used
+elsewhere. This is deliberately more aggressive than other withdraw paths:
+this one only runs at home next to a banker, about to sell everything pulled
+here, and never travels while carrying it — so briefly exceeding the soft
+"encumbered" threshold is harmless (`decide()`'s `isEncumbered` branch routes
+straight to the same sell action anyway). Capping at the soft threshold here
+would just stretch a large stash sell-off over needlessly many withdraw/sell
+cycles. Whatever still doesn't fit (rare — only when a single haul exceeds
+full carry capacity) is picked up on a later pass. Items that ARE
+`keepItems`-protected but chain-quantity bounded (`computeChainNeeds` — see
+`src/plan.ts`) are also withdrawn for their surplus beyond what the craft
+chains need, but only when a currently visible merchant actually buys that
+item; otherwise the item would bounce between pocket and storage every tick
+with nowhere to sell it. Runs only when no other banking override is active.
 
-**Fee buffer:** `minStorageCoins = ceil(total_storage_weight_g × 0.0025) × 100`.
-Only coins above this buffer are available for withdrawal. (Formula source: `docs/game-reference.md` → *Storage fees*.)
+**Fee buffer:** `minStorageCoins = min(ceil(total_storage_weight_g × 0.0025) ×
+100, floor(storageCoins / 2))`. Only coins above this buffer are available for
+withdrawal. The `/ 2` cap exists because the raw 100× buffer scales with
+hoarded storage weight — with enough low-value bulk items (e.g. thousands of
+rat pelts) it can exceed total wealth and permanently lock every coin
+(`availableWithdrawal` stays 0 forever, so no purchase can ever be afforded).
+Capping at half of on-hand coins guarantees some coins are always spendable.
+(Uncapped formula source: `docs/game-reference.md` → *Storage fees*.)
 
 **Upgrade-aware inventory (cycle prevention):** `computeUpgradeTargets` receives
 a merged view of `player.inventory + player.storage` so that craftable
@@ -170,24 +193,23 @@ ingredients (e.g. rat pelts for leather armor) would make them disappear from
 the upgrade targets → they'd drop from `keepItems` → the non-protected withdraw
 would pull them back → deposit → infinite cycle.
 
-**Decision priority chain (line ~1116):**
+**Decision priority chain** (see `index.ts`, the block right before `decide()`
+is called):
 1. Coin withdraw (for purchase deficit)
-2. Non-protected item withdraw (for selling)
-3. Deposit (coins + keepItems)
-4. `decide()` — equip, craft, buy, turn-in quest, sell, accept quest, or return-home
+2. Ingredient/tool withdraw for the active craft or tool craft
+3. Quest turn-in item withdraw
+4. Non-protected + surplus-protected item withdraw (for selling)
+5. Deposit (coins + keepItems, minus items being sold this tick)
+6. `decide()` — equip, craft, buy, turn-in quest, sell, accept quest, or return-home
 
-Note: `decide()`'s `recoveringAtHome` branch now includes a sell check (line
-625), so withdrawn non-protected items are sold during recovery instead of
-sitting in inventory.
-
-**Sell during recovery:** The `recoveringAtHome` branch in `decide()` now
-includes `if (nearbyMerchant && Object.keys(toSell).length > 0)  → sell`, so the
-bot clears sellable items from inventory while healing, not just during idle
-chores.
+**Sell during recovery:** The `recoveringAtHome` branch in `decide()` includes
+a sell check ahead of returning home, so withdrawn non-protected items are sold
+during recovery instead of sitting in inventory until the next idle-at-home
+pass.
 
 **Event monitoring:** `storageCharged` (contains `coinsLeft` and `charged`) and
-`storageEmptied` are logged via `onEvent` at `index.ts:721` so the storage fee
-can be observed at runtime.
+`storageEmptied` are logged via `onEvent` in `index.ts` so the storage fee can
+be observed at runtime.
 
 ### Safe location
 Any location where the bot can recover HP without danger. Includes the starting
@@ -285,14 +307,139 @@ A task accepted from an NPC that yields a reward (coins, items) on completion.
 The bot tracks active quests via `player.quests` (`ActiveQuests`) and accepts
 opportunistically from nearby quest-giver NPCs when there is capacity (max 5).
 Turn-in happens when all required items are in inventory and the turn-in NPC
-is visible. Both actions are gated on NPC proximity — no pathfinding to
-quest-givers (tracked in #8).
+is visible. No pathfinding — the bot's own movement toward a remembered NPC
+position is a straight line (`player.move`), not a route (tracked in #8).
 
-**Decision order:** Turn-in is checked before selling in the home chores
-chain (`equip → craft → buy → turnIn → sell`), so quest items are consumed
-by the turn-in instead of being sold for coin. Quest acceptance runs when
-idle and not busy — after harvesting, before exploring. Reward evaluation
-is simple: sum of reward item quantities.
+**Bounded chase-to-NPC:** `lastQuestNpcPosition` remembers the last position a
+quest NPC we have business with was actually seen at (`questNpcInRange` —
+either the completable-quest turn-in NPC or the accept-target NPC). When that
+NPC isn't currently visible but we either have turn-in items ready or need to
+re-accept a quest, the bot moves toward the remembered spot
+(`questNpcTarget`) instead of just standing still and hoping the NPC wanders
+into `heartbeat.units` on its own — useful when the NPC (or the bot's idle
+position) is right at the edge of sight range.
+
+This used to have no exit condition: if the remembered position was stale
+(NPC moved a little, or the bot can't occupy the exact same tile as the NPC
+due to collision) the bot would walk toward that fixed point and sit there
+indefinitely, even while effectively standing on top of the NPC — a real
+observed failure. Two fixes, both required together:
+
+1. **Arrival give-up (`QUEST_NPC_ARRIVAL_RADIUS`):** once the bot has closed
+   to within this distance of the remembered spot and the NPC still isn't in
+   `heartbeat.units`, `lastQuestNpcPosition` is cleared immediately — no
+   waiting for a timeout, no exact-position match required. This directly
+   fixes "walked right up to where the NPC was and nothing happened."
+2. **Capacity check on re-accept:** `needQuestForHarvestTools` now also
+   requires spare quest capacity (`activeQuests count < maxActiveQuests`)
+   before triggering the chase. Without this, the bot could walk all the way
+   to the guard to re-accept `wood_for_stone` while all 5 quest slots were
+   already full of other quests — `findBestQuestToAccept` returns null at
+   capacity regardless of proximity, so the trip was guaranteed to accomplish
+   nothing. See **Abandoning stalled quests** below — this check only
+   prevents a wasted trip, it does not free a slot on its own.
+
+The old design's deadlock wasn't really about position precision — chasing
+moved the bot away from home, and the `finishingHomeChores` chore-clear check
+only re-evaluates while `nearHome` is true, so the give-up path could never
+run *while the chase was in progress*, regardless of how close the bot got.
+The arrival-based clear above sidesteps that entirely: it fires independently
+of `nearHome`, and once it fires, `questNpcTarget` goes null and `decide()`
+naturally falls through to `return-home-idle` on the next tick.
+
+**Decision order:** the home-chores branch of `decide()` checks
+`equip → craft → turnIn → acceptQuest → buy → sell → toolCraft → chase quest
+NPC`, so quest items are consumed by the turn-in instead of being sold for
+coin, and turn-in/accept both run ahead of buying (the quest NPC may only be
+visible for a short window right after arriving at their location). Chasing
+is last — every other home task takes priority over closing distance on a
+quest NPC that isn't even visible yet.
+
+**Reward visibility — a structural gap, not a bug:** `ActiveQuest` (the shape
+of `player.quests`) has no `rewards` field at all, for every quest, always —
+see `node_modules/programming-game/src/types.ts`. The reward is only ever
+visible in `npc.availableQuests[id].rewards.items`, i.e. *before* accepting.
+Once a quest is active, that data is gone from the heartbeat entirely. This is
+why `questRewards` (in `index.ts`) exists: `execute()`'s `acceptQuest` case
+captures `availableQuest.rewards.items` at the exact moment of accepting,
+before it disappears, keyed by quest id.
+
+**Reward evaluation (`evaluateQuest`):** base score is the sum of reward item
+quantities, but a quest whose reward includes an item the bot's craft chains
+are currently short on (`questNeededItems`, derived from `computeChainNeeds`)
+gets a large fixed bonus on top — so a progression quest (e.g. `wood_for_stone`
+rewarding `stone`) reliably outranks a higher-raw-reward filler quest instead
+of losing its quest slot to it after every turn-in. Scoring runs against
+`npc.availableQuests[id].rewards.items` (see above — the pre-accept listing,
+which normally *does* have rewards), via `QuestScoringOpts.rewardPatches`.
+
+`rewardPatches` is built in `index.ts` as `questRewardPatches` — a merge of
+two sources, in priority order:
+1. **`KNOWN_QUEST_REWARDS`** — hand-curated, for the rare case where even the
+   pre-accept listing has no reward (a genuine server-side omission, confirmed
+   for `wood_for_stone`). Can't be discovered automatically; someone has to
+   observe the true reward some other way and hardcode it. Remove an entry
+   once the server reports that quest's rewards correctly.
+2. **`questRewards` itself** — since it already captures the true reward the
+   *first* time any quest is accepted (from the source above), it doubles as
+   a self-updating patch for every quest scoring might otherwise be blind to
+   after that quest goes active. This covers ordinary quests automatically —
+   `KNOWN_QUEST_REWARDS` is only needed for the harder case (1).
+
+**Stocked items (`questStockedItems`):** symmetric to needed items — zeroes
+out reward items the bot already has plenty of, currently applied to tools:
+`toolItemIds` at or above `max(chainKeepNeeds[item] ?? 0, TOOL_KEEP_CAP)` (the
+flat cap is "one, maybe a spare"; a genuinely higher active chain need always
+wins). This isn't just "not bonused" — it's actively zeroed, pushing the score
+*below* the unknown-reward fallback of 1, so the quest stops winning
+acceptance purely by being the only or repeatable option at an NPC. Without
+this, a repeatable quest whose reward is a tool (e.g. `stoneCutterTools`)
+keeps cycling accept → turn-in → accept forever once the reward has stopped
+being useful. `TOOL_KEEP_CAP` is also merged into `chainKeepNeeds` itself (see
+quantity-bounded selling above) as a fallback for tools outside any currently
+active chain, so surplus tools actually get sold, not just capped from
+growing further — `stockedItems` alone only stops *acquiring* more via
+quests, it doesn't sell what's already stockpiled.
+
+**Stall avoidance (actionable turn-in items):** a quest's turn-in items only
+count toward `finishingHomeChores` staying active when they're actually
+obtainable this tick — already in storage, or sold by a remembered merchant
+at an affordable price (merchant offers are remembered persistently across
+ticks, not just while that merchant is currently visible). Without this, an
+active quest needing an item nobody sells (e.g. a rare kill drop) would pin
+the bot at home indefinitely doing nothing, since that quest can never
+complete on its own.
+
+**Abandoning stalled quests (`findQuestToAbandon`):** with quest capacity
+fixed at 5 and no way to complete a quest whose turn-in items are unobtainable
+(see stall avoidance above), a full quest log can permanently block a
+progression quest even when that quest's NPC is standing right there —
+`findBestQuestToAccept` returns null at capacity regardless of reward score,
+and the need-aware scoring in `evaluateQuest` only prevents *new* junk quests
+from displacing a needed one; it does nothing for slots already occupied.
+
+`player.abandonQuest(questId)` is a capacity-free action — no NPC or position
+required — so the bot can drop a quest from anywhere. But abandoning has a
+real cost (the quest's partial progress and reward are gone), so it only
+fires when it's clearly worth it, gated on all three:
+1. **Stalled** (`findStalledQuests`): the quest's current turn_in step needs
+   an item that's short and not obtainable (same signal as stall avoidance).
+2. **At capacity** (`activeQuests count >= maxActiveQuests`): if there's a
+   free slot, just accept the better quest directly — no need to abandon
+   anything.
+3. **Something needed is actually waiting** (`findBestAvailableQuest` +
+   `questRewardsNeededItem`): a quest a visible NPC is offering right now
+   must reward a currently-needed item. Abandoning a stalled quest just to
+   make room for more filler would throw away its partial value for nothing.
+
+With multiple stalled quests, the first one found is dropped — no
+reward-based ranking. `questRewards`/`questRewardPatches` *could* now rank
+them (every stalled quest was necessarily accepted at some point, so its true
+reward is very likely already learned — see reward visibility above), but
+`findQuestToAbandon` doesn't take that as a parameter; picking the lowest-
+value stalled quest to drop is a rare enough tie-break that the added
+plumbing didn't seem worth it. Revisit if abandoning ever visibly drops the
+"wrong" (more valuable) stalled quest in practice.
 
 **Available quests** from nearby NPCs are rendered in the dashboard Quests
 tab alongside active quest progress (kill step counts, turn-in requirements).
