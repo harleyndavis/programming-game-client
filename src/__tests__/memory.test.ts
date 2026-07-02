@@ -109,17 +109,18 @@ describe('entity catalog', () => {
     const db = openMemoryDb(':memory:');
     recordMonsterSighting(db, makeMonster(), 1000);
     const entity = getEntity(db, 'monster', Monsters.rat);
-    expect(entity).toMatchObject({ entityType: 'monster', entityName: Monsters.rat, firstSeenAt: 1000, lastSeenAt: 1000 });
+    expect(entity).toEqual({ id: expect.any(Number), entityType: 'monster', entityName: Monsters.rat });
     db.close();
   });
 
-  it('is shared across every write path that touches the same entity — a heat_map sighting and a combat hit resolve to the same row', () => {
+  it('is shared across every write path that touches the same entity — a heat_map sighting and a combat hit resolve to the same row, not a duplicate', () => {
     const db = openMemoryDb(':memory:');
     recordMonsterSighting(db, makeMonster(), 1000);
+    const firstId = getEntity(db, 'monster', Monsters.rat)?.id;
     recordCombatHit(db, Monsters.rat, 12, 3, 2000);
     const entities = getKnownEntities(db, { entityType: 'monster' });
     expect(entities.length).toBe(1);
-    expect(entities[0].lastSeenAt).toBe(2000);
+    expect(entities[0].id).toBe(firstId);
     db.close();
   });
 
