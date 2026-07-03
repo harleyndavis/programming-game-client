@@ -87,7 +87,9 @@ Each player has a personal bank vault (`player.storage`) accessible through bank
 
 ## Arena
 
-There is no explicit match-start or match-end event. There is a onEvent type "arena" that has the event duration. The onTicks for arena seem to start coming in for them before the onEvent. But it lasts for 60 seconds from the OnEvent.
+There is no dedicated match-start or match-end event, and the heartbeat cannot be used to detect match boundaries: overworld heartbeats (`inArena: false`) keep arriving throughout an active match, interleaved with arena heartbeats, so neither `inArena` nor the presence of `arenaTimeRemaining` tells you the match has ended (`arenaTimeRemaining` itself is not a live countdown of the current match — it resets to a fresh value, e.g. 60000, at match end and free-runs into negative numbers afterward).
+
+The real boundary is `unitAppeared`/`unitDisappeared`/`despawn` events in the `1v1Arena` instance: match start is bracketed by `unitAppeared` for self + opponent (sometimes with duplicate appear events in the same burst); match end is bracketed by `unitDisappeared`/`despawn` for those same units, arriving within milliseconds of each other. The onEvent type "arena" (carries `duration`) fires immediately after the disappear events, right at the end of a match — informational only, not a lifecycle trigger.
 Arena is exclusively 1v1 currently.
 
 NPCs, Players, and Monsters are all valid targets in the arena.
