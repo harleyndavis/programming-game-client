@@ -84,3 +84,14 @@ export const findQuestGivers = (
 ): ClientSideNPC[] => {
   return units.filter((u) => u.availableQuests && Object.keys(u.availableQuests).length > 0);
 };
+
+/**
+ * Picks one active quest to abandon, one per call — used to drain the quest
+ * log a single quest at a time when quest pursuit is disabled.
+ */
+export const findQuestToAbandon = (
+  activeQuests: ActiveQuests,
+): ActiveQuest | null => {
+  const quests = Object.values(activeQuests);
+  return quests.length > 0 ? quests[0] : null;
+};

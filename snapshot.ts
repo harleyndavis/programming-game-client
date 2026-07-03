@@ -58,6 +58,7 @@ type SnapshotHeartbeat = {
 type SnapshotMeta = {
     recoveringAtHome: boolean;
     idlingAtHome: boolean;
+    pursueQuestsEnabled: boolean;
     lowHpThresholdPercent: number;
     lowHpThreshold: number;
     depositItem: string | null;
@@ -135,6 +136,7 @@ export const toDashboardSnapshot = (heartbeat: SnapshotHeartbeat, meta: Snapshot
         bot: {
             recoveringAtHome: meta.recoveringAtHome,
             idleAtHome: meta.idlingAtHome,
+            pursueQuests: meta.pursueQuestsEnabled,
             lowHpThresholdPercent: meta.lowHpThresholdPercent,
             lowHpThreshold: meta.lowHpThreshold,
             depositItem: meta.depositItem,

@@ -5,6 +5,7 @@ import {
   evaluateQuest,
   findBestQuestToAccept,
   findQuestGivers,
+  findQuestToAbandon,
 } from '../quests';
 import type { ClientSideNPC } from 'programming-game/types';
 
@@ -142,5 +143,30 @@ describe('findQuestGivers', () => {
 
   it('returns empty array for empty input', () => {
     expect(findQuestGivers([])).toHaveLength(0);
+  });
+});
+
+describe('findQuestToAbandon', () => {
+  it('returns null for empty active quests', () => {
+    expect(findQuestToAbandon({})).toBeNull();
+  });
+
+  it('returns an active quest when one exists', () => {
+    const quests = {
+      q1: { id: 'q1', start_npc: 'npc1', end_npc: 'npc1', name: 'Q1', steps: [] },
+    };
+    const result = findQuestToAbandon(quests);
+    expect(result).not.toBeNull();
+    expect(result!.id).toBe('q1');
+  });
+
+  it('returns one quest at a time when multiple are active', () => {
+    const quests = {
+      q1: { id: 'q1', start_npc: 'npc1', end_npc: 'npc1', name: 'Q1', steps: [] },
+      q2: { id: 'q2', start_npc: 'npc2', end_npc: 'npc2', name: 'Q2', steps: [] },
+    };
+    const result = findQuestToAbandon(quests);
+    expect(result).not.toBeNull();
+    expect(['q1', 'q2']).toContain(result!.id);
   });
 });
