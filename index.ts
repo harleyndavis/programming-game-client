@@ -432,6 +432,29 @@ let lastArenaCalories = 0;
 let lastArenaPos = { x: 0, y: 0 };
 let lastArenaOpponentAlive = false;
 
+// Closes out whatever match is currently open, if any. Shared by the 'arena'
+// event handler (closing a stale previous match before opening a new one) and
+// the duration-elapsed check in onTick.
+const closeArenaMatchIfActive = (reason: 'durationElapsed' | 'newMatchEvent'): void => {
+  if (!arenaMatchActive) return;
+  const selfAlive = lastArenaHp > 0;
+  const outcome = !selfAlive ? 'lost' : lastArenaOpponentAlive ? 'drew' : 'won';
+  logger.tick({
+    ctx: 'arena',
+    pos: lastArenaPos,
+    hp: lastArenaHp,
+    maxHp: lastArenaMaxHp,
+    calories: lastArenaCalories,
+    weight: 0,
+    decision: 'matchExit',
+    outcome,
+    aliveAtExit: selfAlive,
+    reason,
+  });
+  logger.closeArenaMatch();
+  arenaMatchActive = false;
+};
+
 // ── Crash recovery ───────────────────────────────────────────────────────────
 // If an uncaught exception fires, set this flag so the next tick returns a
 // move-home intent before the process exits, keeping the character out of
@@ -476,16 +499,24 @@ disconnectFromGame = connect({
     if (eventName === 'storageCharged' || eventName === 'storageEmptied' || eventName === 'deposited' || eventName === 'withdrew') {
       pushEvent(storageEventBuffer, EVENT_BUFFER_SIZE, eventName, evt);
     } else if (eventName === 'arena') {
+      // Server patch: this now fires at the START of a match and accurately
+      // resets the countdown (evt.duration, typically 60000ms) — the
+      // authoritative signal for both open and close (close is inferred by
+      // elapsing arenaMatchDuration in onTick below), not unitAppeared/
+      // unitDisappeared. Close out any still-open previous match first in
+      // case back-to-back matches outrun the duration-based close.
       console.log(`Arena event: ${_instance}`, evt);
       pushEvent(arenaEventBuffer, ARENA_EVENT_BUFFER_SIZE, eventName, evt);
+      closeArenaMatchIfActive('newMatchEvent');
       arenaMatchDuration = evt.duration;
-      arenaMatchStartMs = Date.now(); // Align wall-clock with SDK timer
-      if (!arenaMatchActive) {
-        arenaMatchActive = true;
-        isMatchEntry = true;
-        logger.openArenaMatch(new Date());
-      }
+      arenaMatchActive = true;
+      isMatchEntry = true;
+      arenaMatchStartMs = Date.now();
+      logger.openArenaMatch(new Date());
     } else if (_instance === '1v1Arena') {
+      // unitAppeared/unitDisappeared/despawn no longer drive match lifecycle
+      // (see 'arena' handler above) — kept here only for opponent id tracking
+      // and console visibility.
       if (eventName === 'unitAppeared') {
         console.log(`Arena opponent appeared: ${evt.unit.id}`);
         if (evt.unit.id !== myUnitId) {
@@ -544,26 +575,13 @@ disconnectFromGame = connect({
       return heartbeat.player.move(HOME_POSITION);
     }
 
-    // Close out any arena match that ended early via combat and whose exit tick
-    // was never received. Uses duration from the arena event, falls back to 60 s.
-    // 60 s is the maximum match duration.
-    if (arenaMatchActive && arenaMatchStartMs > 0 && Date.now() - arenaMatchStartMs > 60_000) {
-      const selfAlive = lastArenaHp > 0;
-      const outcome = !selfAlive ? 'lost' : lastArenaOpponentAlive ? 'drew' : 'won';
-      logger.tick({
-        ctx: 'arena',
-        pos: lastArenaPos,
-        hp: lastArenaHp,
-        maxHp: lastArenaMaxHp,
-        calories: lastArenaCalories,
-        weight: 0,
-        decision: 'matchExit',
-        outcome,
-        aliveAtExit: selfAlive,
-        reason: 'timeout',
-      });
-      logger.closeArenaMatch();
-      arenaMatchActive = false;
+    // The 'arena' event accurately resets the countdown at match start (server
+    // patch), so elapsing arenaMatchDuration since then is the authoritative
+    // close signal — not anything in the heartbeat itself. Overworld heartbeats
+    // keep arriving interleaved throughout an active match, so arenaTimeRemaining
+    // presence/absence still can't be used here.
+    if (arenaMatchActive && arenaMatchStartMs > 0 && Date.now() - arenaMatchStartMs > arenaMatchDuration) {
+      closeArenaMatchIfActive('durationElapsed');
     }
 
     // ── Arena tick ───────────────────────────────────────────────────────────
@@ -573,13 +591,6 @@ disconnectFromGame = connect({
       const { player } = heartbeat;
       if (!myUnitId && player.id) myUnitId = player.id;
 
-      // Open the match log on the first arena tick (arena event may arrive late).
-      if (!arenaMatchActive) {
-        logger.openArenaMatch(new Date());
-        arenaMatchActive = true;
-        arenaMatchStartMs = Date.now();
-        isMatchEntry = true;
-      }
       const arenaHp = isFiniteNumber(player.hp) ? player.hp : 0;
       const arenaPosition = isFinitePosition(player.position) ? player.position : { x: 0, y: 0 };
       const arenaMaxCalories = typeof heartbeat.constants?.maxCalories === "number" ? heartbeat.constants.maxCalories : 3_000;

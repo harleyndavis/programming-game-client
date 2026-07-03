@@ -87,7 +87,9 @@ Each player has a personal bank vault (`player.storage`) accessible through bank
 
 ## Arena
 
-There is no explicit match-start or match-end event. There is a onEvent type "arena" that has the event duration. The onTicks for arena seem to start coming in for them before the onEvent. But it lasts for 60 seconds from the OnEvent.
+As of a 2026-07-03 server patch, the onEvent type "arena" fires at match **start** and accurately resets the countdown (`duration`, typically 60000ms) — it's the authoritative signal for both opening a match and, by elapsing `duration` from that point, closing it. `unitAppeared`/`unitDisappeared`/`despawn` in the `1v1Arena` instance are no longer needed for lifecycle, only for opponent id tracking/logging.
+
+(Historical: before that patch, the `'arena'` event fired at match *end* instead, and the heartbeat could never be used to detect boundaries at all — overworld heartbeats keep arriving interleaved throughout an active match, and `arenaTimeRemaining` itself is not a live countdown, it resets to a fresh value at the old event's firing point and free-runs negative afterward. If arena lifecycle detection ever misbehaves again, check whether the server's event timing has reverted or changed again before re-deriving this from scratch.)
 Arena is exclusively 1v1 currently.
 
 NPCs, Players, and Monsters are all valid targets in the arena.
