@@ -50,6 +50,9 @@ const thresholdStatusEl = document.getElementById("thresholdStatus");
 const idleAtHomeToggleEl = document.getElementById("idleAtHomeToggle") as HTMLButtonElement | null;
 const idleAtHomeStateEl = document.getElementById("idleAtHomeState");
 const idleAtHomeStatusEl = document.getElementById("idleAtHomeStatus");
+const pursueQuestsToggleEl = document.getElementById("pursueQuestsToggle") as HTMLButtonElement | null;
+const pursueQuestsStateEl = document.getElementById("pursueQuestsState");
+const pursueQuestsStatusEl = document.getElementById("pursueQuestsStatus");
 let isThresholdDirty = false;
 let latestThresholdPercent = 25;
 const THRESHOLD_LS_KEY = "lowHpThresholdPercent";
@@ -369,6 +372,31 @@ idleAtHomeToggleEl?.addEventListener("click", () => {
     })
     .finally(() => {
       if (idleAtHomeToggleEl) idleAtHomeToggleEl.disabled = false;
+    });
+});
+
+pursueQuestsToggleEl?.addEventListener("click", () => {
+  if (pursueQuestsToggleEl) pursueQuestsToggleEl.disabled = true;
+  if (pursueQuestsStatusEl) pursueQuestsStatusEl.textContent = "Updating...";
+  fetch("/config/pursue-quests", { method: "POST" })
+    .then((res) => res.json())
+    .then((payload) => {
+      const active = Boolean(payload.pursueQuests);
+      if (pursueQuestsStateEl) {
+        pursueQuestsStateEl.textContent = active ? "ACTIVE" : "STOPPED";
+        pursueQuestsStateEl.className = "control-state " + (active ? "status-ok" : "status-warn");
+      }
+      if (pursueQuestsToggleEl) {
+        pursueQuestsToggleEl.textContent = active ? "Stop Questing" : "Resume Questing";
+        pursueQuestsToggleEl.classList.toggle("active", !active);
+      }
+      if (pursueQuestsStatusEl) pursueQuestsStatusEl.textContent = active ? "Bot is pursuing quests normally." : "Bot will abandon active quests and stop accepting new ones.";
+    })
+    .catch((err) => {
+      if (pursueQuestsStatusEl) pursueQuestsStatusEl.textContent = "Failed: " + String(err);
+    })
+    .finally(() => {
+      if (pursueQuestsToggleEl) pursueQuestsToggleEl.disabled = false;
     });
 });
 
@@ -914,6 +942,15 @@ const render = (payload: any) => {
   if (idleAtHomeToggleEl) {
     idleAtHomeToggleEl.textContent = idleActive ? "Resume Bot" : "Return to Home";
     idleAtHomeToggleEl.classList.toggle("active", idleActive);
+  }
+  const pursueQuestsActive = bot.pursueQuests !== false;
+  if (pursueQuestsStateEl) {
+    pursueQuestsStateEl.textContent = pursueQuestsActive ? "ACTIVE" : "STOPPED";
+    pursueQuestsStateEl.className = "control-state " + (pursueQuestsActive ? "status-ok" : "status-warn");
+  }
+  if (pursueQuestsToggleEl) {
+    pursueQuestsToggleEl.textContent = pursueQuestsActive ? "Stop Questing" : "Resume Questing";
+    pursueQuestsToggleEl.classList.toggle("active", !pursueQuestsActive);
   }
   const serverThresholdPercent = clampThresholdPercent(bot.lowHpThresholdPercent ?? 25);
   latestThresholdPercent = serverThresholdPercent;

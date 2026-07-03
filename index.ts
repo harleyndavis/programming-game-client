@@ -12,7 +12,7 @@ import { computeUpgradeTargets, getTargetItemsToKeep, getEquippedRecipeInputs, c
 import { findCraftableTarget, findNextCraftTarget, findCraftableFromList, computeCraftIngredientsToBuyFromMerchant } from "./src/craft";
 import { getHarvestableTarget, getMissingHarvestToolIds, collectHarvestToolItemIds, collectHarvestCraftingChainToolIds, collectCraftableInputIngredients } from "./src/harvest";
 import { findBestSellMerchant } from "./src/trade";
-import { findCompletableQuest, findTurnInNpc, findBestQuestToAccept, findBestAvailableQuest, findQuestGivers, findQuestTurnInRequiredItemIds, findPendingQuestTurnInItems, findStalledQuests, findQuestToAbandon } from "./src/quests";
+import { findCompletableQuest, findTurnInNpc, findBestQuestToAccept, findBestAvailableQuest, findQuestGivers, findQuestTurnInRequiredItemIds, findPendingQuestTurnInItems, findStalledQuests, findQuestToAbandon, findQuestToDismiss } from "./src/quests";
 
 config({
   path: ".env",
@@ -197,6 +197,8 @@ let huntIdleTicks = 0;
 const lastLoggedMerchants = new Set<string>();
 let exploreDirectionIndex = 0;
 let pendingDepositItem: string | null = null;
+// When disabled, the bot stops accepting new quests and abandons any active ones.
+let pursueQuestsEnabled = true;
 let lastDepositMessage = '';
 let depositInProgress = false;
 let depositCachedItems: Record<string, number> | null = null;
@@ -262,10 +264,12 @@ const decide = (opts: {
   questToAccept: { npc: ClientSideNPC; quest: ClientSideNPC['availableQuests'][string] } | null;
   /** Stalled quest to drop so a needed quest waiting on capacity can be accepted instead. */
   questToAbandon: ActiveQuest | null;
+  /** Active quest to abandon because the user disabled quest pursuit from the dashboard — drains the whole log, one per tick. */
+  questToDismiss: string | null;
   /** Position to close the distance toward when we have business with a quest NPC that's currently out of sight. */
   questNpcTarget: { x: number; y: number } | null;
 }): Decision => {
-  const { playerHp, maxHp, lowHpThreshold, playerPosition, nearbyMonster, isEncumbered, sellOpportunity, heaviestInventoryItem, playerCalories, maxCalories, cheapestFood, isHunting, huntRadius, nearbyHuntTarget, nearbyThreat, upgradesPlan, gearToEquip, recipeToCraft, toolToCraft, finishingHomeChores, harvestTarget, isHarvesting, attackingMonster, completableQuest, questToAccept, questToAbandon, questNpcTarget } = opts;
+  const { playerHp, maxHp, lowHpThreshold, playerPosition, nearbyMonster, isEncumbered, sellOpportunity, heaviestInventoryItem, playerCalories, maxCalories, cheapestFood, isHunting, huntRadius, nearbyHuntTarget, nearbyThreat, upgradesPlan, gearToEquip, recipeToCraft, toolToCraft, finishingHomeChores, harvestTarget, isHarvesting, attackingMonster, completableQuest, questToAccept, questToAbandon, questToDismiss, questNpcTarget } = opts;
 
   if (playerHp <= 0) return { type: "respawn" };
 
@@ -278,6 +282,7 @@ const decide = (opts: {
         return { type: "buy", items: upgradesPlan[0].items, merchant: upgradesPlan[0].merchant };
       }
       if (completableQuest) return { type: "turnInQuest", npc: completableQuest.npc, questId: completableQuest.quest.id };
+      if (questToDismiss) return { type: "abandonQuest", questId: questToDismiss };
       if (sellOpportunity) return { type: "sell", items: sellOpportunity.items, merchant: sellOpportunity.merchant };
       if (toolToCraft) return { type: "craft", recipeId: toolToCraft.recipe.id };
       if (questToAccept) return { type: "acceptQuest", npc: questToAccept.npc, questId: questToAccept.quest.id };
@@ -325,6 +330,7 @@ const decide = (opts: {
     if (upgradesPlan.length > 0) {
       return { type: "buy", items: upgradesPlan[0].items, merchant: upgradesPlan[0].merchant };
     }
+    if (questToDismiss) return { type: "abandonQuest", questId: questToDismiss };
     if (sellOpportunity) return { type: "sell", items: sellOpportunity.items, merchant: sellOpportunity.merchant };
     if (toolToCraft) return { type: "craft", recipeId: toolToCraft.recipe.id };
     // Close the distance toward a quest NPC we have business with but can't
@@ -343,6 +349,8 @@ const decide = (opts: {
     }
     return { type: "explore", to: harvestTarget.target.position! };
   }
+  if (questToAbandon) return { type: "abandonQuest", questId: questToAbandon.id };
+  if (questToDismiss) return { type: "abandonQuest", questId: questToDismiss };
   // Accept available quests when not busy.
   if (questToAccept) return { type: "acceptQuest", npc: questToAccept.npc, questId: questToAccept.quest.id };
   const dir = EXPLORE_DIRECTIONS[exploreDirectionIndex];
@@ -377,6 +385,17 @@ dashboard.configureDepositRequest({
   },
   setPendingItem(item) {
     pendingDepositItem = item;
+  },
+});
+
+dashboard.configurePursueQuests({
+  getPursueQuests() {
+    return pursueQuestsEnabled;
+  },
+  setPursueQuests(value) {
+    pursueQuestsEnabled = value;
+    logger.addExtra('pursueQuestsChanged', pursueQuestsEnabled);
+    return pursueQuestsEnabled;
   },
 });
 
@@ -1387,6 +1406,7 @@ disconnectFromGame = connect({
       ...toDashboardSnapshot(heartbeat, {
         recoveringAtHome,
         idlingAtHome,
+        pursueQuestsEnabled,
         lowHpThresholdPercent,
         lowHpThreshold,
         depositItem: pendingDepositItem,
@@ -1473,7 +1493,7 @@ disconnectFromGame = connect({
       ...KNOWN_QUEST_REWARDS,
     };
     const questToAccept: { npc: ClientSideNPC; quest: ClientSideNPC['availableQuests'][string] } | null =
-      atHome || !isHunting
+      pursueQuestsEnabled && (atHome || !isHunting)
         ? findBestQuestToAccept(questGivers, activeQuests, maxActiveQuests, {
           neededItems: questNeededItems,
           stockedItems: questStockedItems,
@@ -1496,6 +1516,12 @@ disconnectFromGame = connect({
       : null;
     const questToAbandon = findQuestToAbandon(stalledActiveQuests, atQuestCapacity, bestAvailableQuest, questNeededItems, questRewardPatches);
     if (questToAbandon) tickExtras.questToAbandon = { questId: questToAbandon.id, blockedQuestId: bestAvailableQuest?.quest.id };
+
+    // Drain the whole quest log, one per tick, when the user disabled quest
+    // pursuit from the dashboard — distinct from questToAbandon above (which
+    // only ever drops a single stalled quest to free capacity for a better one).
+    const questToDismiss: string | null = pursueQuestsEnabled ? null : (findQuestToDismiss(activeQuests)?.id ?? null);
+    if (questToDismiss) tickExtras.questToDismiss = { questId: questToDismiss };
 
     // Update NPC position memory whenever a quest NPC we have business with is
     // actually visible. Used below to close the distance when they're not.
@@ -1734,6 +1760,7 @@ disconnectFromGame = connect({
       completableQuest,
       questToAccept,
       questToAbandon,
+      questToDismiss,
       questNpcTarget,
     });
 

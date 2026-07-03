@@ -57,6 +57,7 @@ export type DashboardSnapshot = {
     bot: {
         recoveringAtHome: boolean;
         idleAtHome: boolean;
+        pursueQuests: boolean;
         lowHpThresholdPercent: number;
         lowHpThreshold: number;
         /** Item the dashboard user requested to deposit, shown until processed. */
@@ -138,6 +139,11 @@ type DashboardIdleAtHomeConfig = {
     setIdleAtHome: (value: boolean) => boolean;
 };
 
+type DashboardPursueQuestsConfig = {
+    getPursueQuests: () => boolean;
+    setPursueQuests: (value: boolean) => boolean;
+};
+
 type DashboardDepositRequestConfig = {
     getPendingItem: () => string | null;
     setPendingItem: (item: string | null) => void;
@@ -149,6 +155,7 @@ export const createDashboard = (port: number) => {
         bot: {
             recoveringAtHome: false,
             idleAtHome: false,
+            pursueQuests: true,
             lowHpThresholdPercent: 25,
             lowHpThreshold: 0,
             depositItem: null,
@@ -238,6 +245,17 @@ export const createDashboard = (port: number) => {
         setPendingItem: (_item) => { /* no-op default */ },
     };
 
+    let pursueQuestsConfig: DashboardPursueQuestsConfig = {
+        getPursueQuests: () => latestSnapshot.bot.pursueQuests,
+        setPursueQuests: (value) => {
+            latestSnapshot = {
+                ...latestSnapshot,
+                bot: { ...latestSnapshot.bot, pursueQuests: value },
+            };
+            return value;
+        },
+    };
+
     const sseClients = new Set<ServerResponse>();
 
     const loadDashboardHtml = () => readFileSync(join(__dirname, "dashboard.html"), "utf-8");
@@ -297,6 +315,9 @@ export const createDashboard = (port: number) => {
         },
         configureDepositRequest(config: DashboardDepositRequestConfig) {
             depositRequestConfig = config;
+        },
+        configurePursueQuests(config: DashboardPursueQuestsConfig) {
+            pursueQuestsConfig = config;
         },
         stop() {
             if (server) {
@@ -366,6 +387,14 @@ export const createDashboard = (port: number) => {
                     const applied = idleAtHomeConfig.setIdleAtHome(next);
                     broadcastSnapshot(latestSnapshot);
                     writeJson(res, { idleAtHome: applied });
+                    return;
+                }
+
+                if (url === "/config/pursue-quests" && req.method === "POST") {
+                    const next = !pursueQuestsConfig.getPursueQuests();
+                    const applied = pursueQuestsConfig.setPursueQuests(next);
+                    broadcastSnapshot(latestSnapshot);
+                    writeJson(res, { pursueQuests: applied });
                     return;
                 }
 

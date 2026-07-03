@@ -239,3 +239,16 @@ export const findQuestGivers = (
 ): ClientSideNPC[] => {
   return units.filter((u) => u.availableQuests && Object.keys(u.availableQuests).length > 0);
 };
+
+/**
+ * Picks one active quest to dismiss, one per call — used to drain the quest
+ * log a single quest at a time when quest pursuit is disabled entirely (as
+ * opposed to findQuestToAbandon, which only ever drops a single stalled
+ * quest to free capacity for a better one).
+ */
+export const findQuestToDismiss = (
+  activeQuests: ActiveQuests,
+): ActiveQuest | null => {
+  const quests = Object.values(activeQuests);
+  return quests.length > 0 ? quests[0] : null;
+};
