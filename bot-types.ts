@@ -47,6 +47,12 @@ export type UpgradeRequirement = {
     have: number;
 };
 
+/** A single item in a blocked recipe chain and why it can't be obtained. */
+export type BlockedByItem = {
+  itemId: string;
+  reason: string;
+};
+
 /**
  * A bot-managed upgrade goal for one equipment slot.  Uses game-native types
  * for items and recipes so any game-side changes surface as compile errors here.
@@ -63,4 +69,33 @@ export type UpgradePlanItem = {
     canBuy: boolean;
     /** True when this is the next craft target the bot is actively working toward. */
     isNextCraft: boolean;
+    /** Acquisition difficulty tier (1=buy now, 2=craft now, 3=can't afford, 4=obtainable, 5=blocked). */
+    tier: number;
+    /** True when no known acquisition path exists (tier === 5). */
+    blocked: boolean;
+    /** Direct recipe inputs / required tools that are themselves not obtainable. */
+    blockedBy?: BlockedByItem[];
+};
+
+/**
+ * A tool upgrade goal.  Same shape as UpgradePlanItem minus the equipment slot,
+ * since tools don't have dedicated equipment slots — they occupy the weapon slot
+ * but are tracked independently of combat gear upgrades.
+ */
+export type ToolPlanItem = {
+    id: string;
+    targetItem: Items;
+    name: string;
+    priority: number;
+    completed: boolean;
+    requirements: UpgradeRequirement[];
+    recipeId: RECIPE | null;
+    canBuy: boolean;
+    isNextCraft: boolean;
+    /** Acquisition difficulty tier (1=buy now, 2=craft now, 3=can't afford, 4=obtainable, 5=blocked). */
+    tier: number;
+    /** True when no known acquisition path exists (tier === 5). */
+    blocked: boolean;
+    /** Direct recipe inputs / required tools that are themselves not obtainable. */
+    blockedBy?: BlockedByItem[];
 };
