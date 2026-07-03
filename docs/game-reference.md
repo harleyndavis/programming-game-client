@@ -87,9 +87,9 @@ Each player has a personal bank vault (`player.storage`) accessible through bank
 
 ## Arena
 
-There is no dedicated match-start or match-end event, and the heartbeat cannot be used to detect match boundaries: overworld heartbeats (`inArena: false`) keep arriving throughout an active match, interleaved with arena heartbeats, so neither `inArena` nor the presence of `arenaTimeRemaining` tells you the match has ended (`arenaTimeRemaining` itself is not a live countdown of the current match — it resets to a fresh value, e.g. 60000, at match end and free-runs into negative numbers afterward).
+As of a 2026-07-03 server patch, the onEvent type "arena" fires at match **start** and accurately resets the countdown (`duration`, typically 60000ms) — it's the authoritative signal for both opening a match and, by elapsing `duration` from that point, closing it. `unitAppeared`/`unitDisappeared`/`despawn` in the `1v1Arena` instance are no longer needed for lifecycle, only for opponent id tracking/logging.
 
-The real boundary is `unitAppeared`/`unitDisappeared`/`despawn` events in the `1v1Arena` instance: match start is bracketed by `unitAppeared` for self + opponent (sometimes with duplicate appear events in the same burst); match end is bracketed by `unitDisappeared`/`despawn` for those same units, arriving within milliseconds of each other. The onEvent type "arena" (carries `duration`) fires immediately after the disappear events, right at the end of a match — informational only, not a lifecycle trigger.
+(Historical: before that patch, the `'arena'` event fired at match *end* instead, and the heartbeat could never be used to detect boundaries at all — overworld heartbeats keep arriving interleaved throughout an active match, and `arenaTimeRemaining` itself is not a live countdown, it resets to a fresh value at the old event's firing point and free-runs negative afterward. If arena lifecycle detection ever misbehaves again, check whether the server's event timing has reverted or changed again before re-deriving this from scratch.)
 Arena is exclusively 1v1 currently.
 
 NPCs, Players, and Monsters are all valid targets in the arena.

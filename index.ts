@@ -432,9 +432,10 @@ let lastArenaCalories = 0;
 let lastArenaPos = { x: 0, y: 0 };
 let lastArenaOpponentAlive = false;
 
-// Closes out whatever match is currently open, if any. Shared by the
-// unitDisappeared/despawn handler in onEvent and the timeout backstop in onTick.
-const closeArenaMatchIfActive = (reason: 'timeout' | 'unitsGone'): void => {
+// Closes out whatever match is currently open, if any. Shared by the 'arena'
+// event handler (closing a stale previous match before opening a new one) and
+// the duration-elapsed check in onTick.
+const closeArenaMatchIfActive = (reason: 'durationElapsed' | 'newMatchEvent'): void => {
   if (!arenaMatchActive) return;
   const selfAlive = lastArenaHp > 0;
   const outcome = !selfAlive ? 'lost' : lastArenaOpponentAlive ? 'drew' : 'won';
@@ -498,42 +499,32 @@ disconnectFromGame = connect({
     if (eventName === 'storageCharged' || eventName === 'storageEmptied' || eventName === 'deposited' || eventName === 'withdrew') {
       pushEvent(storageEventBuffer, EVENT_BUFFER_SIZE, eventName, evt);
     } else if (eventName === 'arena') {
-      // Fires after unitDisappeared/despawn, right at the end of a match — the
-      // heartbeat's inArena/arenaTimeRemaining cannot be used for lifecycle at
-      // all (overworld heartbeats keep arriving throughout an active match, so
-      // their presence/absence doesn't track match boundaries). Real lifecycle
-      // is driven off unitAppeared/unitDisappeared below; this is bookkeeping only.
+      // Server patch: this now fires at the START of a match and accurately
+      // resets the countdown (evt.duration, typically 60000ms) — the
+      // authoritative signal for both open and close (close is inferred by
+      // elapsing arenaMatchDuration in onTick below), not unitAppeared/
+      // unitDisappeared. Close out any still-open previous match first in
+      // case back-to-back matches outrun the duration-based close.
       console.log(`Arena event: ${_instance}`, evt);
       pushEvent(arenaEventBuffer, ARENA_EVENT_BUFFER_SIZE, eventName, evt);
+      closeArenaMatchIfActive('newMatchEvent');
       arenaMatchDuration = evt.duration;
+      arenaMatchActive = true;
+      isMatchEntry = true;
+      arenaMatchStartMs = Date.now();
+      logger.openArenaMatch(new Date());
     } else if (_instance === '1v1Arena') {
+      // unitAppeared/unitDisappeared/despawn no longer drive match lifecycle
+      // (see 'arena' handler above) — kept here only for opponent id tracking
+      // and console visibility.
       if (eventName === 'unitAppeared') {
         console.log(`Arena opponent appeared: ${evt.unit.id}`);
         if (evt.unit.id !== myUnitId) {
           arenaOpponentId = evt.unit.id;
         }
-        // unitAppeared brackets the START of a match — open the log here, not
-        // off any heartbeat field. Guarded so the burst of appeared events at
-        // match start (self + opponent, sometimes duplicated) only opens once.
-        if (!arenaMatchActive) {
-          arenaMatchActive = true;
-          isMatchEntry = true;
-          arenaMatchStartMs = Date.now();
-          logger.openArenaMatch(new Date());
-        }
       }
       if (eventName === 'unitDisappeared') console.log(`Arena opponent disappeared: ${evt.unitId}`);
       if (eventName === 'despawn') console.log(`Arena opponent despawned: ${evt.unitId}`);
-      if (eventName === 'unitDisappeared' || eventName === 'despawn') {
-        // unitDisappeared/despawn brackets the END of a match. Self and opponent
-        // disappear within milliseconds of each other (self first, in observed
-        // logs) — the guard in closeArenaMatchIfActive makes the second one a
-        // no-op, and since the gap is far smaller than the tick interval, no
-        // real match ticks are lost regardless of which one triggers the close.
-        // Provisional: if the server ever adds a dedicated match-end event,
-        // switch to that instead of inferring end-of-match from unit presence.
-        closeArenaMatchIfActive('unitsGone');
-      }
       pushEvent(arenaEventBuffer, ARENA_EVENT_BUFFER_SIZE, eventName, evt);
     } else if (eventName === 'beganHarvesting' || eventName === 'harvested') {
       pushEvent(harvestEventBuffer, EVENT_BUFFER_SIZE, eventName, evt);
@@ -584,14 +575,13 @@ disconnectFromGame = connect({
       return heartbeat.player.move(HOME_POSITION);
     }
 
-    // Backstop only: match lifecycle is driven off unitAppeared/unitDisappeared
-    // in onEvent (see above), not off anything in the heartbeat — overworld
-    // heartbeats keep arriving throughout an active match, so checking for
-    // arenaTimeRemaining's presence/absence here would just toggle on every
-    // interleaved overworld tick. This only catches the case where the
-    // disappear events themselves never arrived. 60 s is the max match length.
-    if (arenaMatchActive && arenaMatchStartMs > 0 && Date.now() - arenaMatchStartMs > 60_000) {
-      closeArenaMatchIfActive('timeout');
+    // The 'arena' event accurately resets the countdown at match start (server
+    // patch), so elapsing arenaMatchDuration since then is the authoritative
+    // close signal — not anything in the heartbeat itself. Overworld heartbeats
+    // keep arriving interleaved throughout an active match, so arenaTimeRemaining
+    // presence/absence still can't be used here.
+    if (arenaMatchActive && arenaMatchStartMs > 0 && Date.now() - arenaMatchStartMs > arenaMatchDuration) {
+      closeArenaMatchIfActive('durationElapsed');
     }
 
     // ── Arena tick ───────────────────────────────────────────────────────────
