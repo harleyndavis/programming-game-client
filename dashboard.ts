@@ -300,6 +300,17 @@ export const createDashboard = (port: number) => {
     const broadcastSnapshot = (snapshot: DashboardSnapshot) => {
         const message = `data: ${JSON.stringify(snapshot)}\n\n`;
         sseClients.forEach((client) => {
+            // Skip this tick entirely if the client hasn't finished draining
+            // the previous write — SSE is "latest state wins", so there's
+            // nothing lost by not queuing another snapshot on top of one
+            // it's still catching up on. This caps unflushed data at roughly
+            // one broadcast's worth per client, forever, without ever
+            // forcibly destroying a connection just for being temporarily
+            // behind (an earlier version of this fix did exactly that, on a
+            // fixed byte threshold, and it fired constantly in practice —
+            // every disconnect the user saw was this code tearing down a
+            // connection that was still alive, just not caught up yet).
+            if (client.writableLength > 0) return;
             client.write(message);
         });
     };
@@ -460,6 +471,14 @@ export const createDashboard = (port: number) => {
                     req.on("close", () => {
                         sseClients.delete(res);
                         res.end();
+                    });
+                    // A socket can error out (e.g. ECONNRESET) without ever
+                    // firing 'close' on the request — without this, that
+                    // client would stay in sseClients forever, and every
+                    // future broadcast keeps calling write() on a dead
+                    // response.
+                    res.on("error", () => {
+                        sseClients.delete(res);
                     });
                     return;
                 }
