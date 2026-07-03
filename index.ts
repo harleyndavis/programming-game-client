@@ -10,7 +10,7 @@ import { ENCUMBRANCE_THRESHOLD, getInventoryWeight, findHeaviestInventoryItem, f
 import { getChainedIngredients, canObtainChain, computeDifficultyTier, computeUpgradeTargets, getTargetItemsToKeep, getEquippedRecipeInputs, computeTargetsToBuyFromMerchant, findGearToEquip } from "./src/equipment";
 import { findCraftableTarget, findNextCraftTarget } from "./src/craft";
 import { findBestSellMerchant } from "./src/trade";
-import { findCompletableQuest, findTurnInNpc, findBestQuestToAccept, findQuestGivers } from "./src/quests";
+import { findCompletableQuest, findTurnInNpc, findBestQuestToAccept, findQuestGivers, findQuestToAbandon } from "./src/quests";
 
 config({
   path: ".env",
@@ -112,7 +112,8 @@ type Decision =
   | { type: "explore"; to: { x: number; y: number } }
   | { type: "harvest"; targetId: string }
   | { type: "acceptQuest"; npc: ClientSideNPC; questId: string }
-  | { type: "turnInQuest"; npc: ClientSideNPC; questId: string };
+  | { type: "turnInQuest"; npc: ClientSideNPC; questId: string }
+  | { type: "abandonQuest"; questId: string };
 
 /** Returns true when two decisions are meaningfully different. */
 const decisionChanged = (prev: Decision | null, next: Decision): boolean => {
@@ -139,6 +140,8 @@ const decisionChanged = (prev: Decision | null, next: Decision): boolean => {
     return prev.questId !== next.questId;
   if (next.type === "turnInQuest" && prev.type === "turnInQuest")
     return prev.questId !== next.questId;
+  if (next.type === "abandonQuest" && prev.type === "abandonQuest")
+    return prev.questId !== next.questId;
   return false;
 };
 
@@ -159,6 +162,8 @@ let huntIdleTicks = 0;
 const lastLoggedMerchants = new Set<string>();
 let exploreDirectionIndex = 0;
 let pendingDepositItem: string | null = null;
+// When disabled, the bot stops accepting new quests and abandons any active ones.
+let pursueQuestsEnabled = true;
 let lastDepositMessage = '';
 let depositInProgress = false;
 let depositCachedItems: Record<string, number> | null = null;
@@ -221,8 +226,9 @@ const decide = (opts: {
   | undefined;
   completableQuest: { quest: ActiveQuest; npc: ClientSideNPC } | null;
   questToAccept: { npc: ClientSideNPC; quest: ClientSideNPC['availableQuests'][string] } | null;
+  questToAbandon: string | null;
 }): Decision => {
-  const { playerHp, maxHp, lowHpThreshold, playerPosition, nearbyMonster, isEncumbered, sellOpportunity, heaviestInventoryItem, playerCalories, maxCalories, cheapestFood, isHunting, huntRadius, nearbyHuntTarget, nearbyThreat, upgradesPlan, gearToEquip, recipeToCraft, finishingHomeChores, nearbyTree, isHarvesting, attackingMonster, completableQuest, questToAccept } = opts;
+  const { playerHp, maxHp, lowHpThreshold, playerPosition, nearbyMonster, isEncumbered, sellOpportunity, heaviestInventoryItem, playerCalories, maxCalories, cheapestFood, isHunting, huntRadius, nearbyHuntTarget, nearbyThreat, upgradesPlan, gearToEquip, recipeToCraft, finishingHomeChores, nearbyTree, isHarvesting, attackingMonster, completableQuest, questToAccept, questToAbandon } = opts;
 
   if (playerHp <= 0) return { type: "respawn" };
 
@@ -235,6 +241,7 @@ const decide = (opts: {
         return { type: "buy", items: upgradesPlan[0].items, merchant: upgradesPlan[0].merchant };
       }
       if (completableQuest) return { type: "turnInQuest", npc: completableQuest.npc, questId: completableQuest.quest.id };
+      if (questToAbandon) return { type: "abandonQuest", questId: questToAbandon };
       if (sellOpportunity) return { type: "sell", items: sellOpportunity.items, merchant: sellOpportunity.merchant };
       if (questToAccept) return { type: "acceptQuest", npc: questToAccept.npc, questId: questToAccept.quest.id };
     }
@@ -273,6 +280,7 @@ const decide = (opts: {
       return { type: "buy", items: upgradesPlan[0].items, merchant: upgradesPlan[0].merchant };
     }
     if (completableQuest) return { type: "turnInQuest", npc: completableQuest.npc, questId: completableQuest.quest.id };
+    if (questToAbandon) return { type: "abandonQuest", questId: questToAbandon };
     if (sellOpportunity) return { type: "sell", items: sellOpportunity.items, merchant: sellOpportunity.merchant };
     if (questToAccept) return { type: "acceptQuest", npc: questToAccept.npc, questId: questToAccept.quest.id };
     return { type: "return-home-idle" };
@@ -288,6 +296,7 @@ const decide = (opts: {
     }
     return { type: "explore", to: nearbyTree.obj.position! };
   }
+  if (questToAbandon) return { type: "abandonQuest", questId: questToAbandon };
   // Accept available quests when not busy.
   if (questToAccept) return { type: "acceptQuest", npc: questToAccept.npc, questId: questToAccept.quest.id };
   const dir = EXPLORE_DIRECTIONS[exploreDirectionIndex];
@@ -322,6 +331,17 @@ dashboard.configureDepositRequest({
   },
   setPendingItem(item) {
     pendingDepositItem = item;
+  },
+});
+
+dashboard.configurePursueQuests({
+  getPursueQuests() {
+    return pursueQuestsEnabled;
+  },
+  setPursueQuests(value) {
+    pursueQuestsEnabled = value;
+    logger.addExtra('pursueQuestsChanged', pursueQuestsEnabled);
+    return pursueQuestsEnabled;
   },
 });
 
@@ -1035,6 +1055,7 @@ disconnectFromGame = connect({
       ...toDashboardSnapshot(heartbeat, {
         recoveringAtHome,
         idlingAtHome,
+        pursueQuestsEnabled,
         lowHpThresholdPercent,
         lowHpThreshold,
         depositItem: pendingDepositItem,
@@ -1148,11 +1169,13 @@ disconnectFromGame = connect({
     const questGivers = findQuestGivers(visibleNpcs);
     const maxActiveQuests = typeof heartbeat.constants?.maxActiveQuests === "number" ? heartbeat.constants.maxActiveQuests : 5;
     const questToAccept: { npc: ClientSideNPC; quest: ClientSideNPC['availableQuests'][string] } | null =
-      atHome || !isHunting
+      pursueQuestsEnabled && (atHome || !isHunting)
         ? findBestQuestToAccept(questGivers, activeQuests, maxActiveQuests)
         : null;
+    const questToAbandon: string | null = pursueQuestsEnabled ? null : (findQuestToAbandon(activeQuests)?.id ?? null);
     if (completableQuest) tickExtras.completableQuest = { questId: completableQuest.quest.id, npcId: completableQuest.npc.id };
     if (questToAccept) tickExtras.questToAccept = { questId: questToAccept.quest.id, npcId: questToAccept.npc.id };
+    if (questToAbandon) tickExtras.questToAbandon = { questId: questToAbandon };
 
     const decision = withdrawOverride ?? depositOverride ?? decide({
       playerHp,
@@ -1179,6 +1202,7 @@ disconnectFromGame = connect({
       attackingMonster,
       completableQuest,
       questToAccept,
+      questToAbandon,
     });
 
     // Track decision stability for intent conflict detection.
@@ -1206,6 +1230,7 @@ disconnectFromGame = connect({
       if (d.type === "harvest") return "harvest";
       if (d.type === "acceptQuest") return "acceptQuest";
       if (d.type === "turnInQuest") return "turnInQuest";
+      if (d.type === "abandonQuest") return "abandonQuest";
       return "move"; // recover, return-home-idle, return-home, explore, and drop produce a move/idle intent
     };
     const expectedIntent = decisionToIntentType(decision);
@@ -1391,6 +1416,8 @@ disconnectFromGame = connect({
       }
       case "turnInQuest":
         return player.turnInQuest(decision.npc as any, decision.questId as any);
+      case "abandonQuest":
+        return player.abandonQuest(decision.questId as any);
     }
   },
 });
