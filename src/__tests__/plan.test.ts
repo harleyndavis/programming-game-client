@@ -74,6 +74,31 @@ describe('canObtainChain', () => {
     expect(canObtainChain('magicSword', { goldIngot: 3 }, {}, recipes)).toBe(true);
   });
 
+  it('returns false when inventory has some of an ingredient but not enough (owning 1 coin does not satisfy a 1000-coin recipe)', () => {
+    const meltRecipes: RecipeList = [
+      makeRecipe({ id: 'chunk', output: { chunkOfCopper: 1 }, input: { copperCoin: 1000 }, station: 'smelting' }),
+      makeRecipe({ id: 'ingot', output: { copperIngot: 1 }, input: { chunkOfCopper: 3 }, station: 'smelting' }),
+    ];
+    expect(canObtainChain('copperIngot', { copperCoin: 1 }, {}, meltRecipes)).toBe(false);
+  });
+
+  it('returns true once inventory has enough of the ingredient for the full chain', () => {
+    const meltRecipes: RecipeList = [
+      makeRecipe({ id: 'chunk', output: { chunkOfCopper: 1 }, input: { copperCoin: 1000 }, station: 'smelting' }),
+      makeRecipe({ id: 'ingot', output: { copperIngot: 1 }, input: { chunkOfCopper: 3 }, station: 'smelting' }),
+    ];
+    expect(canObtainChain('copperIngot', { copperCoin: 3000 }, {}, meltRecipes)).toBe(true);
+  });
+
+  it('scales ingredient needs by how many crafts are required when neededQty exceeds one craft\'s output', () => {
+    const recipes: RecipeList = [
+      makeRecipe({ id: 'r1', output: { arrow: 2 }, input: { stick: 1 } }),
+    ];
+    // 5 arrows needs ceil(5/2)=3 crafts, so 3 sticks — 2 sticks isn't enough.
+    expect(canObtainChain('arrow', { stick: 2 }, {}, recipes, undefined, 5)).toBe(false);
+    expect(canObtainChain('arrow', { stick: 3 }, {}, recipes, undefined, 5)).toBe(true);
+  });
+
   it('returns false when ingredients have no known source', () => {
     expect(canObtainChain('copperSword', {}, {}, recipes)).toBe(false);
   });
@@ -162,6 +187,23 @@ describe('computeDifficultyTier', () => {
     });
     expect(tier).toBe(2);
   });
+
+  it('returns tier 5 (not 4) when a chain ingredient is short on quantity, even though some is on hand', () => {
+    const meltRecipes: RecipeList = [
+      makeRecipe({ id: 'chunk', output: { chunkOfCopper: 1 }, input: { copperCoin: 1000 } }),
+      makeRecipe({ id: 'ingot', output: { copperIngot: 1 }, input: { chunkOfCopper: 3 } }),
+    ];
+    const tier = computeDifficultyTier({
+      itemId: 'copperMailBoots',
+      recipe: { id: 'r1', input: { copperIngot: 3 }, required: [] },
+      allMerchantSelling: {},
+      // Only 1 copper coin on hand — nowhere near the 3000 a full ingot chain needs.
+      inventory: { copperCoin: 1 },
+      playerCoins: 0,
+      recipes: meltRecipes,
+    });
+    expect(tier).toBe(5);
+  });
 });
 
 describe('findBlockingItems', () => {
@@ -197,6 +239,17 @@ describe('findBlockingItems', () => {
       recipes,
     );
     expect(result).toEqual([]);
+  });
+
+  it('flags an input where inventory has some but not enough of the required quantity', () => {
+    const chained: RecipeList = [
+      ...recipes,
+      makeRecipe({ id: 'r2', output: { copperIngot: 1 }, input: { copperOre: 2 }, station: null }),
+    ];
+    // copperSword needs 3 copperIngot; only 1 copperOre on hand (needs 6 for 3 ingots).
+    const result = findBlockingItems('copperSword', { hammer: 1, copperOre: 1 }, { stick: { price: 5, quantity: 1 } }, chained);
+    expect(result).toHaveLength(1);
+    expect(result[0]).toEqual({ itemId: 'copperIngot', reason: 'Has a recipe but its ingredients are also not obtainable' });
   });
 
   it('flags a missing required tool', () => {

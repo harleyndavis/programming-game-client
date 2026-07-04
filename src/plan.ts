@@ -66,24 +66,37 @@ export const computeChainNeeds = (
   return needs;
 };
 
+/**
+ * Whether at least `neededQty` of itemId can be obtained — already on hand,
+ * sold by a visible merchant, or craftable from ingredients that are
+ * themselves obtainable in the quantities the recipe actually consumes.
+ *
+ * neededQty matters: owning 1 copper coin doesn't mean a recipe that melts
+ * down 1000 coins into a chunk of copper is obtainable. Ingredient quantities
+ * scale with how many crafts of the parent are needed (e.g. needing 3 swords
+ * from a recipe that outputs 2 per craft means 2 crafts, so inputs are ×2).
+ */
 export const canObtainChain = (
   itemId: string,
   inventory: Partial<Record<string, number>>,
   allMerchantSelling: Record<string, { price: number; quantity: number } | undefined>,
   recipes: RecipeList,
   visited = new Set<string>(),
+  neededQty = 1,
 ): boolean => {
   if (visited.has(itemId)) return false;
   const next = new Set(visited);
   next.add(itemId);
-  if ((inventory[itemId] ?? 0) > 0) return true;
+  if ((inventory[itemId] ?? 0) >= neededQty) return true;
   const offer = allMerchantSelling[itemId];
   if (offer && offer.quantity > 0) return true;
   const recipe = recipes.find(r => itemId in (r.output ?? {}));
   if (recipe) {
+    const outQty = (recipe.output ?? {})[itemId] ?? 1;
+    const craftsNeeded = Math.ceil(neededQty / outQty);
     return (
-      Object.keys(recipe.input).every(id => canObtainChain(id, inventory, allMerchantSelling, recipes, next)) &&
-      (recipe.required ?? []).every(id => canObtainChain(id as string, inventory, allMerchantSelling, recipes, next))
+      Object.entries(recipe.input).every(([id, qty]) => canObtainChain(id, inventory, allMerchantSelling, recipes, next, (qty ?? 0) * craftsNeeded)) &&
+      (recipe.required ?? []).every(id => canObtainChain(id as string, inventory, allMerchantSelling, recipes, next, 1))
     );
   }
   return false;
@@ -107,8 +120,8 @@ export const findBlockingItems = (
   if (!recipe) return [];
 
   const result: Array<{ itemId: string; reason: string }> = [];
-  const check = (id: string) => {
-    if (canObtainChain(id, inventory, allMerchantSelling, recipes)) return;
+  const check = (id: string, neededQty: number) => {
+    if (canObtainChain(id, inventory, allMerchantSelling, recipes, undefined, neededQty)) return;
     const sub = recipes.find(r => id in (r.output ?? {}));
     const atMerchant = !!(allMerchantSelling[id]?.quantity ?? 0);
     let reason: string;
@@ -118,8 +131,8 @@ export const findBlockingItems = (
     result.push({ itemId: id, reason });
   };
 
-  for (const inputId of Object.keys(recipe.input)) check(inputId);
-  for (const reqId of recipe.required ?? []) check(String(reqId));
+  for (const [inputId, qty] of Object.entries(recipe.input)) check(inputId, qty ?? 0);
+  for (const reqId of recipe.required ?? []) check(String(reqId), 1);
   return result;
 };
 
@@ -149,8 +162,8 @@ export const computeDifficultyTier = (opts: {
       craftTier = 2;
     } else {
       const allObtainable =
-        Object.keys(recipe.input).every(id => canObtainChain(id, inventory, allMerchantSelling, recipes)) &&
-        recipe.required.every(id => canObtainChain(id as string, inventory, allMerchantSelling, recipes));
+        Object.entries(recipe.input).every(([id, qty]) => canObtainChain(id, inventory, allMerchantSelling, recipes, undefined, qty ?? 0)) &&
+        recipe.required.every(id => canObtainChain(id as string, inventory, allMerchantSelling, recipes, undefined, 1));
       craftTier = allObtainable ? 4 : 5;
     }
   }
