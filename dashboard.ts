@@ -344,6 +344,13 @@ export const createDashboard = (port: number) => {
         start() {
             server = createServer(async (req, res) => {
                 const url = req.url ?? "/";
+                // Temporary tracing to pin down a hang where curl completes the TCP
+                // handshake but never gets an HTTP response, while the bot's own
+                // tick loop keeps running fine. If this line is missing from the
+                // logs for a stuck request, the request handler itself never fired
+                // for that connection — if it's present but nothing after it, the
+                // hang is inside this handler for that specific route.
+                console.log(`[dashboard] ${req.method} ${url} received @ ${new Date().toISOString()}`);
 
                 if (url === "/") {
                     try {
@@ -506,6 +513,14 @@ export const createDashboard = (port: number) => {
                     console.error(`Dashboard server error: ${err.message}`);
                 }
             });
+            // Temporary tracing (see the [dashboard] request log above) to catch a
+            // resource leak building up over time ahead of a hang, rather than only
+            // finding out after the fact. Safe to remove once the hang is diagnosed.
+            const diagnosticInterval = setInterval(() => {
+                const handleCount = (process as any)._getActiveHandles?.().length ?? -1;
+                console.log(`[dashboard] diagnostic: sseClients=${sseClients.size} activeHandles=${handleCount}`);
+            }, 30_000);
+            diagnosticInterval.unref();
         },
         publish(snapshot: DashboardSnapshot) {
             latestSnapshot = {
