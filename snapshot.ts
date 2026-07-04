@@ -1,11 +1,4 @@
-import { UNIT_TYPE } from "programming-game/types";
-import { DashboardSnapshot, Position } from "./dashboard";
-
-type SnapshotUnit = {
-    type?: string;
-    hp?: number;
-    position?: Position;
-};
+import { DashboardSnapshot } from "./dashboard";
 
 type SnapshotEquipment = {
     helm?: string | null;
@@ -21,34 +14,12 @@ type SnapshotEquipment = {
 };
 
 type SnapshotPlayer = {
-    name?: string;
-    hp?: number;
-    mp?: number;
-    tp?: number;
-    calories?: number;
     inventory?: Record<string, number>;
-    storage?: Record<string, number>;
     equipment?: SnapshotEquipment;
-    spellbook?: string[];
-    combatSkills?: Record<string, number>;
-    stats?: {
-        maxHp?: number;
-        attack?: number;
-        defense?: number;
-        movementSpeed?: number;
-    };
-    position?: Position;
-    action?: string;
-    actionTarget?: string;
-    actionDuration?: number;
-    actionStart?: number;
-    intent?: { type?: string };
-    statusEffects?: Record<string, unknown>;
 };
 
 type SnapshotHeartbeat = {
     player: SnapshotPlayer;
-    units: Record<string, SnapshotUnit>;
     items: Record<string, { weight?: number }>;
     constants?: {
         maxCarryWeight?: number;
@@ -66,17 +37,6 @@ type SnapshotMeta = {
     nearbyBankers: number;
     nearbyMerchants: number;
     questRewards: Record<string, { items: Record<string, number> }>;
-};
-
-const toPosition = (position?: Position): Position | null => {
-    if (!position || typeof position.x !== "number" || typeof position.y !== "number") {
-        return null;
-    }
-
-    return {
-        x: position.x,
-        y: position.y,
-    };
 };
 
 const EQUIPMENT_SLOTS: Array<keyof Required<SnapshotEquipment>> = [
@@ -120,16 +80,14 @@ const getCarryWeight = (heartbeat: SnapshotHeartbeat) => {
 };
 
 export const toDashboardSnapshot = (heartbeat: SnapshotHeartbeat, meta: SnapshotMeta): DashboardSnapshot => {
-    const units = Object.keys(heartbeat.units).map((unitId) => {
-        const unit = heartbeat.units[unitId];
-
-        return {
-            id: unitId,
-            type: unit.type ?? "unknown",
-            hp: typeof unit.hp === "number" ? unit.hp : null,
-            position: toPosition(unit.position),
-        };
-    });
+    // `raw` already carries player/units/gameObjects — the dashboard client
+    // derives its own player/unit-count/world display data from `raw`
+    // instead of us reconstructing (and re-sending) the same data here.
+    // weight/maxCarryWeight are the exception: they depend on `items`
+    // (per-item weight lookups), which is intentionally stripped from `raw`
+    // to avoid sending the full item catalog, so they're computed here while
+    // full `items` is still available and passed through as plain numbers.
+    const { items: _items, ...rawWithoutItems } = heartbeat as unknown as Record<string, unknown>;
 
     return {
         receivedAt: new Date().toISOString(),
@@ -144,51 +102,10 @@ export const toDashboardSnapshot = (heartbeat: SnapshotHeartbeat, meta: Snapshot
             nearbyBankers: meta.nearbyBankers,
             nearbyMerchants: meta.nearbyMerchants,
         },
-        serverState: {
-            action: typeof heartbeat.player.action === "string" ? heartbeat.player.action : null,
-            actionTarget: typeof heartbeat.player.actionTarget === "string" ? heartbeat.player.actionTarget : null,
-            actionDuration: typeof heartbeat.player.actionDuration === "number" ? heartbeat.player.actionDuration : null,
-            actionStart: typeof heartbeat.player.actionStart === "number" ? heartbeat.player.actionStart : null,
-            intentType: typeof heartbeat.player.intent?.type === "string" ? heartbeat.player.intent.type : null,
-            statusEffects: Object.keys(heartbeat.player.statusEffects ?? {}),
-        },
-        player: {
-            name: typeof heartbeat.player.name === "string" ? heartbeat.player.name : null,
-            hp: typeof heartbeat.player.hp === "number" ? heartbeat.player.hp : null,
-            maxHp: typeof heartbeat.player.stats?.maxHp === "number" ? heartbeat.player.stats.maxHp : null,
-            movementSpeed: typeof heartbeat.player.stats?.movementSpeed === "number" ? heartbeat.player.stats.movementSpeed : null,
-            mp: typeof heartbeat.player.mp === "number" ? heartbeat.player.mp : null,
-            tp: typeof heartbeat.player.tp === "number" ? heartbeat.player.tp : null,
-            calories: typeof heartbeat.player.calories === "number" ? heartbeat.player.calories : null,
-            attack: typeof heartbeat.player.stats?.attack === "number" ? heartbeat.player.stats.attack : null,
-            defense: typeof heartbeat.player.stats?.defense === "number" ? heartbeat.player.stats.defense : null,
-            weight: getCarryWeight(heartbeat),
-            maxCarryWeight:
-                typeof heartbeat.constants?.maxCarryWeight === "number" ? heartbeat.constants.maxCarryWeight : 70_000,
-            position: toPosition(heartbeat.player.position),
-            equipment: {
-                helm: heartbeat.player.equipment?.helm ?? null,
-                chest: heartbeat.player.equipment?.chest ?? null,
-                legs: heartbeat.player.equipment?.legs ?? null,
-                feet: heartbeat.player.equipment?.feet ?? null,
-                hands: heartbeat.player.equipment?.hands ?? null,
-                weapon: heartbeat.player.equipment?.weapon ?? null,
-                offhand: heartbeat.player.equipment?.offhand ?? null,
-                amulet: heartbeat.player.equipment?.amulet ?? null,
-                ring1: heartbeat.player.equipment?.ring1 ?? null,
-                ring2: heartbeat.player.equipment?.ring2 ?? null,
-            },
-            combatSkills: { ...(heartbeat.player.combatSkills ?? {}) },
-            spellbook: Array.isArray(heartbeat.player.spellbook) ? [...heartbeat.player.spellbook] : [],
-            inventory: { ...(heartbeat.player.inventory ?? {}) },
-            storage: { ...(heartbeat.player.storage ?? {}) },
-        },
-        unitCount: units.length,
-        monstersVisible: units.filter((u) => u.type === UNIT_TYPE.monster).length,
-        units,
+        weight: getCarryWeight(heartbeat),
+        maxCarryWeight:
+            typeof heartbeat.constants?.maxCarryWeight === "number" ? heartbeat.constants.maxCarryWeight : 70_000,
         questRewards: meta.questRewards,
-        // Pass the raw heartbeat through unmodified so the dashboard can show
-        // exactly what the server sent, rather than our processed version.
-        raw: heartbeat as unknown as Record<string, unknown>,
+        raw: rawWithoutItems,
     };
 };
