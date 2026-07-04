@@ -6,6 +6,9 @@ import {
   findCraftableFromList,
   computeCraftIngredientsToBuyFromMerchant,
   isFullyAchievableFromInventory,
+  collectVisibleStations,
+  getAvailableStationTypes,
+  findStationForType,
 } from '../craft';
 import type { RecipeList, UpgradeTarget } from '../../bot-types';
 
@@ -102,13 +105,23 @@ describe('findCraftableSubStep', () => {
     expect(result!.recipeId).toBe('r2');
   });
 
-  it('returns null when sub-recipe requires a station', () => {
+  it('returns null when sub-recipe requires a station that is not visible', () => {
     const recipes: RecipeList = [
       { id: 'r2', input: { copperOre: 2 }, output: { copperIngot: 1 }, required: [], station: 'furnace' },
     ];
     const recipe = { id: 'r1', input: { copperIngot: 3 }, required: ['hammer'] };
     const result = findCraftableSubStep(recipe, { copperOre: 6, hammer: 1 }, recipes, new Set());
     expect(result).toBeNull();
+  });
+
+  it('returns the sub-recipe once its station is available', () => {
+    const recipes: RecipeList = [
+      { id: 'r2', input: { copperOre: 2 }, output: { copperIngot: 1 }, required: [], station: 'furnace' },
+    ];
+    const recipe = { id: 'r1', input: { copperIngot: 3 }, required: ['hammer'] };
+    const result = findCraftableSubStep(recipe, { copperOre: 6, hammer: 1 }, recipes, new Set(), new Set(['furnace']));
+    expect(result).not.toBeNull();
+    expect(result!.recipeId).toBe('r2');
   });
 
   it('returns null when sub-recipe is missing from recipe list', () => {
@@ -161,12 +174,26 @@ describe('findCraftableFromList', () => {
     expect(result!.recipe.id).toBe('r2');
   });
 
-  it('skips recipes that require a station', () => {
+  it('skips recipes that require a station that is not visible', () => {
     const recipes: RecipeList = [
       { id: 'r1', input: { copperIngot: 3, pinewoodAxeHandle: 1, leatherStrips: 2, pinewoodBits: 1 }, output: { copperFellingAxe: 1 }, required: [], station: 'smithing' },
     ];
     const result = findCraftableFromList(['copperFellingAxe'], { copperIngot: 3, pinewoodAxeHandle: 1, leatherStrips: 2, pinewoodBits: 1 }, recipes);
     expect(result).toBeNull();
+  });
+
+  it('returns the recipe once its station is available', () => {
+    const recipes: RecipeList = [
+      { id: 'r1', input: { copperIngot: 3, pinewoodAxeHandle: 1, leatherStrips: 2, pinewoodBits: 1 }, output: { copperFellingAxe: 1 }, required: [], station: 'smithing' },
+    ];
+    const result = findCraftableFromList(
+      ['copperFellingAxe'],
+      { copperIngot: 3, pinewoodAxeHandle: 1, leatherStrips: 2, pinewoodBits: 1 },
+      recipes,
+      new Set(['smithing']),
+    );
+    expect(result).not.toBeNull();
+    expect(result!.itemId).toBe('copperFellingAxe');
   });
 
   it('prioritizes earlier items in the list', () => {
@@ -282,5 +309,55 @@ describe('isFullyAchievableFromInventory', () => {
       { id: 'leatherR', input: { ratPelt: 3 }, output: { leather: 1 }, required: [], station: null },
     ];
     expect(isFullyAchievableFromInventory(recipe, {}, recipes)).toBe(false);
+  });
+});
+
+describe('collectVisibleStations', () => {
+  it('returns only station-type game objects', () => {
+    const gameObjects = {
+      forge1: { id: 'forge1', type: 'station', stationType: 'smithing', stationSubtype: 'forge', position: { x: 1, y: 1 }, label: 'forge', radius: 1, facing: 0 },
+      tree1: { id: 'tree1', type: 'tree', treeType: 'pine', position: { x: 5, y: 0 }, label: 'pine', radius: 1 },
+    } as any;
+    const stations = collectVisibleStations(gameObjects);
+    expect(stations).toHaveLength(1);
+    expect(stations[0].id).toBe('forge1');
+  });
+
+  it('returns an empty array when no stations are visible', () => {
+    expect(collectVisibleStations({})).toEqual([]);
+  });
+});
+
+describe('getAvailableStationTypes', () => {
+  it('collects the distinct station types from visible stations', () => {
+    const stations = [
+      { id: 'forge1', stationType: 'smithing' },
+      { id: 'anvil1', stationType: 'smithing' },
+      { id: 'table1', stationType: 'alchemy' },
+    ] as any;
+    const types = getAvailableStationTypes(stations);
+    expect(types).toEqual(new Set(['smithing', 'alchemy']));
+  });
+});
+
+describe('findStationForType', () => {
+  const stations = [
+    { id: 'forge1', stationType: 'smithing', position: { x: 5, y: 0 } },
+    { id: 'forge2', stationType: 'smithing', position: { x: 1, y: 0 } },
+    { id: 'table1', stationType: 'alchemy', position: { x: 0, y: 0 } },
+  ] as any;
+
+  it('returns null when stationType is null or undefined', () => {
+    expect(findStationForType(null, stations, { x: 0, y: 0 })).toBeNull();
+    expect(findStationForType(undefined, stations, { x: 0, y: 0 })).toBeNull();
+  });
+
+  it('returns null when no station of that type is visible', () => {
+    expect(findStationForType('gemCutting', stations, { x: 0, y: 0 })).toBeNull();
+  });
+
+  it('returns the nearest visible station of the matching type', () => {
+    const result = findStationForType('smithing', stations, { x: 0, y: 0 });
+    expect(result?.id).toBe('forge2');
   });
 });

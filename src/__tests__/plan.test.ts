@@ -70,8 +70,8 @@ describe('canObtainChain', () => {
     expect(canObtainChain('copperSword', inventory, {}, recipes)).toBe(true);
   });
 
-  it('returns false for station-gated recipe', () => {
-    expect(canObtainChain('magicSword', { goldIngot: 3 }, {}, recipes)).toBe(false);
+  it('treats a station-gated recipe as obtainable (station availability is a real-time tier concern, not a chain-reachability one)', () => {
+    expect(canObtainChain('magicSword', { goldIngot: 3 }, {}, recipes)).toBe(true);
   });
 
   it('returns false when ingredients have no known source', () => {
@@ -136,6 +136,31 @@ describe('computeDifficultyTier', () => {
       recipes,
     });
     expect(tier).toBe(5);
+  });
+
+  it('returns tier 4 (not 2) for a station-gated recipe when the station is not currently visible', () => {
+    const tier = computeDifficultyTier({
+      itemId: 'copperMailBoots',
+      recipe: { id: 'r1', input: { copperIngot: 3 }, required: [], station: 'smithing' },
+      allMerchantSelling: {},
+      inventory: { copperIngot: 5 },
+      playerCoins: 0,
+      recipes,
+    });
+    expect(tier).toBe(4);
+  });
+
+  it('returns tier 2 for a station-gated recipe once the matching station is visible', () => {
+    const tier = computeDifficultyTier({
+      itemId: 'copperMailBoots',
+      recipe: { id: 'r1', input: { copperIngot: 3 }, required: [], station: 'smithing' },
+      allMerchantSelling: {},
+      inventory: { copperIngot: 5 },
+      playerCoins: 0,
+      recipes,
+      availableStationTypes: new Set(['smithing']),
+    });
+    expect(tier).toBe(2);
   });
 });
 
@@ -240,12 +265,12 @@ describe('computeChainNeeds', () => {
     expect(needs.b).toBe(1);
   });
 
-  it('ignores station recipes', () => {
+  it('includes ingredients of a station-gated recipe (the keep-quantity bound applies regardless of station availability)', () => {
     const stationRecipes: RecipeList = [
       { id: 'bar', input: { copperOre: 3 }, output: { copperBar: 1 }, required: [], station: 'forge' as any },
     ];
     const needs = computeChainNeeds(['copperBar'], stationRecipes);
     expect(needs.copperBar).toBe(1);
-    expect(needs).not.toHaveProperty('copperOre');
+    expect(needs.copperOre).toBe(3);
   });
 });

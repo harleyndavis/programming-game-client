@@ -34,6 +34,7 @@ export type UpgradeTarget = {
     id: string;
     input: Partial<Record<string, number>>;
     required: readonly string[];
+    station?: string | null;
   } | null;
 };
 

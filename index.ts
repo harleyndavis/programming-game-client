@@ -9,7 +9,7 @@ import { isFiniteNumber, isFinitePosition, distanceBetween } from "./src/utils";
 import { ENCUMBRANCE_THRESHOLD, getInventoryWeight, findHeaviestInventoryItem, findCheapestFood, computeItemsToSell } from "./src/inventory";
 import { getChainedIngredients, canObtainChain, computeChainNeeds, computeDifficultyTier, findBlockingItems } from "./src/plan";
 import { computeUpgradeTargets, getTargetItemsToKeep, getEquippedRecipeInputs, computeTargetsToBuyFromMerchant, findGearToEquip } from "./src/equipment";
-import { findCraftableTarget, findNextCraftTarget, findCraftableFromList, computeCraftIngredientsToBuyFromMerchant } from "./src/craft";
+import { findCraftableTarget, findNextCraftTarget, findCraftableFromList, computeCraftIngredientsToBuyFromMerchant, collectVisibleStations, getAvailableStationTypes, findStationForType } from "./src/craft";
 import { getHarvestableTarget, getMissingHarvestToolIds, collectHarvestToolItemIds, collectHarvestCraftingChainToolIds, collectCraftableInputIngredients } from "./src/harvest";
 import { findBestSellMerchant } from "./src/trade";
 import { findCompletableQuest, findTurnInNpc, findBestQuestToAccept, findBestAvailableQuest, findQuestGivers, findQuestTurnInRequiredItemIds, findPendingQuestTurnInItems, findStalledQuests, findQuestToAbandon, findQuestToDismiss } from "./src/quests";
@@ -139,7 +139,7 @@ type Decision =
   | { type: "sell"; items: Partial<Record<string, number>>; merchant: ClientSideUnit }
   | { type: "buy"; items: Partial<Record<string, number>>; merchant: ClientSideUnit }
   | { type: "equip"; item: string; slot: string }
-  | { type: "craft"; recipeId: string }
+  | { type: "craft"; recipeId: string; stationId?: string }
   | { type: "drop"; item: string; amount: number }
   | { type: "deposit"; items: Partial<Record<string, number>>; banker: ClientSideUnit }
   | { type: "withdraw"; items: Partial<Record<string, number>>; banker: ClientSideUnit }
@@ -253,7 +253,9 @@ const decide = (opts: {
   upgradesPlan: Array<{ items: Partial<Record<string, number>>; merchant: ClientSideUnit }>;
   gearToEquip: { item: string; slot: string } | null;
   recipeToCraft: UpgradeTarget | null;
-  toolToCraft: { itemId: string; recipe: { id: string; input: Partial<Record<string, number>>; required: readonly string[] } } | null;
+  recipeToCraftStationId: string | undefined;
+  toolToCraft: { itemId: string; recipe: { id: string; input: Partial<Record<string, number>>; required: readonly string[]; station?: string | null } } | null;
+  toolToCraftStationId: string | undefined;
   finishingHomeChores: boolean;
   harvestTarget: { target: Tree | MiningNode; distance: number } | null;
   isHarvesting: boolean;
@@ -269,7 +271,7 @@ const decide = (opts: {
   /** Position to close the distance toward when we have business with a quest NPC that's currently out of sight. */
   questNpcTarget: { x: number; y: number } | null;
 }): Decision => {
-  const { playerHp, maxHp, lowHpThreshold, playerPosition, nearbyMonster, isEncumbered, sellOpportunity, heaviestInventoryItem, playerCalories, maxCalories, cheapestFood, isHunting, huntRadius, nearbyHuntTarget, nearbyThreat, upgradesPlan, gearToEquip, recipeToCraft, toolToCraft, finishingHomeChores, harvestTarget, isHarvesting, attackingMonster, completableQuest, questToAccept, questToAbandon, questToDismiss, questNpcTarget } = opts;
+  const { playerHp, maxHp, lowHpThreshold, playerPosition, nearbyMonster, isEncumbered, sellOpportunity, heaviestInventoryItem, playerCalories, maxCalories, cheapestFood, isHunting, huntRadius, nearbyHuntTarget, nearbyThreat, upgradesPlan, gearToEquip, recipeToCraft, recipeToCraftStationId, toolToCraft, toolToCraftStationId, finishingHomeChores, harvestTarget, isHarvesting, attackingMonster, completableQuest, questToAccept, questToAbandon, questToDismiss, questNpcTarget } = opts;
 
   if (playerHp <= 0) return { type: "respawn" };
 
@@ -277,14 +279,14 @@ const decide = (opts: {
     // Only do housekeeping once close to home; otherwise go home.
     if (distanceBetween(playerPosition, HOME_POSITION) < HOME_CHORES_CLEAR_RADIUS) {
       if (gearToEquip) return { type: "equip", item: gearToEquip.item, slot: gearToEquip.slot };
-      if (recipeToCraft) return { type: "craft", recipeId: recipeToCraft.recipe!.id };
+      if (recipeToCraft) return { type: "craft", recipeId: recipeToCraft.recipe!.id, stationId: recipeToCraftStationId };
       if (upgradesPlan.length > 0) {
         return { type: "buy", items: upgradesPlan[0].items, merchant: upgradesPlan[0].merchant };
       }
       if (completableQuest) return { type: "turnInQuest", npc: completableQuest.npc, questId: completableQuest.quest.id };
       if (questToDismiss) return { type: "abandonQuest", questId: questToDismiss };
       if (sellOpportunity) return { type: "sell", items: sellOpportunity.items, merchant: sellOpportunity.merchant };
-      if (toolToCraft) return { type: "craft", recipeId: toolToCraft.recipe.id };
+      if (toolToCraft) return { type: "craft", recipeId: toolToCraft.recipe.id, stationId: toolToCraftStationId };
       if (questToAccept) return { type: "acceptQuest", npc: questToAccept.npc, questId: questToAccept.quest.id };
     }
     return { type: "return-home-recover" };
@@ -317,7 +319,7 @@ const decide = (opts: {
   // idlingAtHome / finishingHomeChores: equip, craft, buy, sell; no combat or exploration.
   if (idlingAtHome || finishingHomeChores) {
     if (gearToEquip) return { type: "equip", item: gearToEquip.item, slot: gearToEquip.slot };
-    if (recipeToCraft) return { type: "craft", recipeId: recipeToCraft.recipe!.id };
+    if (recipeToCraft) return { type: "craft", recipeId: recipeToCraft.recipe!.id, stationId: recipeToCraftStationId };
     // Quest turn-in and accept before buy: the NPC may only be visible for a
     // short window (right after arriving at their location). Handle quest
     // actions immediately rather than letting them get queued behind purchases.
@@ -332,7 +334,7 @@ const decide = (opts: {
     }
     if (questToDismiss) return { type: "abandonQuest", questId: questToDismiss };
     if (sellOpportunity) return { type: "sell", items: sellOpportunity.items, merchant: sellOpportunity.merchant };
-    if (toolToCraft) return { type: "craft", recipeId: toolToCraft.recipe.id };
+    if (toolToCraft) return { type: "craft", recipeId: toolToCraft.recipe.id, stationId: toolToCraftStationId };
     // Close the distance toward a quest NPC we have business with but can't
     // currently see. Cleared (see QUEST_NPC_ARRIVAL_RADIUS) once we've arrived
     // and confirmed they're not there, so this can't strand the bot.
@@ -890,6 +892,13 @@ disconnectFromGame = connect({
       }))
       .sort((a, b) => a.distance - b.distance)[0]?.unit;
 
+    // ── Station detection ──────────────────────────────────────────────────────
+    // Stations (smithing, cooking, alchemy, etc.) only appear in heartbeat.gameObjects
+    // when visible, same as merchants/bankers/trees. A station-gated recipe is only
+    // craftable this tick if a matching station is currently in view.
+    const visibleStations = collectVisibleStations(heartbeat.gameObjects ?? {});
+    const availableStationTypes = getAvailableStationTypes(visibleStations);
+
     // ── Manual deposit via dashboard ───────────────────────────────────────────
     if (depositInProgress && depositCachedItems && depositCachedBanker) {
       depositOverride = { type: "deposit", items: depositCachedItems, banker: depositCachedBanker };
@@ -972,6 +981,7 @@ disconnectFromGame = connect({
       recipes: recipesArray,
       allMerchantSelling,
       playerCoins,
+      availableStationTypes,
     });
     const keepItems = getTargetItemsToKeep(upgradeTargets, recipesArray);
     // Update lastEquipment each tick but never clear on death: this keeps
@@ -1023,11 +1033,13 @@ disconnectFromGame = connect({
     const harvestChainToolIds = missingHarvestTools.length > 0
       ? collectHarvestCraftingChainToolIds(missingHarvestTools, recipesArray)
       : [];
-    // Missing chain tools that have a craftable (no-station) recipe — prepended
-    // to the craft target list so they're tried before the harvest tools themselves.
+    // Missing chain tools that have a craftable recipe (station-gated ones are
+    // still tried — findCraftableFromList gates the actual craft on station
+    // visibility) — prepended to the craft target list so they're tried before
+    // the harvest tools themselves.
     const missingCraftableChainTools = harvestChainToolIds.filter(id =>
       (combinedInventory[id] ?? 0) < 1 &&
-      recipesArray.some(r => id in (r.output ?? {}) && r.station == null),
+      recipesArray.some(r => id in (r.output ?? {})),
     );
     // Craftable input ingredients we're short on (e.g. pinewoodAxeHandle for
     // stoneFellingAxe). These live in recipe.input, not recipe.required, so they
@@ -1094,7 +1106,7 @@ disconnectFromGame = connect({
     // toolToCraftFromStorage: what we'd craft next if all storage items were in pocket.
     // Used for deposit exclusion and storage withdrawal — keeps ingredients safe.
     const toolToCraftFromStorage = atHome && allToolCraftTargets.length > 0
-      ? findCraftableFromList(allToolCraftTargets, combinedInventory, recipesArray)
+      ? findCraftableFromList(allToolCraftTargets, combinedInventory, recipesArray, availableStationTypes)
       : null;
 
     // Protect all ingredients needed for the full active craft — including the
@@ -1193,6 +1205,7 @@ disconnectFromGame = connect({
           merchantSelling: selling,
           playerCoins: effectiveCoins,
           inventory: combinedInventory,
+          availableStationTypes,
         });
         if (missingHarvestTools.length > 0) {
           const toolBasket = computeCraftIngredientsToBuyFromMerchant(
@@ -1210,7 +1223,7 @@ disconnectFromGame = connect({
         // appear in the buy basket even when coins are tight.
         for (const chainToolId of harvestChainToolIds) {
           if ((combinedInventory[chainToolId] ?? 0) >= 1 || basket[chainToolId]) continue;
-          if (recipesArray.some(r => chainToolId in (r.output ?? {}) && r.station == null)) continue;
+          if (recipesArray.some(r => chainToolId in (r.output ?? {}))) continue;
           const offer = selling[chainToolId];
           if (offer && offer.quantity > 0 && offer.price > 0 && offer.price <= effectiveCoins) {
             basket[chainToolId] = 1;
@@ -1275,12 +1288,19 @@ disconnectFromGame = connect({
       : null;
 
     const recipeToCraft = atHome
-      ? findCraftableTarget(upgradeTargets, player.inventory ?? {}, recipesArray)
+      ? findCraftableTarget(upgradeTargets, player.inventory ?? {}, recipesArray, availableStationTypes)
       : null;
 
     const toolToCraft = atHome && allToolCraftTargets.length > 0
-      ? findCraftableFromList(allToolCraftTargets, player.inventory ?? {}, recipesArray)
+      ? findCraftableFromList(allToolCraftTargets, player.inventory ?? {}, recipesArray, availableStationTypes)
       : null;
+
+    const recipeToCraftStationId = recipeToCraft?.recipe
+      ? findStationForType(recipeToCraft.recipe.station, visibleStations, playerPosition)?.id
+      : undefined;
+    const toolToCraftStationId = toolToCraft?.recipe
+      ? findStationForType(toolToCraft.recipe.station, visibleStations, playerPosition)?.id
+      : undefined;
 
     const upgradePlanItems: UpgradePlanItem[] = upgradeTargets.map((target, index) => {
       const inventory = (player.inventory ?? {}) as Record<string, number>;
@@ -1326,14 +1346,15 @@ disconnectFromGame = connect({
         return ta - tb || a.localeCompare(b);
       })
       .map((itemId, index) => {
-        const recipe = recipesArray.find(r => itemId in (r.output ?? {}) && r.station == null);
+        const recipe = recipesArray.find(r => itemId in (r.output ?? {}));
         const tier = computeDifficultyTier({
           itemId,
-          recipe: recipe ? { id: recipe.id!, input: recipe.input as Partial<Record<string, number>>, required: recipe.required ?? [] } : null,
+          recipe: recipe ? { id: recipe.id!, input: recipe.input as Partial<Record<string, number>>, required: recipe.required ?? [], station: recipe.station } : null,
           allMerchantSelling,
           inventory: planningInventory,
           playerCoins: effectiveCoins,
           recipes: recipesArray,
+          availableStationTypes,
         });
         const requirements: UpgradeRequirement[] = [];
         if (recipe) {
@@ -1375,14 +1396,15 @@ disconnectFromGame = connect({
     const allChainPlanIds = Array.from(new Set([...harvestChainToolIds, ...craftableInputIngredients]));
 
     const chainToolPlanItems: ToolPlanItem[] = allChainPlanIds.map((itemId, index) => {
-      const recipe = recipesArray.find(r => itemId in (r.output ?? {}) && r.station == null);
+      const recipe = recipesArray.find(r => itemId in (r.output ?? {}));
       const tier = computeDifficultyTier({
         itemId,
-        recipe: recipe ? { id: recipe.id!, input: recipe.input as Partial<Record<string, number>>, required: recipe.required ?? [] } : null,
+        recipe: recipe ? { id: recipe.id!, input: recipe.input as Partial<Record<string, number>>, required: recipe.required ?? [], station: recipe.station } : null,
         allMerchantSelling,
         inventory: planningInventory,
         playerCoins: effectiveCoins,
         recipes: recipesArray,
+        availableStationTypes,
       });
       const requirements: UpgradeRequirement[] = [];
       if (recipe) {
@@ -1763,7 +1785,9 @@ disconnectFromGame = connect({
       upgradesPlan,
       gearToEquip,
       recipeToCraft,
+      recipeToCraftStationId,
       toolToCraft,
+      toolToCraftStationId,
       finishingHomeChores,
       harvestTarget,
       isHarvesting,
@@ -1960,7 +1984,7 @@ disconnectFromGame = connect({
       case "equip":
         return player.equip(decision.item as any, decision.slot as any);
       case "craft":
-        return player.craft(decision.recipeId as any);
+        return player.craft(decision.recipeId as any, decision.stationId);
       case "drop":
         return player.drop({ item: decision.item as any, amount: decision.amount });
       case "deposit":

@@ -47,7 +47,7 @@ export const computeChainNeeds = (
   const walk = (itemId: string, qty: number, visited: Set<string>): void => {
     if (visited.has(itemId)) return;
     needs[itemId] = (needs[itemId] ?? 0) + qty;
-    const recipe = recipes.find(r => itemId in (r.output ?? {}) && r.station == null);
+    const recipe = recipes.find(r => itemId in (r.output ?? {}));
     if (!recipe) return;
     const outQty = (recipe.output ?? {})[itemId] ?? 1;
     const crafts = Math.ceil(qty / outQty);
@@ -79,7 +79,7 @@ export const canObtainChain = (
   if ((inventory[itemId] ?? 0) > 0) return true;
   const offer = allMerchantSelling[itemId];
   if (offer && offer.quantity > 0) return true;
-  const recipe = recipes.find(r => itemId in (r.output ?? {}) && r.station == null);
+  const recipe = recipes.find(r => itemId in (r.output ?? {}));
   if (recipe) {
     return (
       Object.keys(recipe.input).every(id => canObtainChain(id, inventory, allMerchantSelling, recipes, next)) &&
@@ -103,13 +103,13 @@ export const findBlockingItems = (
   allMerchantSelling: Record<string, { price: number; quantity: number } | undefined>,
   recipes: RecipeList,
 ): Array<{ itemId: string; reason: string }> => {
-  const recipe = recipes.find(r => itemId in (r.output ?? {}) && r.station == null);
+  const recipe = recipes.find(r => itemId in (r.output ?? {}));
   if (!recipe) return [];
 
   const result: Array<{ itemId: string; reason: string }> = [];
   const check = (id: string) => {
     if (canObtainChain(id, inventory, allMerchantSelling, recipes)) return;
-    const sub = recipes.find(r => id in (r.output ?? {}) && r.station == null);
+    const sub = recipes.find(r => id in (r.output ?? {}));
     const atMerchant = !!(allMerchantSelling[id]?.quantity ?? 0);
     let reason: string;
     if (!sub && !atMerchant) reason = "Not in inventory, no recipe, and not sold at any merchant";
@@ -125,13 +125,15 @@ export const findBlockingItems = (
 
 export const computeDifficultyTier = (opts: {
   itemId: string;
-  recipe: { id: string; input: Partial<Record<string, number>>; required: readonly string[] } | null;
+  recipe: { id: string; input: Partial<Record<string, number>>; required: readonly string[]; station?: string | null } | null;
   allMerchantSelling: Record<string, { price: number; quantity: number } | undefined>;
   inventory: Partial<Record<string, number>>;
   playerCoins: number;
   recipes: RecipeList;
+  /** Station types currently visible (e.g. 'smithing') — gates tier 2 for station-gated recipes. */
+  availableStationTypes?: Set<string>;
 }): number => {
-  const { itemId, recipe, allMerchantSelling, inventory, playerCoins, recipes } = opts;
+  const { itemId, recipe, allMerchantSelling, inventory, playerCoins, recipes, availableStationTypes = new Set<string>() } = opts;
   const offer = allMerchantSelling[itemId];
   const inMerchant = !!offer && offer.quantity > 0;
 
@@ -142,7 +144,8 @@ export const computeDifficultyTier = (opts: {
     const inv = inventory as Record<string, number>;
     const hasAllIngredients = Object.entries(recipe.input).every(([id, qty]) => (inv[id] ?? 0) >= (qty ?? 0));
     const hasAllTools = recipe.required.every(id => (inv[id] ?? 0) >= 1);
-    if (hasAllIngredients && hasAllTools) {
+    const stationReady = recipe.station == null || availableStationTypes.has(recipe.station);
+    if (hasAllIngredients && hasAllTools && stationReady) {
       craftTier = 2;
     } else {
       const allObtainable =
