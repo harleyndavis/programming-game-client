@@ -468,17 +468,28 @@ export const createDashboard = (port: number) => {
                     res.setHeader("Connection", "keep-alive");
                     res.write(`data: ${JSON.stringify(latestSnapshot)}\n\n`);
                     sseClients.add(res);
+                    console.log(`SSE client connected (${sseClients.size} active)`);
                     req.on("close", () => {
                         sseClients.delete(res);
                         res.end();
+                        // Belt-and-suspenders: 'close' should mean the socket is already
+                        // torn down, but explicitly destroying guarantees the fd is
+                        // released even if the teardown was partial.
+                        res.socket?.destroy();
+                        console.log(`SSE client closed (${sseClients.size} active)`);
                     });
                     // A socket can error out (e.g. ECONNRESET) without ever
-                    // firing 'close' on the request — without this, that
-                    // client would stay in sseClients forever, and every
-                    // future broadcast keeps calling write() on a dead
-                    // response.
+                    // firing 'close' on the request. Removing it from sseClients alone
+                    // used to leave the underlying socket/fd open forever — enough
+                    // dropped connections (flaky network, backgrounded tabs) would
+                    // eventually exhaust the process's file descriptor limit, at which
+                    // point the server can no longer accept any new connection at all
+                    // and the only recovery is a full restart. Destroying the socket
+                    // here releases the fd immediately instead of leaking it.
                     res.on("error", () => {
                         sseClients.delete(res);
+                        res.socket?.destroy();
+                        console.log(`SSE client errored (${sseClients.size} active)`);
                     });
                     return;
                 }
