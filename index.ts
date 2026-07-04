@@ -1214,7 +1214,7 @@ disconnectFromGame = connect({
     // Cap the fee buffer at half the coins on hand: with heavy storage the raw
     // 100× buffer can exceed total wealth, which would lock every coin forever
     // (availableWithdrawal 0 → effectiveCoins 0 → no purchase can ever happen).
-    const minStorageCoins = Math.min(feePerCharge * STORAGE_FEE_BUFFER, Math.floor(storageCoins / 2));
+    const minStorageCoins = feePerCharge * STORAGE_FEE_BUFFER;
     const availableStorageWithdrawal = Math.max(0, storageCoins - minStorageCoins);
 
     // Build per-merchant buy baskets using effective coins (pocket + storage beyond fee buffer).
