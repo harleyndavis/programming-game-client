@@ -351,6 +351,13 @@ export const createDashboard = (port: number) => {
                 // for that connection — if it's present but nothing after it, the
                 // hang is inside this handler for that specific route.
                 console.log(`[dashboard] ${req.method} ${url} received @ ${new Date().toISOString()}`);
+                // Handle count is climbing but doesn't track sseClients — logging it
+                // right after every request (any route) finishes tells us which route
+                // it actually correlates with, instead of only watching /events.
+                res.on("close", () => {
+                    const handleCount = (process as any)._getActiveHandles?.().length ?? -1;
+                    console.log(`[dashboard] ${req.method} ${url} finished, activeHandles=${handleCount}`);
+                });
 
                 if (url === "/") {
                     try {
@@ -516,9 +523,20 @@ export const createDashboard = (port: number) => {
             // Temporary tracing (see the [dashboard] request log above) to catch a
             // resource leak building up over time ahead of a hang, rather than only
             // finding out after the fact. Safe to remove once the hang is diagnosed.
+            //
+            // Confirmed (2026-07-04): activeHandles climbs monotonically and never
+            // drops, even when sseClients correctly returns to 0 — so whatever is
+            // leaking is NOT one of our tracked SSE connections. Breaking the count
+            // down by constructor name tells us what kind of handle it actually is
+            // (Socket/TCP, Timeout, FSWatcher, etc.) instead of just a number.
             const diagnosticInterval = setInterval(() => {
-                const handleCount = (process as any)._getActiveHandles?.().length ?? -1;
-                console.log(`[dashboard] diagnostic: sseClients=${sseClients.size} activeHandles=${handleCount}`);
+                const handles: unknown[] = (process as any)._getActiveHandles?.() ?? [];
+                const byType: Record<string, number> = {};
+                for (const h of handles) {
+                    const name = (h as { constructor?: { name?: string } })?.constructor?.name ?? typeof h;
+                    byType[name] = (byType[name] ?? 0) + 1;
+                }
+                console.log(`[dashboard] diagnostic: sseClients=${sseClients.size} activeHandles=${handles.length} byType=${JSON.stringify(byType)}`);
             }, 30_000);
             diagnosticInterval.unref();
         },
