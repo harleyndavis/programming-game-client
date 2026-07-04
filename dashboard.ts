@@ -297,6 +297,16 @@ export const createDashboard = (port: number) => {
         });
     };
 
+    // Ticks can fire far faster than any human (or browser) can usefully
+    // consume a full-snapshot re-render — broadcasting on every single one
+    // floods every connected tab with JSON-parse + DOM work it can't keep up
+    // with, eventually making the page unresponsive even though the server
+    // side (writableLength check below) is healthy. latestSnapshot itself
+    // stays fully up to date every publish() call; only the expensive
+    // serialize-and-broadcast is rate-limited.
+    const BROADCAST_INTERVAL_MS = 250;
+    let lastBroadcastAt = 0;
+
     const broadcastSnapshot = (snapshot: DashboardSnapshot) => {
         const message = `data: ${JSON.stringify(snapshot)}\n\n`;
         sseClients.forEach((client) => {
@@ -313,6 +323,16 @@ export const createDashboard = (port: number) => {
             if (client.writableLength > 0) return;
             client.write(message);
         });
+    };
+
+    // Used by publish() (called once per bot tick, far more often than a
+    // dashboard needs to refresh). User-triggered broadcasts (config toggles)
+    // call broadcastSnapshot directly for immediate feedback instead.
+    const throttledBroadcastSnapshot = (snapshot: DashboardSnapshot) => {
+        const now = Date.now();
+        if (now - lastBroadcastAt < BROADCAST_INTERVAL_MS) return;
+        lastBroadcastAt = now;
+        broadcastSnapshot(snapshot);
     };
 
     let server: ReturnType<typeof createServer> | null = null;
@@ -468,17 +488,28 @@ export const createDashboard = (port: number) => {
                     res.setHeader("Connection", "keep-alive");
                     res.write(`data: ${JSON.stringify(latestSnapshot)}\n\n`);
                     sseClients.add(res);
+                    console.log(`SSE client connected (${sseClients.size} active)`);
                     req.on("close", () => {
                         sseClients.delete(res);
                         res.end();
+                        // Belt-and-suspenders: 'close' should mean the socket is already
+                        // torn down, but explicitly destroying guarantees the fd is
+                        // released even if the teardown was partial.
+                        res.socket?.destroy();
+                        console.log(`SSE client closed (${sseClients.size} active)`);
                     });
                     // A socket can error out (e.g. ECONNRESET) without ever
-                    // firing 'close' on the request — without this, that
-                    // client would stay in sseClients forever, and every
-                    // future broadcast keeps calling write() on a dead
-                    // response.
+                    // firing 'close' on the request. Removing it from sseClients alone
+                    // used to leave the underlying socket/fd open forever — enough
+                    // dropped connections (flaky network, backgrounded tabs) would
+                    // eventually exhaust the process's file descriptor limit, at which
+                    // point the server can no longer accept any new connection at all
+                    // and the only recovery is a full restart. Destroying the socket
+                    // here releases the fd immediately instead of leaking it.
                     res.on("error", () => {
                         sseClients.delete(res);
+                        res.socket?.destroy();
+                        console.log(`SSE client errored (${sseClients.size} active)`);
                     });
                     return;
                 }
@@ -505,7 +536,7 @@ export const createDashboard = (port: number) => {
                 upgradePlans: snapshot.upgradePlans ?? latestSnapshot.upgradePlans,
                 toolPlans: snapshot.toolPlans ?? latestSnapshot.toolPlans,
             };
-            broadcastSnapshot(latestSnapshot);
+            throttledBroadcastSnapshot(latestSnapshot);
         },
     };
 };
