@@ -1039,7 +1039,7 @@ disconnectFromGame = connect({
     // the harvest tools themselves.
     const missingCraftableChainTools = harvestChainToolIds.filter(id =>
       (combinedInventory[id] ?? 0) < 1 &&
-      recipesArray.some(r => id in (r.output ?? {})),
+      recipesArray.some(r => id in (r.output ?? {}) && r.station == null), // TEST: reinstated station filter
     );
     // Craftable input ingredients we're short on (e.g. pinewoodAxeHandle for
     // stoneFellingAxe). These live in recipe.input, not recipe.required, so they
@@ -1223,7 +1223,7 @@ disconnectFromGame = connect({
         // appear in the buy basket even when coins are tight.
         for (const chainToolId of harvestChainToolIds) {
           if ((combinedInventory[chainToolId] ?? 0) >= 1 || basket[chainToolId]) continue;
-          if (recipesArray.some(r => chainToolId in (r.output ?? {}))) continue;
+          if (recipesArray.some(r => chainToolId in (r.output ?? {}) && r.station == null)) continue; // TEST: reinstated station filter
           const offer = selling[chainToolId];
           if (offer && offer.quantity > 0 && offer.price > 0 && offer.price <= effectiveCoins) {
             basket[chainToolId] = 1;
@@ -1346,7 +1346,7 @@ disconnectFromGame = connect({
         return ta - tb || a.localeCompare(b);
       })
       .map((itemId, index) => {
-        const recipe = recipesArray.find(r => itemId in (r.output ?? {}));
+        const recipe = recipesArray.find(r => itemId in (r.output ?? {}) && r.station == null); // TEST: reinstated station filter
         const tier = computeDifficultyTier({
           itemId,
           recipe: recipe ? { id: recipe.id!, input: recipe.input as Partial<Record<string, number>>, required: recipe.required ?? [], station: recipe.station } : null,
@@ -1396,7 +1396,7 @@ disconnectFromGame = connect({
     const allChainPlanIds = Array.from(new Set([...harvestChainToolIds, ...craftableInputIngredients]));
 
     const chainToolPlanItems: ToolPlanItem[] = allChainPlanIds.map((itemId, index) => {
-      const recipe = recipesArray.find(r => itemId in (r.output ?? {}));
+      const recipe = recipesArray.find(r => itemId in (r.output ?? {}) && r.station == null); // TEST: reinstated station filter
       const tier = computeDifficultyTier({
         itemId,
         recipe: recipe ? { id: recipe.id!, input: recipe.input as Partial<Record<string, number>>, required: recipe.required ?? [], station: recipe.station } : null,

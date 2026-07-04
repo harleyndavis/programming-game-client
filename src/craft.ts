@@ -91,7 +91,7 @@ export function findCraftableFromList(
   availableStationTypes: Set<string> = new Set(),
 ): { itemId: string; recipe: { id: string; input: Partial<Record<string, number>>; required: readonly string[]; station?: string | null } } | null {
   for (const itemId of itemIds) {
-    const recipe = recipes.find(r => itemId in (r.output ?? {}));
+    const recipe = recipes.find(r => itemId in (r.output ?? {}) && r.station == null); // TEST: reinstated station filter
     if (!recipe) continue;
     const stationReady = recipe.station == null || availableStationTypes.has(recipe.station);
     let canCraft = stationReady;
@@ -155,7 +155,7 @@ export function computeCraftIngredientsToBuyFromMerchant(
       return;
     }
 
-    const recipe = recipes.find(r => itemId in (r.output ?? {}));
+    const recipe = recipes.find(r => itemId in (r.output ?? {}) && r.station == null); // TEST: reinstated station filter
     if (!recipe) return;
     const outQty = (recipe.output ?? {})[itemId] ?? 1;
     const craftsNeeded = Math.ceil(shortfall / outQty);
@@ -171,7 +171,7 @@ export function computeCraftIngredientsToBuyFromMerchant(
   };
 
   for (const toolId of targetItemIds) {
-    const recipe = recipes.find(r => toolId in (r.output ?? {}));
+    const recipe = recipes.find(r => toolId in (r.output ?? {}) && r.station == null); // TEST: reinstated station filter
     if (!recipe) continue;
     const visited = new Set<string>([toolId]);
     for (const [inputId, qty] of Object.entries(recipe.input ?? {})) {
@@ -206,7 +206,7 @@ export const isFullyAchievableFromInventory = (
     if (visited.has(inputId)) return false;
     const next = new Set(visited);
     next.add(inputId);
-    const subRecipe = recipes.find(r => inputId in (r.output ?? {}));
+    const subRecipe = recipes.find(r => inputId in (r.output ?? {}) && r.station == null); // TEST: reinstated station filter
     if (!subRecipe || !subRecipe.id) return false;
     if (!isFullyAchievableFromInventory({ id: subRecipe.id, input: subRecipe.input as Partial<Record<string, number>>, required: subRecipe.required ?? [], station: subRecipe.station }, inventory, recipes, next)) return false;
   }
@@ -229,7 +229,7 @@ export const findCraftableSubStep = (
     if ((inventory[toolStr] ?? 0) >= 1) continue;
     if (visited.has(toolStr)) continue;
     visited.add(toolStr);
-    const toolRecipe = recipes.find(r => toolStr in r.output);
+    const toolRecipe = recipes.find(r => toolStr in r.output && r.station == null); // TEST: reinstated station filter
     if (!toolRecipe || !toolRecipe.id) continue;
     const stationReady = toolRecipe.station == null || availableStationTypes.has(toolRecipe.station);
     let canCraft = stationReady;
@@ -268,7 +268,7 @@ export const findCraftableSubStep = (
     if (have >= (neededQty ?? 0)) continue;
     if (visited.has(inputId)) continue;
     visited.add(inputId);
-    const inputRecipe = recipes.find(r => inputId in r.output);
+    const inputRecipe = recipes.find(r => inputId in r.output && r.station == null); // TEST: reinstated station filter
     if (!inputRecipe || !inputRecipe.id) continue;
     const stationReady = inputRecipe.station == null || availableStationTypes.has(inputRecipe.station);
     let canCraft = stationReady;

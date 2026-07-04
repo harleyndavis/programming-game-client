@@ -68,7 +68,7 @@ export function collectHarvestCraftingChainToolIds(
   const visit = (itemId: string, seen: Set<string>): void => {
     if (seen.has(itemId)) return;
     seen.add(itemId);
-    const recipe = recipes.find(r => itemId in (r.output ?? {}));
+    const recipe = recipes.find(r => itemId in (r.output ?? {}) && r.station == null); // TEST: reinstated station filter
     if (!recipe) return;
     for (const reqId of recipe.required ?? []) {
       const reqStr = String(reqId);
@@ -107,7 +107,7 @@ export function collectCraftableInputIngredients(
     if (visited.has(itemId)) return;
     visited.add(itemId);
 
-    const recipe = recipes.find(r => itemId in (r.output ?? {}));
+    const recipe = recipes.find(r => itemId in (r.output ?? {}) && r.station == null); // TEST: reinstated station filter
     if (!recipe) return;
 
     for (const reqId of recipe.required ?? []) walk(String(reqId));
@@ -117,7 +117,7 @@ export function collectCraftableInputIngredients(
       const have = combinedInventory[inputId] ?? 0;
       const need = qty ?? 0;
       if (have < need) {
-        const subRecipe = recipes.find(r => inputId in (r.output ?? {}));
+        const subRecipe = recipes.find(r => inputId in (r.output ?? {}) && r.station == null); // TEST: reinstated station filter
         if (subRecipe && !result.includes(inputId)) result.push(inputId);
       }
     }

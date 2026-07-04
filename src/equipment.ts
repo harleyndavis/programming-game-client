@@ -49,7 +49,7 @@ export const computeUpgradeTargets = (opts: {
       const dps = ((itemDef as any).damage ?? 0) * ((itemDef as any).attacksPerSecond ?? 1);
       if (defense <= equippedDefense && dps <= equippedDps) continue;
 
-      const recipe = recipes.find(r => itemId in r.output) ?? null;
+      const recipe = recipes.find(r => itemId in r.output && r.station == null) ?? null; // TEST: reinstated station filter
       const inMerchant = itemId in allMerchantSelling && !!allMerchantSelling[itemId];
       const reachable = !!recipe || !!inMerchant;
 
