@@ -333,20 +333,6 @@ export const createDashboard = (port: number) => {
         start() {
             server = createServer(async (req, res) => {
                 const url = req.url ?? "/";
-                // Temporary tracing to pin down a hang where curl completes the TCP
-                // handshake but never gets an HTTP response, while the bot's own
-                // tick loop keeps running fine. If this line is missing from the
-                // logs for a stuck request, the request handler itself never fired
-                // for that connection — if it's present but nothing after it, the
-                // hang is inside this handler for that specific route.
-                console.log(`[dashboard] ${req.method} ${url} received @ ${new Date().toISOString()}`);
-                // Handle count is climbing but doesn't track sseClients — logging it
-                // right after every request (any route) finishes tells us which route
-                // it actually correlates with, instead of only watching /events.
-                res.on("close", () => {
-                    const handleCount = (process as any)._getActiveHandles?.().length ?? -1;
-                    console.log(`[dashboard] ${req.method} ${url} finished, activeHandles=${handleCount}`);
-                });
 
                 if (url === "/") {
                     try {
@@ -471,11 +457,9 @@ export const createDashboard = (port: number) => {
                     res.setHeader("Connection", "keep-alive");
                     res.write(`data: ${JSON.stringify(latestSnapshot)}\n\n`);
                     sseClients.add(res);
-                    console.log(`SSE client connected (${sseClients.size} active)`);
                     req.on("close", () => {
                         sseClients.delete(res);
                         res.end();
-                        console.log(`SSE client closed (${sseClients.size} active)`);
                     });
                     return;
                 }
@@ -492,45 +476,6 @@ export const createDashboard = (port: number) => {
                     console.error(`Dashboard server error: ${err.message}`);
                 }
             });
-            // Temporary tracing (see the [dashboard] request log above) to catch a
-            // resource leak building up over time ahead of a hang, rather than only
-            // finding out after the fact. Safe to remove once the hang is diagnosed.
-            //
-            // Update (2026-07-04): activeHandles turned out to be bounded (oscillating
-            // 5-10 with normal connection churn, not climbing) — not a leak after all.
-            // Kept for now since the byType breakdown hasn't been observed yet.
-            const diagnosticInterval = setInterval(() => {
-                const handles: unknown[] = (process as any)._getActiveHandles?.() ?? [];
-                const byType: Record<string, number> = {};
-                for (const h of handles) {
-                    const name = (h as { constructor?: { name?: string } })?.constructor?.name ?? typeof h;
-                    byType[name] = (byType[name] ?? 0) + 1;
-                }
-                console.log(`[dashboard] diagnostic: sseClients=${sseClients.size} activeHandles=${handles.length} byType=${JSON.stringify(byType)}`);
-            }, 30_000);
-            diagnosticInterval.unref();
-
-            // Direct, unambiguous measurement of event-loop lag: a timer set for
-            // LAG_CHECK_INTERVAL_MS can only fire late if the event loop itself is
-            // backed up servicing other callbacks first. Confirmed live: a fresh TCP
-            // connection completes its handshake immediately, but the '[dashboard] ...
-            // received' log for it doesn't appear for *minutes* — i.e. the request
-            // handler isn't being invoked at all, not just slow once invoked. This
-            // will show directly whether that's because the event loop is saturated
-            // (this timer will also fire minutes late, in lockstep) or something
-            // specific to the HTTP server's connection handling (this timer stays on
-            // schedule while requests still don't get dispatched).
-            const LAG_CHECK_INTERVAL_MS = 200;
-            let lastLagCheck = Date.now();
-            const lagInterval = setInterval(() => {
-                const now = Date.now();
-                const drift = now - lastLagCheck - LAG_CHECK_INTERVAL_MS;
-                lastLagCheck = now;
-                if (drift > 200) {
-                    console.log(`[dashboard] EVENT LOOP LAG: expected ${LAG_CHECK_INTERVAL_MS}ms tick, actual drift +${drift}ms @ ${new Date(now).toISOString()}`);
-                }
-            }, LAG_CHECK_INTERVAL_MS);
-            lagInterval.unref();
         },
         publish(snapshot: DashboardSnapshot) {
             latestSnapshot = {
