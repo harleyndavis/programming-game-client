@@ -300,17 +300,6 @@ export const createDashboard = (port: number) => {
     const broadcastSnapshot = (snapshot: DashboardSnapshot) => {
         const message = `data: ${JSON.stringify(snapshot)}\n\n`;
         sseClients.forEach((client) => {
-            // Skip this tick entirely if the client hasn't finished draining
-            // the previous write — SSE is "latest state wins", so there's
-            // nothing lost by not queuing another snapshot on top of one
-            // it's still catching up on. This caps unflushed data at roughly
-            // one broadcast's worth per client, forever, without ever
-            // forcibly destroying a connection just for being temporarily
-            // behind (an earlier version of this fix did exactly that, on a
-            // fixed byte threshold, and it fired constantly in practice —
-            // every disconnect the user saw was this code tearing down a
-            // connection that was still alive, just not caught up yet).
-            if (client.writableLength > 0) return;
             client.write(message);
         });
     };
@@ -486,24 +475,7 @@ export const createDashboard = (port: number) => {
                     req.on("close", () => {
                         sseClients.delete(res);
                         res.end();
-                        // Belt-and-suspenders: 'close' should mean the socket is already
-                        // torn down, but explicitly destroying guarantees the fd is
-                        // released even if the teardown was partial.
-                        res.socket?.destroy();
                         console.log(`SSE client closed (${sseClients.size} active)`);
-                    });
-                    // A socket can error out (e.g. ECONNRESET) without ever
-                    // firing 'close' on the request. Removing it from sseClients alone
-                    // used to leave the underlying socket/fd open forever — enough
-                    // dropped connections (flaky network, backgrounded tabs) would
-                    // eventually exhaust the process's file descriptor limit, at which
-                    // point the server can no longer accept any new connection at all
-                    // and the only recovery is a full restart. Destroying the socket
-                    // here releases the fd immediately instead of leaking it.
-                    res.on("error", () => {
-                        sseClients.delete(res);
-                        res.socket?.destroy();
-                        console.log(`SSE client errored (${sseClients.size} active)`);
                     });
                     return;
                 }
@@ -524,11 +496,9 @@ export const createDashboard = (port: number) => {
             // resource leak building up over time ahead of a hang, rather than only
             // finding out after the fact. Safe to remove once the hang is diagnosed.
             //
-            // Confirmed (2026-07-04): activeHandles climbs monotonically and never
-            // drops, even when sseClients correctly returns to 0 — so whatever is
-            // leaking is NOT one of our tracked SSE connections. Breaking the count
-            // down by constructor name tells us what kind of handle it actually is
-            // (Socket/TCP, Timeout, FSWatcher, etc.) instead of just a number.
+            // Update (2026-07-04): activeHandles turned out to be bounded (oscillating
+            // 5-10 with normal connection churn, not climbing) — not a leak after all.
+            // Kept for now since the byType breakdown hasn't been observed yet.
             const diagnosticInterval = setInterval(() => {
                 const handles: unknown[] = (process as any)._getActiveHandles?.() ?? [];
                 const byType: Record<string, number> = {};
@@ -539,6 +509,28 @@ export const createDashboard = (port: number) => {
                 console.log(`[dashboard] diagnostic: sseClients=${sseClients.size} activeHandles=${handles.length} byType=${JSON.stringify(byType)}`);
             }, 30_000);
             diagnosticInterval.unref();
+
+            // Direct, unambiguous measurement of event-loop lag: a timer set for
+            // LAG_CHECK_INTERVAL_MS can only fire late if the event loop itself is
+            // backed up servicing other callbacks first. Confirmed live: a fresh TCP
+            // connection completes its handshake immediately, but the '[dashboard] ...
+            // received' log for it doesn't appear for *minutes* — i.e. the request
+            // handler isn't being invoked at all, not just slow once invoked. This
+            // will show directly whether that's because the event loop is saturated
+            // (this timer will also fire minutes late, in lockstep) or something
+            // specific to the HTTP server's connection handling (this timer stays on
+            // schedule while requests still don't get dispatched).
+            const LAG_CHECK_INTERVAL_MS = 200;
+            let lastLagCheck = Date.now();
+            const lagInterval = setInterval(() => {
+                const now = Date.now();
+                const drift = now - lastLagCheck - LAG_CHECK_INTERVAL_MS;
+                lastLagCheck = now;
+                if (drift > 200) {
+                    console.log(`[dashboard] EVENT LOOP LAG: expected ${LAG_CHECK_INTERVAL_MS}ms tick, actual drift +${drift}ms @ ${new Date(now).toISOString()}`);
+                }
+            }, LAG_CHECK_INTERVAL_MS);
+            lagInterval.unref();
         },
         publish(snapshot: DashboardSnapshot) {
             latestSnapshot = {
