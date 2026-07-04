@@ -1134,8 +1134,22 @@ const POLL_INTERVAL_MS = 1000;
 // poll succeeds the server is definitely up, so there is no race.
 let pendingThresholdSync = localStorage.getItem(THRESHOLD_LS_KEY) !== null;
 
+// Guards against a slow/recovering server piling up multiple overlapping
+// requests — skip starting a new poll while one is still in flight rather
+// than queuing more on top of it.
+let pollInFlight = false;
+
+// A slow-but-not-erroring response (server up but sluggish) would otherwise
+// sit pending indefinitely without ever hitting .catch() — abort and treat
+// it as a failure so it counts as "disconnected" and releases pollInFlight.
+const POLL_TIMEOUT_MS = 5_000;
+
 const pollState = () => {
-  fetch("/state")
+  if (pollInFlight) return;
+  pollInFlight = true;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), POLL_TIMEOUT_MS);
+  fetch("/state", { signal: controller.signal })
     .then((res) => {
       if (!res.ok) throw new Error("Bad response: " + res.status);
       return res.json();
@@ -1156,6 +1170,10 @@ const pollState = () => {
       pendingThresholdSync = localStorage.getItem(THRESHOLD_LS_KEY) !== null;
       showConnectionBanner("Connection lost — retrying...");
       console.error("Dashboard poll failed:", err);
+    })
+    .finally(() => {
+      clearTimeout(timeoutId);
+      pollInFlight = false;
     });
 };
 
