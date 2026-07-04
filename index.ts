@@ -1,6 +1,6 @@
 import { connect } from "programming-game";
 import { config } from "dotenv";
-import { UNIT_TYPE, NPC_TYPE, ClientSideUnit, ClientSideNPC, ClientSideMonster, GameObject, Tree, MiningNode, ActiveQuest } from "programming-game/types";
+import { UNIT_TYPE, NPC_TYPE, ClientSideUnit, ClientSideNPC, Tree, MiningNode, ActiveQuest } from "programming-game/types";
 import { createDashboard } from "./dashboard";
 import { toDashboardSnapshot } from "./snapshot";
 import { UpgradePlanItem, ToolPlanItem, UpgradeRequirement, QuestMap, RecipeList, ItemMap, UpgradeTarget } from "./bot-types";
@@ -67,6 +67,19 @@ const EXPLORE_DIRECTIONS = [
   { x: 1, y: 1 },    // SE
   { x: -1, y: -1 },  // NW
 ];
+
+// TEMP diagnostic: counts onEvent calls by eventName, logs the per-second
+// average every 10s, then resets. Remove once the tick-rate investigation
+// is done.
+const eventCounts: Record<string, number> = {};
+setInterval(() => {
+  const perSecond = Object.fromEntries(
+    Object.entries(eventCounts).map(([name, count]) => [name, Math.round((count / 10) * 10) / 10])
+  );
+  const totalPerSecond = Math.round((Object.values(eventCounts).reduce((sum, n) => sum + n, 0) / 10) * 10) / 10;
+  console.log(`events/sec (avg over last 10s): total=${totalPerSecond}`, perSecond);
+  for (const key in eventCounts) delete eventCounts[key];
+}, 10000);
 
 const questRewards: Record<string, { items: Record<string, number> }> = {};
 // Reward items the server heartbeat omits, keyed by quest id. Used both to
@@ -213,6 +226,13 @@ let lastAttackerTicksLeft = 0;
 const LAST_ATTACKER_TICK_TIMEOUT = 15;
 // Captured from the first heartbeat — used for event target comparisons.
 let myUnitId: string | null = null;
+// TEMP: process onTick's full decision logic at most once/sec. The SDK calls
+// onTick on every single socket event, not just periodic heartbeats — a
+// nearby NPC alone has been observed generating 500+ events/sec, which drove
+// full decision recomputation that often, bogging everything down. This is a
+// stopgap: it doesn't address events piling up client-side in the SDK itself.
+let lastOnTickProcessedMs = 0;
+const ON_TICK_MIN_INTERVAL_MS = 1000;
 
 type RawEvent = { ts: string; name: string; data: unknown };
 const EVENT_BUFFER_SIZE = 200;
@@ -491,6 +511,8 @@ process.on('message', (msg: unknown) => {
   if (msg === 'shutdown') activateEmergencyMode('shutdown', 'PM2 shutdown', 0);
 });
 
+var shortCircuitIdle = false;
+
 const userId = assertEnv("USER_ID");
 disconnectFromGame = connect({
   credentials: {
@@ -498,6 +520,13 @@ disconnectFromGame = connect({
     key: assertEnv("API_KEY"),
   },
   onEvent(_instance, _charId, eventName, evt: any) {
+    if (eventName === 'arena') { return; } // TEMP diagnostic: bypass arena events to isolate raw tick rate from decision-computation cost.
+    const eventCountKey = evt && typeof evt.unitId === 'string'
+      ? `${eventName}:${evt.unitId === myUnitId ? 'self' : evt.unitId}`
+      : eventName;
+    eventCounts[eventCountKey] = (eventCounts[eventCountKey] ?? 0) + 1;
+    const exitEarly = false;
+    if (exitEarly) return; // TEMP diagnostic: bypass all decision-making to isolate raw tick rate from decision-computation cost.
     if (eventName === 'storageCharged' || eventName === 'storageEmptied' || eventName === 'deposited' || eventName === 'withdrew') {
       pushEvent(storageEventBuffer, EVENT_BUFFER_SIZE, eventName, evt);
     } else if (eventName === 'arena') {
@@ -507,7 +536,6 @@ disconnectFromGame = connect({
       // elapsing arenaMatchDuration in onTick below), not unitAppeared/
       // unitDisappeared. Close out any still-open previous match first in
       // case back-to-back matches outrun the duration-based close.
-      console.log(`Arena event: ${_instance}`, evt);
       pushEvent(arenaEventBuffer, ARENA_EVENT_BUFFER_SIZE, eventName, evt);
       closeArenaMatchIfActive('newMatchEvent');
       arenaMatchDuration = evt.duration;
@@ -520,13 +548,11 @@ disconnectFromGame = connect({
       // (see 'arena' handler above) — kept here only for opponent id tracking
       // and console visibility.
       if (eventName === 'unitAppeared') {
-        console.log(`Arena opponent appeared: ${evt.unit.id}`);
         if (evt.unit.id !== myUnitId) {
           arenaOpponentId = evt.unit.id;
         }
       }
-      if (eventName === 'unitDisappeared') console.log(`Arena opponent disappeared: ${evt.unitId}`);
-      if (eventName === 'despawn') console.log(`Arena opponent despawned: ${evt.unitId}`);
+
       pushEvent(arenaEventBuffer, ARENA_EVENT_BUFFER_SIZE, eventName, evt);
     } else if (eventName === 'beganHarvesting' || eventName === 'harvested') {
       pushEvent(harvestEventBuffer, EVENT_BUFFER_SIZE, eventName, evt);
@@ -576,6 +602,18 @@ disconnectFromGame = connect({
     if (emergencyModeActive && heartbeat.instanceId === 'overworld') {
       return heartbeat.player.move(HOME_POSITION);
     }
+
+    // TEMP: see lastOnTickProcessedMs declaration above. Skip everything below
+    // (arena + overworld decision-making) until at least ON_TICK_MIN_INTERVAL_MS
+    // has passed since the last tick we actually processed.
+    const nowMs = Date.now();
+    if (nowMs - lastOnTickProcessedMs < ON_TICK_MIN_INTERVAL_MS) {
+      // The OnTick type declares a strict Intent return, but the SDK only
+      // calls updateIntent when the return value is truthy (base-client.ts)
+      // — undefined is the documented way to leave the current intent as-is.
+      return undefined as any;
+    }
+    lastOnTickProcessedMs = nowMs;
 
     // The 'arena' event accurately resets the countdown at match start (server
     // patch), so elapsing arenaMatchDuration since then is the authoritative
@@ -1039,7 +1077,7 @@ disconnectFromGame = connect({
     // the harvest tools themselves.
     const missingCraftableChainTools = harvestChainToolIds.filter(id =>
       (combinedInventory[id] ?? 0) < 1 &&
-      recipesArray.some(r => id in (r.output ?? {}) && r.station == null), // TEST: reinstated station filter
+      recipesArray.some(r => id in (r.output ?? {})),
     );
     // Craftable input ingredients we're short on (e.g. pinewoodAxeHandle for
     // stoneFellingAxe). These live in recipe.input, not recipe.required, so they
@@ -1223,7 +1261,7 @@ disconnectFromGame = connect({
         // appear in the buy basket even when coins are tight.
         for (const chainToolId of harvestChainToolIds) {
           if ((combinedInventory[chainToolId] ?? 0) >= 1 || basket[chainToolId]) continue;
-          if (recipesArray.some(r => chainToolId in (r.output ?? {}) && r.station == null)) continue; // TEST: reinstated station filter
+          if (recipesArray.some(r => chainToolId in (r.output ?? {}))) continue;
           const offer = selling[chainToolId];
           if (offer && offer.quantity > 0 && offer.price > 0 && offer.price <= effectiveCoins) {
             basket[chainToolId] = 1;
@@ -1346,7 +1384,7 @@ disconnectFromGame = connect({
         return ta - tb || a.localeCompare(b);
       })
       .map((itemId, index) => {
-        const recipe = recipesArray.find(r => itemId in (r.output ?? {}) && r.station == null); // TEST: reinstated station filter
+        const recipe = recipesArray.find(r => itemId in (r.output ?? {}));
         const tier = computeDifficultyTier({
           itemId,
           recipe: recipe ? { id: recipe.id!, input: recipe.input as Partial<Record<string, number>>, required: recipe.required ?? [], station: recipe.station } : null,
@@ -1396,7 +1434,7 @@ disconnectFromGame = connect({
     const allChainPlanIds = Array.from(new Set([...harvestChainToolIds, ...craftableInputIngredients]));
 
     const chainToolPlanItems: ToolPlanItem[] = allChainPlanIds.map((itemId, index) => {
-      const recipe = recipesArray.find(r => itemId in (r.output ?? {}) && r.station == null); // TEST: reinstated station filter
+      const recipe = recipesArray.find(r => itemId in (r.output ?? {}));
       const tier = computeDifficultyTier({
         itemId,
         recipe: recipe ? { id: recipe.id!, input: recipe.input as Partial<Record<string, number>>, required: recipe.required ?? [], station: recipe.station } : null,
@@ -1435,8 +1473,9 @@ disconnectFromGame = connect({
 
     const coverage = feePerCharge > 0 ? storageCoins / feePerCharge : 0;
 
+    const { recipes, ...heartbeatWithoutRecipes } = heartbeat;
     dashboard.publish({
-      ...toDashboardSnapshot(heartbeat, {
+      ...toDashboardSnapshot(heartbeatWithoutRecipes, {
         recoveringAtHome,
         idlingAtHome,
         pursueQuestsEnabled,
@@ -1454,11 +1493,6 @@ disconnectFromGame = connect({
         buffer: minStorageCoins,
         coverage,
         availableWithdrawal: availableStorageWithdrawal,
-      },
-      world: {
-        npcs: units.filter((u) => u.type === UNIT_TYPE.npc) as ClientSideNPC[],
-        mobs: units.filter((u) => u.type === UNIT_TYPE.monster) as ClientSideMonster[],
-        objects: Object.values(heartbeat.gameObjects ?? {}) as GameObject[],
       },
       upgradePlans: upgradePlanItems,
       toolPlans: [...chainToolPlanItems, ...toolPlanItems],
@@ -1590,7 +1624,7 @@ disconnectFromGame = connect({
       toolToCraftFromStorage === null;
     const questNpcTarget: { x: number; y: number } | null =
       lastQuestNpcPosition !== null && (atHome || finishingHomeChores) &&
-      (completableQuestResult !== null || needQuestForHarvestTools)
+        (completableQuestResult !== null || needQuestForHarvestTools)
         ? lastQuestNpcPosition
         : null;
     if (questNpcTarget) tickExtras.navigatingToQuestNpc = { position: questNpcTarget };
@@ -1719,7 +1753,7 @@ disconnectFromGame = connect({
     // skip the sell cycle this tick so we don't move away from the NPC before
     // re-accepting the quest (which would break the repeating quest cycle).
     if (!withdrawOverride && !depositOverride && atHome && nearbyBanker
-        && completableQuest === null && questToAccept === null) {
+      && completableQuest === null && questToAccept === null) {
       const toWithdrawFromStorage: Partial<Record<string, number>> = {};
       // Withdraw up to the true carry limit, not the soft ENCUMBRANCE_THRESHOLD:
       // we're at home about to sell everything withdrawn here (next tick or the

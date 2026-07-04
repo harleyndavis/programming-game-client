@@ -47,7 +47,7 @@ export const computeChainNeeds = (
   const walk = (itemId: string, qty: number, visited: Set<string>): void => {
     if (visited.has(itemId)) return;
     needs[itemId] = (needs[itemId] ?? 0) + qty;
-    const recipe = recipes.find(r => itemId in (r.output ?? {}) && r.station == null); // TEST: reinstated station filter
+    const recipe = recipes.find(r => itemId in (r.output ?? {}));
     if (!recipe) return;
     const outQty = (recipe.output ?? {})[itemId] ?? 1;
     const crafts = Math.ceil(qty / outQty);
@@ -90,7 +90,7 @@ export const canObtainChain = (
   if ((inventory[itemId] ?? 0) >= neededQty) return true;
   const offer = allMerchantSelling[itemId];
   if (offer && offer.quantity > 0) return true;
-  const recipe = recipes.find(r => itemId in (r.output ?? {}) && r.station == null); // TEST: reinstated station filter
+  const recipe = recipes.find(r => itemId in (r.output ?? {}));
   if (recipe) {
     const outQty = (recipe.output ?? {})[itemId] ?? 1;
     const craftsNeeded = Math.ceil(neededQty / outQty);
@@ -116,13 +116,13 @@ export const findBlockingItems = (
   allMerchantSelling: Record<string, { price: number; quantity: number } | undefined>,
   recipes: RecipeList,
 ): Array<{ itemId: string; reason: string }> => {
-  const recipe = recipes.find(r => itemId in (r.output ?? {}) && r.station == null); // TEST: reinstated station filter
+  const recipe = recipes.find(r => itemId in (r.output ?? {}));
   if (!recipe) return [];
 
   const result: Array<{ itemId: string; reason: string }> = [];
   const check = (id: string, neededQty: number) => {
     if (canObtainChain(id, inventory, allMerchantSelling, recipes, undefined, neededQty)) return;
-    const sub = recipes.find(r => id in (r.output ?? {}) && r.station == null); // TEST: reinstated station filter
+    const sub = recipes.find(r => id in (r.output ?? {}));
     const atMerchant = !!(allMerchantSelling[id]?.quantity ?? 0);
     let reason: string;
     if (!sub && !atMerchant) reason = "Not in inventory, no recipe, and not sold at any merchant";
