@@ -173,6 +173,7 @@ const scanForBestQuest = (
     for (const quest of Object.values(npc.availableQuests)) {
       if (!quest || activeQuests[quest.id]) continue;
       const score = evaluateQuest(quest, scoringOpts);
+      if (score <= 0) continue; // fully-stocked reward — reject, don't just rank low
       if (score > bestScore) {
         bestScore = score;
         best = { npc, quest };
