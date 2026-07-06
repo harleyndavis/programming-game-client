@@ -31,23 +31,28 @@ export const getChainedIngredients = (
 };
 
 /**
- * Gross quantity of every item (targets + transitive ingredients + required
- * tools) needed to craft one of each target via no-station recipes.
+ * Quantity of every item (targets + transitive ingredients + required tools)
+ * consumed by crafting one of each target. Callers use this as a "keep this
+ * many, anything beyond is sellable surplus" bound. Shared ingredients
+ * accumulate across targets (axe + knife each needing stone → stone: 2).
  *
- * Deliberately ignores current inventory: callers use the result as a
- * "keep this many, anything beyond is sellable surplus" bound, so it must not
- * shrink as materials are gathered. Shared ingredients accumulate across
- * targets (axe + knife each needing stone → stone: 2).
+ * When `inventory` is provided, intermediate items already present in the
+ * required quantity are protected (added to needs) but not recursed into —
+ * their sub-ingredients are not needed since the assembled item is on hand.
  */
 export const computeChainNeeds = (
   targetItemIds: string[],
   recipes: RecipeList,
+  inventory: Partial<Record<string, number>> = {},
 ): Record<string, number> => {
   const needs: Record<string, number> = {};
   const walk = (itemId: string, qty: number, visited: Set<string>): void => {
     if (visited.has(itemId)) return;
     needs[itemId] = (needs[itemId] ?? 0) + qty;
-    const recipe = recipes.find(r => itemId in (r.output ?? {}) && r.station == null);
+    // If we already have enough of this item, its sub-ingredients don't need
+    // to be kept — we won't be crafting it from scratch.
+    if ((inventory[itemId] ?? 0) >= qty) return;
+    const recipe = recipes.find(r => itemId in (r.output ?? {}));
     if (!recipe) return;
     const outQty = (recipe.output ?? {})[itemId] ?? 1;
     const crafts = Math.ceil(qty / outQty);
@@ -57,33 +62,52 @@ export const computeChainNeeds = (
       walk(inputId, (inputQty ?? 0) * crafts, next);
     }
     for (const reqId of recipe.required ?? []) {
-      walk(String(reqId), 1, next);
+      const req = String(reqId);
+      // Required tools are not consumed — skip if already in needs, since one
+      // satisfies every recipe that uses it and its sub-ingredients were already
+      // computed the first time it was encountered.
+      if (req in needs) continue;
+      walk(req, 1, next);
     }
   };
+
   for (const targetId of Array.from(new Set(targetItemIds))) {
     walk(targetId, 1, new Set());
   }
   return needs;
 };
 
+/**
+ * Whether at least `neededQty` of itemId can be obtained — already on hand,
+ * sold by a visible merchant, or craftable from ingredients that are
+ * themselves obtainable in the quantities the recipe actually consumes.
+ *
+ * neededQty matters: owning 1 copper coin doesn't mean a recipe that melts
+ * down 1000 coins into a chunk of copper is obtainable. Ingredient quantities
+ * scale with how many crafts of the parent are needed (e.g. needing 3 swords
+ * from a recipe that outputs 2 per craft means 2 crafts, so inputs are ×2).
+ */
 export const canObtainChain = (
   itemId: string,
   inventory: Partial<Record<string, number>>,
   allMerchantSelling: Record<string, { price: number; quantity: number } | undefined>,
   recipes: RecipeList,
   visited = new Set<string>(),
+  neededQty = 1,
 ): boolean => {
   if (visited.has(itemId)) return false;
   const next = new Set(visited);
   next.add(itemId);
-  if ((inventory[itemId] ?? 0) > 0) return true;
+  if ((inventory[itemId] ?? 0) >= neededQty) return true;
   const offer = allMerchantSelling[itemId];
   if (offer && offer.quantity > 0) return true;
-  const recipe = recipes.find(r => itemId in (r.output ?? {}) && r.station == null);
+  const recipe = recipes.find(r => itemId in (r.output ?? {}));
   if (recipe) {
+    const outQty = (recipe.output ?? {})[itemId] ?? 1;
+    const craftsNeeded = Math.ceil(neededQty / outQty);
     return (
-      Object.keys(recipe.input).every(id => canObtainChain(id, inventory, allMerchantSelling, recipes, next)) &&
-      (recipe.required ?? []).every(id => canObtainChain(id as string, inventory, allMerchantSelling, recipes, next))
+      Object.entries(recipe.input).every(([id, qty]) => canObtainChain(id, inventory, allMerchantSelling, recipes, next, (qty ?? 0) * craftsNeeded)) &&
+      (recipe.required ?? []).every(id => canObtainChain(id as string, inventory, allMerchantSelling, recipes, next, 1))
     );
   }
   return false;
@@ -103,13 +127,13 @@ export const findBlockingItems = (
   allMerchantSelling: Record<string, { price: number; quantity: number } | undefined>,
   recipes: RecipeList,
 ): Array<{ itemId: string; reason: string }> => {
-  const recipe = recipes.find(r => itemId in (r.output ?? {}) && r.station == null);
+  const recipe = recipes.find(r => itemId in (r.output ?? {}));
   if (!recipe) return [];
 
   const result: Array<{ itemId: string; reason: string }> = [];
-  const check = (id: string) => {
-    if (canObtainChain(id, inventory, allMerchantSelling, recipes)) return;
-    const sub = recipes.find(r => id in (r.output ?? {}) && r.station == null);
+  const check = (id: string, neededQty: number) => {
+    if (canObtainChain(id, inventory, allMerchantSelling, recipes, undefined, neededQty)) return;
+    const sub = recipes.find(r => id in (r.output ?? {}));
     const atMerchant = !!(allMerchantSelling[id]?.quantity ?? 0);
     let reason: string;
     if (!sub && !atMerchant) reason = "Not in inventory, no recipe, and not sold at any merchant";
@@ -118,20 +142,22 @@ export const findBlockingItems = (
     result.push({ itemId: id, reason });
   };
 
-  for (const inputId of Object.keys(recipe.input)) check(inputId);
-  for (const reqId of recipe.required ?? []) check(String(reqId));
+  for (const [inputId, qty] of Object.entries(recipe.input)) check(inputId, qty ?? 0);
+  for (const reqId of recipe.required ?? []) check(String(reqId), 1);
   return result;
 };
 
 export const computeDifficultyTier = (opts: {
   itemId: string;
-  recipe: { id: string; input: Partial<Record<string, number>>; required: readonly string[] } | null;
+  recipe: { id: string; input: Partial<Record<string, number>>; required: readonly string[]; station?: string | null } | null;
   allMerchantSelling: Record<string, { price: number; quantity: number } | undefined>;
   inventory: Partial<Record<string, number>>;
   playerCoins: number;
   recipes: RecipeList;
+  /** Station types currently visible (e.g. 'smithing') — gates tier 2 for station-gated recipes. */
+  availableStationTypes?: Set<string>;
 }): number => {
-  const { itemId, recipe, allMerchantSelling, inventory, playerCoins, recipes } = opts;
+  const { itemId, recipe, allMerchantSelling, inventory, playerCoins, recipes, availableStationTypes = new Set<string>() } = opts;
   const offer = allMerchantSelling[itemId];
   const inMerchant = !!offer && offer.quantity > 0;
 
@@ -142,11 +168,12 @@ export const computeDifficultyTier = (opts: {
     const inv = inventory as Record<string, number>;
     const hasAllIngredients = Object.entries(recipe.input).every(([id, qty]) => (inv[id] ?? 0) >= (qty ?? 0));
     const hasAllTools = recipe.required.every(id => (inv[id] ?? 0) >= 1);
-    if (hasAllIngredients && hasAllTools) {
+    const stationReady = recipe.station == null || availableStationTypes.has(recipe.station);
+    if (hasAllIngredients && hasAllTools && stationReady) {
       craftTier = 2;
     } else {
       const allObtainable =
-        Object.keys(recipe.input).every(id => canObtainChain(id, inventory, allMerchantSelling, recipes)) &&
+        Object.entries(recipe.input).every(([id]) => canObtainChain(id, inventory, allMerchantSelling, recipes)) &&
         recipe.required.every(id => canObtainChain(id as string, inventory, allMerchantSelling, recipes));
       craftTier = allObtainable ? 4 : 5;
     }

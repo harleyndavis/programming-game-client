@@ -1,5 +1,5 @@
 import type { ItemMap, RecipeList, UpgradeTarget } from "../bot-types";
-import { getChainedIngredients, canObtainChain, computeDifficultyTier } from "./plan";
+import { canObtainChain, computeDifficultyTier } from "./plan";
 
 const ITEM_TYPE_TO_SLOT: Partial<Record<string, string>> = {
   helm: 'helm', chest: 'chest', legs: 'legs', feet: 'feet', hands: 'hands',
@@ -17,6 +17,20 @@ const WEAPON_AMMO_REQUIREMENT: Partial<Record<string, string>> = {
   bow: 'arrow',
 };
 
+const recipeInputCoverage = (
+  recipe: { input: Partial<Record<string, number>> } | null,
+  inventory: Partial<Record<string, number>>,
+): number => {
+  if (!recipe) return 0;
+  let have = 0, need = 0;
+  for (const [id, qty] of Object.entries(recipe.input)) {
+    const required = qty ?? 0;
+    need += required;
+    have += Math.min(inventory[id] ?? 0, required);
+  }
+  return need === 0 ? 0 : have / need;
+};
+
 export const computeUpgradeTargets = (opts: {
   equipment: Record<string, string | null | undefined>;
   inventory: Partial<Record<string, number>>;
@@ -24,8 +38,10 @@ export const computeUpgradeTargets = (opts: {
   recipes: RecipeList;
   allMerchantSelling: Record<string, { price: number; quantity: number } | undefined>;
   playerCoins: number;
+  /** Station types currently visible (e.g. 'smithing') — gates tier 2 for station-gated recipes. */
+  availableStationTypes?: Set<string>;
 }): UpgradeTarget[] => {
-  const { equipment, inventory, items, recipes, allMerchantSelling, playerCoins } = opts;
+  const { equipment, inventory, items, recipes, allMerchantSelling, playerCoins, availableStationTypes = new Set<string>() } = opts;
   const targets: UpgradeTarget[] = [];
 
   for (const slot of Array.from(BUYABLE_SLOTS)) {
@@ -34,7 +50,7 @@ export const computeUpgradeTargets = (opts: {
     const equippedDefense = equippedDef?.stats?.defense ?? 0;
     const equippedDps = ((equippedDef as any)?.damage ?? 0) * ((equippedDef as any)?.attacksPerSecond ?? 1);
 
-    let bestNonBlocked: { itemId: string; tier: number; gain: number; reachable: boolean; recipe: UpgradeTarget['recipe'] } | null = null;
+    let bestNonBlocked: { itemId: string; tier: number; gain: number; coverage: number; reachable: boolean; recipe: UpgradeTarget['recipe'] } | null = null;
     let bestBlocked: { itemId: string; tier: number; gain: number; reachable: boolean; recipe: UpgradeTarget['recipe'] } | null = null;
 
     for (const [itemId, itemDef] of Object.entries(items)) {
@@ -47,20 +63,26 @@ export const computeUpgradeTargets = (opts: {
       const dps = ((itemDef as any).damage ?? 0) * ((itemDef as any).attacksPerSecond ?? 1);
       if (defense <= equippedDefense && dps <= equippedDps) continue;
 
-      const recipe = recipes.find(r => itemId in r.output && r.station == null) ?? null;
+      const recipe = recipes.find(r => itemId in r.output) ?? null;
       const inMerchant = itemId in allMerchantSelling && !!allMerchantSelling[itemId];
       const reachable = !!recipe || !!inMerchant;
 
       const gain = (defense - equippedDefense) + (dps - equippedDps);
       const recipeEntry = recipe?.id
-        ? { id: recipe.id, input: recipe.input as Partial<Record<string, number>>, required: recipe.required ?? [] }
+        ? { id: recipe.id, input: recipe.input as Partial<Record<string, number>>, required: recipe.required ?? [], station: recipe.station }
         : null;
 
-      const tier = computeDifficultyTier({ itemId, recipe: recipeEntry, allMerchantSelling, inventory, playerCoins, recipes });
+      const tier = computeDifficultyTier({ itemId, recipe: recipeEntry, allMerchantSelling, inventory, playerCoins, recipes, availableStationTypes });
 
       if (tier < 5) {
-        if (bestNonBlocked === null || tier < bestNonBlocked.tier || (tier === bestNonBlocked.tier && gain < bestNonBlocked.gain)) {
-          bestNonBlocked = { itemId, tier, gain, reachable, recipe: recipeEntry };
+        const coverage = recipeInputCoverage(recipeEntry, inventory);
+        if (
+          bestNonBlocked === null ||
+          tier < bestNonBlocked.tier ||
+          (tier === bestNonBlocked.tier && coverage > bestNonBlocked.coverage) ||
+          (tier === bestNonBlocked.tier && coverage === bestNonBlocked.coverage && gain < bestNonBlocked.gain)
+        ) {
+          bestNonBlocked = { itemId, tier, gain, coverage, reachable, recipe: recipeEntry };
         }
       } else {
         if (bestBlocked === null || gain < bestBlocked.gain) {
@@ -80,42 +102,15 @@ export const computeUpgradeTargets = (opts: {
   return targets;
 };
 
-export const getTargetItemsToKeep = (
-  targets: UpgradeTarget[],
-  recipes: RecipeList,
-): Set<string> => {
-  const result = new Set<string>();
-  for (const target of targets) {
-    if (!target.recipe) continue;
-    getChainedIngredients(target.itemId, recipes).forEach(id => result.add(id));
-    for (const toolId of target.recipe.required) result.add(toolId as string);
-  }
-  return result;
-};
-
-export const getEquippedRecipeInputs = (
-  equipment: Record<string, string | null | undefined>,
-  recipes: RecipeList,
-): Set<string> => {
-  const result = new Set<string>();
-  for (const itemId of Object.values(equipment)) {
-    if (!itemId) continue;
-    getChainedIngredients(itemId, recipes).forEach(id => result.add(id));
-    const recipe = recipes.find(r => itemId in r.output);
-    if (recipe) {
-      for (const toolId of (recipe.required ?? [])) result.add(toolId as string);
-    }
-  }
-  return result;
-};
-
 export const computeTargetsToBuyFromMerchant = (opts: {
   targets: UpgradeTarget[];
   merchantSelling: Record<string, { price: number; quantity: number } | undefined>;
   playerCoins: number;
   inventory: Partial<Record<string, number>>;
+  /** Station types currently visible (e.g. 'smithing') — a station-gated recipe we can't reach right now shouldn't block buying. */
+  availableStationTypes?: Set<string>;
 }): Partial<Record<string, number>> => {
-  const { targets, merchantSelling, playerCoins, inventory } = opts;
+  const { targets, merchantSelling, playerCoins, inventory, availableStationTypes = new Set<string>() } = opts;
   const basket: Partial<Record<string, number>> = {};
   let coinsLeft = playerCoins;
 
@@ -124,6 +119,7 @@ export const computeTargetsToBuyFromMerchant = (opts: {
       const offer = merchantSelling[target.itemId];
       if (offer && offer.quantity > 0 && offer.price > 0 && offer.price <= coinsLeft) {
         const canCraftNow = target.recipe !== null &&
+          (target.recipe.station == null || availableStationTypes.has(target.recipe.station)) &&
           Object.entries(target.recipe.input).every(([id, qty]) => (inventory[id] ?? 0) >= (qty ?? 0)) &&
           target.recipe.required.every(id => (inventory[id as string] ?? 0) >= 1);
         if (!canCraftNow) {

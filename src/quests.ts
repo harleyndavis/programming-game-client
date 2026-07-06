@@ -117,6 +117,12 @@ export type QuestScoringOpts = {
    */
   stockedItems?: ReadonlySet<string>;
   /**
+   * Items referenced by any active craft chain (chainKeepNeeds keys).
+   * A quest rewarding an item NOT in any active chain is worthless — the bot
+   * has no reason to acquire it. Skips reward items absent from this set.
+   */
+  chainItemIds?: ReadonlySet<string>;
+  /**
    * Reward items the server omits from availableQuests, keyed by quest id.
    * Without this, a progression quest like wood_for_stone scores the fallback 1
    * and always loses to filler quests.
@@ -153,6 +159,7 @@ export const evaluateQuest = (
   let score = 0;
   for (const [itemId, qty] of Object.entries(items)) {
     if (typeof qty !== 'number') continue;
+    if (opts?.chainItemIds && !opts.chainItemIds.has(itemId)) continue; // not in any active chain — worthless
     if (opts?.stockedItems?.has(itemId)) continue; // already have plenty — this reward is worth nothing
     score += qty;
   }
@@ -173,6 +180,7 @@ const scanForBestQuest = (
     for (const quest of Object.values(npc.availableQuests)) {
       if (!quest || activeQuests[quest.id]) continue;
       const score = evaluateQuest(quest, scoringOpts);
+      if (score <= 0) continue; // fully-stocked reward — reject, don't just rank low
       if (score > bestScore) {
         bestScore = score;
         best = { npc, quest };
@@ -238,4 +246,17 @@ export const findQuestGivers = (
   units: readonly ClientSideNPC[],
 ): ClientSideNPC[] => {
   return units.filter((u) => u.availableQuests && Object.keys(u.availableQuests).length > 0);
+};
+
+/**
+ * Picks one active quest to dismiss, one per call — used to drain the quest
+ * log a single quest at a time when quest pursuit is disabled entirely (as
+ * opposed to findQuestToAbandon, which only ever drops a single stalled
+ * quest to free capacity for a better one).
+ */
+export const findQuestToDismiss = (
+  activeQuests: ActiveQuests,
+): ActiveQuest | null => {
+  const quests = Object.values(activeQuests);
+  return quests.length > 0 ? quests[0] : null;
 };

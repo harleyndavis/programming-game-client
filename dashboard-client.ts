@@ -6,6 +6,7 @@ const snapshotTimeEl = document.getElementById("snapshotTime");
 const snapshotBtnEl = document.getElementById("snapshotBtn");
 const upgradePlansListEl = document.getElementById("upgradePlansList");
 const toolPlansListEl = document.getElementById("toolPlansList");
+const chainKeepNeedsListEl = document.getElementById("chainKeepNeedsList");
 const npcsListEl = document.getElementById("npcsList");
 const questsListEl = document.getElementById("questsList");
 const mobsListEl = document.getElementById("mobsList");
@@ -50,6 +51,9 @@ const thresholdStatusEl = document.getElementById("thresholdStatus");
 const idleAtHomeToggleEl = document.getElementById("idleAtHomeToggle") as HTMLButtonElement | null;
 const idleAtHomeStateEl = document.getElementById("idleAtHomeState");
 const idleAtHomeStatusEl = document.getElementById("idleAtHomeStatus");
+const pursueQuestsToggleEl = document.getElementById("pursueQuestsToggle") as HTMLButtonElement | null;
+const pursueQuestsStateEl = document.getElementById("pursueQuestsState");
+const pursueQuestsStatusEl = document.getElementById("pursueQuestsStatus");
 let isThresholdDirty = false;
 let latestThresholdPercent = 25;
 const THRESHOLD_LS_KEY = "lowHpThresholdPercent";
@@ -372,6 +376,31 @@ idleAtHomeToggleEl?.addEventListener("click", () => {
     });
 });
 
+pursueQuestsToggleEl?.addEventListener("click", () => {
+  if (pursueQuestsToggleEl) pursueQuestsToggleEl.disabled = true;
+  if (pursueQuestsStatusEl) pursueQuestsStatusEl.textContent = "Updating...";
+  fetch("/config/pursue-quests", { method: "POST" })
+    .then((res) => res.json())
+    .then((payload) => {
+      const active = Boolean(payload.pursueQuests);
+      if (pursueQuestsStateEl) {
+        pursueQuestsStateEl.textContent = active ? "ACTIVE" : "STOPPED";
+        pursueQuestsStateEl.className = "control-state " + (active ? "status-ok" : "status-warn");
+      }
+      if (pursueQuestsToggleEl) {
+        pursueQuestsToggleEl.textContent = active ? "Stop Questing" : "Resume Questing";
+        pursueQuestsToggleEl.classList.toggle("active", !active);
+      }
+      if (pursueQuestsStatusEl) pursueQuestsStatusEl.textContent = active ? "Bot is pursuing quests normally." : "Bot will abandon active quests and stop accepting new ones.";
+    })
+    .catch((err) => {
+      if (pursueQuestsStatusEl) pursueQuestsStatusEl.textContent = "Failed: " + String(err);
+    })
+    .finally(() => {
+      if (pursueQuestsToggleEl) pursueQuestsToggleEl.disabled = false;
+    });
+});
+
 snapshotBtnEl?.addEventListener("click", () => {
   if (outputRaw && outputSnapshot) {
     outputSnapshot.textContent = outputRaw.textContent;
@@ -425,16 +454,16 @@ const renderPlanItemHtml = (plan: Record<string, unknown>) => {
   const acq = acqParts.length > 0 ? acqParts.join(" · ") : "No known acquisition path";
   const statusClass = plan.completed ? "done"
     : isBlocked ? "blocked"
-    : tier === 1 ? "status-buy"
-    : tier === 2 ? "status-craft"
-    : tier === 3 ? "status-saving"
-    : "pending";
+      : tier === 1 ? "status-buy"
+        : tier === 2 ? "status-craft"
+          : tier === 3 ? "status-saving"
+            : "pending";
   const statusLabel = plan.completed ? "DONE"
     : isBlocked ? "BLOCKED"
-    : tier === 1 ? "BUY"
-    : tier === 2 ? "CRAFT"
-    : tier === 3 ? "SAVING"
-    : "WAITING";
+      : tier === 1 ? "BUY"
+        : tier === 2 ? "CRAFT"
+          : tier === 3 ? "SAVING"
+            : "WAITING";
   const reqs = ((plan.requirements || []) as unknown[]).map((req) => {
     const r = req as Record<string, unknown>;
     const quantity = Number(r["quantity"]) || 0;
@@ -892,14 +921,50 @@ const renderSpellbook = (spellbook: unknown) => {
     .join("");
 };
 
+// The server sends the raw heartbeat (`payload.raw`) once, unduplicated —
+// player/unit-count/world are all derived from it here instead of the server
+// reconstructing and re-sending the same data as separate top-level fields.
+const derivePlayerFromRaw = (raw: any): Record<string, unknown> => {
+  const rawPlayer = raw?.player || {};
+  const stats = rawPlayer.stats || {};
+  return {
+    name: typeof rawPlayer.name === "string" ? rawPlayer.name : null,
+    hp: typeof rawPlayer.hp === "number" ? rawPlayer.hp : null,
+    maxHp: typeof stats.maxHp === "number" ? stats.maxHp : null,
+    mp: typeof rawPlayer.mp === "number" ? rawPlayer.mp : null,
+    tp: typeof rawPlayer.tp === "number" ? rawPlayer.tp : null,
+    calories: typeof rawPlayer.calories === "number" ? rawPlayer.calories : null,
+    attack: typeof stats.attack === "number" ? stats.attack : null,
+    defense: typeof stats.defense === "number" ? stats.defense : null,
+    movementSpeed: typeof stats.movementSpeed === "number" ? stats.movementSpeed : null,
+    position: rawPlayer.position || null,
+    equipment: rawPlayer.equipment || {},
+    combatSkills: rawPlayer.combatSkills || {},
+    spellbook: Array.isArray(rawPlayer.spellbook) ? rawPlayer.spellbook : [],
+    inventory: rawPlayer.inventory || {},
+    storage: rawPlayer.storage || {},
+  };
+};
+
+const deriveWorldFromRaw = (raw: any): { npcs: unknown[]; mobs: unknown[]; objects: unknown[] } => {
+  const units: unknown[] = Object.values(raw?.units || {});
+  return {
+    npcs: units.filter((u: any) => u?.type === "npc"),
+    mobs: units.filter((u: any) => u?.type === "monster"),
+    objects: Object.values(raw?.gameObjects || {}),
+  };
+};
+
 const render = (payload: any) => {
-  const player = payload.player || {};
+  const player = derivePlayerFromRaw(payload.raw) as any;
+  const world = deriveWorldFromRaw(payload.raw);
   const bot = payload.bot || {};
   const equipment = player.equipment || {};
+  const unitCount = Object.keys(payload.raw?.units || {}).length;
 
   if (receivedAtEl) receivedAtEl.textContent = payload.receivedAt || "-";
-  if (unitCountEl) unitCountEl.textContent = String(payload.unitCount || 0);
-  if (monsterCountEl) monsterCountEl.textContent = String(payload.monstersVisible || 0);
+  if (unitCountEl) unitCountEl.textContent = String(unitCount);
+  if (monsterCountEl) monsterCountEl.textContent = String(world.mobs.length);
   if (playerNameEl) playerNameEl.textContent = player.name || "-";
   if (recoveryModeEl) {
     recoveryModeEl.textContent = bot.recoveringAtHome ? "ACTIVE" : "INACTIVE";
@@ -914,6 +979,15 @@ const render = (payload: any) => {
   if (idleAtHomeToggleEl) {
     idleAtHomeToggleEl.textContent = idleActive ? "Resume Bot" : "Return to Home";
     idleAtHomeToggleEl.classList.toggle("active", idleActive);
+  }
+  const pursueQuestsActive = bot.pursueQuests !== false;
+  if (pursueQuestsStateEl) {
+    pursueQuestsStateEl.textContent = pursueQuestsActive ? "ACTIVE" : "STOPPED";
+    pursueQuestsStateEl.className = "control-state " + (pursueQuestsActive ? "status-ok" : "status-warn");
+  }
+  if (pursueQuestsToggleEl) {
+    pursueQuestsToggleEl.textContent = pursueQuestsActive ? "Stop Questing" : "Resume Questing";
+    pursueQuestsToggleEl.classList.toggle("active", !pursueQuestsActive);
   }
   const serverThresholdPercent = clampThresholdPercent(bot.lowHpThresholdPercent ?? 25);
   latestThresholdPercent = serverThresholdPercent;
@@ -931,11 +1005,11 @@ const render = (payload: any) => {
   setMeter(mpFillEl, mpTextEl, player.mp, 100);
   setMeter(tpFillEl, tpTextEl, player.tp, 100);
   setMeter(caloriesFillEl, caloriesTextEl, player.calories, 3000);
-  setMeter(weightFillEl, weightTextEl, player.weight, player.maxCarryWeight);
+  setMeter(weightFillEl, weightTextEl, payload.weight, payload.maxCarryWeight);
 
   if (carryWeightEl) {
-    if (typeof player.weight === "number" && typeof player.maxCarryWeight === "number" && player.maxCarryWeight > 0) {
-      const pct = (player.weight / player.maxCarryWeight) * 100;
+    if (typeof payload.weight === "number" && typeof payload.maxCarryWeight === "number" && payload.maxCarryWeight > 0) {
+      const pct = (payload.weight / payload.maxCarryWeight) * 100;
       carryWeightEl.textContent = pct.toFixed(1) + "%";
     } else {
       carryWeightEl.textContent = "-";
@@ -969,12 +1043,11 @@ const render = (payload: any) => {
     depositStatusEl.textContent = payload.bot.depositMessage;
   }
   if (outputRaw) {
-    // items is a static catalogue of every item definition — strip it to reduce noise.
-    const { items: _items, ...rawWithoutItems } = payload.raw ?? {};
-    outputRaw.textContent = JSON.stringify(rawWithoutItems, null, 2);
+    outputRaw.textContent = JSON.stringify(payload.raw ?? {}, null, 2);
   }
 
-  renderWorld(payload.world, payload.upgradePlans, payload.toolPlans, (payload.raw?.player as Record<string, unknown> | undefined)?.quests as Record<string, ActiveQuestData> | undefined, payload.questRewards || {});
+  renderWorld(world, payload.upgradePlans, payload.toolPlans, (payload.raw?.player as Record<string, unknown> | undefined)?.quests as Record<string, ActiveQuestData> | undefined, payload.questRewards || {});
+  renderRecordList(chainKeepNeedsListEl, payload.chainKeepNeeds, "No chain keep needs computed yet.");
 
   // ── Events ──────────────────────────────────────────────────────────────────
   // Each category arrives from the server as its own buffer. renderEvents() just
@@ -1052,31 +1125,59 @@ fetch("/config")
     }
   });
 
-const source = new EventSource("/events");
-// On the first snapshot after page load or after a server restart (reconnect),
-// push any saved threshold from localStorage to the server. By the time the
-// first snapshot arrives the server is definitely up, so there is no race.
+// Polling instead of SSE: Node's plain GET/response handling copes with this
+// payload size far better than a long-lived chunked stream does — each poll
+// is a bounded, complete response instead of an ever-open write target that
+// can fall behind a slow-draining client.
+const POLL_INTERVAL_MS = 1000;
+
+// On the first snapshot after page load or after a server restart, push any
+// saved threshold from localStorage to the server. By the time the first
+// poll succeeds the server is definitely up, so there is no race.
 let pendingThresholdSync = localStorage.getItem(THRESHOLD_LS_KEY) !== null;
-source.onmessage = (event) => {
-  try {
-    const payload = JSON.parse(event.data);
-    if (pendingThresholdSync) {
-      pendingThresholdSync = false;
-      const stored = localStorage.getItem(THRESHOLD_LS_KEY);
-      if (stored !== null) {
-        syncThresholdInputs(clampThresholdPercent(stored));
-        void saveThreshold();
+
+// Guards against a slow/recovering server piling up multiple overlapping
+// requests — skip starting a new poll while one is still in flight rather
+// than queuing more on top of it.
+let pollInFlight = false;
+
+// A slow-but-not-erroring response (server up but sluggish) would otherwise
+// sit pending indefinitely without ever hitting .catch() — abort and treat
+// it as a failure so it counts as "disconnected" and releases pollInFlight.
+const POLL_TIMEOUT_MS = 5_000;
+
+const pollState = () => {
+  if (pollInFlight) return;
+  pollInFlight = true;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), POLL_TIMEOUT_MS);
+  fetch("/state", { signal: controller.signal })
+    .then((res) => {
+      if (!res.ok) throw new Error("Bad response: " + res.status);
+      return res.json();
+    })
+    .then((payload) => {
+      if (pendingThresholdSync) {
+        pendingThresholdSync = false;
+        const stored = localStorage.getItem(THRESHOLD_LS_KEY);
+        if (stored !== null) {
+          syncThresholdInputs(clampThresholdPercent(stored));
+          void saveThreshold();
+        }
       }
-    }
-    render(payload);
-    resetStaleTimer();
-  } catch (err) {
-    console.error("Failed to parse event payload", err);
-  }
+      render(payload);
+      resetStaleTimer();
+    })
+    .catch((err) => {
+      pendingThresholdSync = localStorage.getItem(THRESHOLD_LS_KEY) !== null;
+      showConnectionBanner("Connection lost — retrying...");
+      console.error("Dashboard poll failed:", err);
+    })
+    .finally(() => {
+      clearTimeout(timeoutId);
+      pollInFlight = false;
+    });
 };
-source.onerror = () => {
-  pendingThresholdSync = localStorage.getItem(THRESHOLD_LS_KEY) !== null;
-  showConnectionBanner("Connection lost — waiting to reconnect...");
-  console.error("Dashboard stream disconnected. Waiting to reconnect...");
-  // notifyTimer is already running from resetStaleTimer; no need to start another
-};
+
+pollState();
+setInterval(pollState, POLL_INTERVAL_MS);

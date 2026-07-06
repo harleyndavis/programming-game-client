@@ -66,6 +66,14 @@
         </div>
         <div id="idleAtHomeStatus" class="control-note"></div>
       </div>
+      <div class="card">
+        <div class="label">Quests</div>
+        <div id="pursueQuestsState" class="control-state status-ok">ACTIVE</div>
+        <div style="margin-top: 10px;">
+          <button id="pursueQuestsToggle" type="button" class="idle-toggle">Stop Questing</button>
+        </div>
+        <div id="pursueQuestsStatus" class="control-note"></div>
+      </div>
     </div>
     <div class="player-section">
       <div class="tab-bar" role="tablist" aria-label="Dashboard tabs">
@@ -169,6 +177,8 @@
             <div id="upgradePlansList" class="world-list"></div>
             <div class="subsection-header">Tools</div>
             <div id="toolPlansList" class="world-list"></div>
+            <div class="subsection-header">Chain Keep Needs</div>
+            <div id="chainKeepNeedsList" class="world-list"></div>
           </div>
         </section>
         <section class="tab-panel" data-world-panel="world-npcs">

@@ -70,8 +70,33 @@ describe('canObtainChain', () => {
     expect(canObtainChain('copperSword', inventory, {}, recipes)).toBe(true);
   });
 
-  it('returns false for station-gated recipe', () => {
-    expect(canObtainChain('magicSword', { goldIngot: 3 }, {}, recipes)).toBe(false);
+  it('treats a station-gated recipe as obtainable (station availability is a real-time tier concern, not a chain-reachability one)', () => {
+    expect(canObtainChain('magicSword', { goldIngot: 3 }, {}, recipes)).toBe(true);
+  });
+
+  it('returns false when inventory has some of an ingredient but not enough (owning 1 coin does not satisfy a 1000-coin recipe)', () => {
+    const meltRecipes: RecipeList = [
+      makeRecipe({ id: 'chunk', output: { chunkOfCopper: 1 }, input: { copperCoin: 1000 }, station: 'smelting' }),
+      makeRecipe({ id: 'ingot', output: { copperIngot: 1 }, input: { chunkOfCopper: 3 }, station: 'smelting' }),
+    ];
+    expect(canObtainChain('copperIngot', { copperCoin: 1 }, {}, meltRecipes)).toBe(false);
+  });
+
+  it('returns true once inventory has enough of the ingredient for the full chain', () => {
+    const meltRecipes: RecipeList = [
+      makeRecipe({ id: 'chunk', output: { chunkOfCopper: 1 }, input: { copperCoin: 1000 }, station: 'smelting' }),
+      makeRecipe({ id: 'ingot', output: { copperIngot: 1 }, input: { chunkOfCopper: 3 }, station: 'smelting' }),
+    ];
+    expect(canObtainChain('copperIngot', { copperCoin: 3000 }, {}, meltRecipes)).toBe(true);
+  });
+
+  it('scales ingredient needs by how many crafts are required when neededQty exceeds one craft\'s output', () => {
+    const recipes: RecipeList = [
+      makeRecipe({ id: 'r1', output: { arrow: 2 }, input: { stick: 1 } }),
+    ];
+    // 5 arrows needs ceil(5/2)=3 crafts, so 3 sticks — 2 sticks isn't enough.
+    expect(canObtainChain('arrow', { stick: 2 }, {}, recipes, undefined, 5)).toBe(false);
+    expect(canObtainChain('arrow', { stick: 3 }, {}, recipes, undefined, 5)).toBe(true);
   });
 
   it('returns false when ingredients have no known source', () => {
@@ -137,6 +162,48 @@ describe('computeDifficultyTier', () => {
     });
     expect(tier).toBe(5);
   });
+
+  it('returns tier 4 (not 2) for a station-gated recipe when the station is not currently visible', () => {
+    const tier = computeDifficultyTier({
+      itemId: 'copperMailBoots',
+      recipe: { id: 'r1', input: { copperIngot: 3 }, required: [], station: 'smithing' },
+      allMerchantSelling: {},
+      inventory: { copperIngot: 5 },
+      playerCoins: 0,
+      recipes,
+    });
+    expect(tier).toBe(4);
+  });
+
+  it('returns tier 2 for a station-gated recipe once the matching station is visible', () => {
+    const tier = computeDifficultyTier({
+      itemId: 'copperMailBoots',
+      recipe: { id: 'r1', input: { copperIngot: 3 }, required: [], station: 'smithing' },
+      allMerchantSelling: {},
+      inventory: { copperIngot: 5 },
+      playerCoins: 0,
+      recipes,
+      availableStationTypes: new Set(['smithing']),
+    });
+    expect(tier).toBe(2);
+  });
+
+  it('returns tier 5 (not 4) when a chain ingredient is short on quantity, even though some is on hand', () => {
+    const meltRecipes: RecipeList = [
+      makeRecipe({ id: 'chunk', output: { chunkOfCopper: 1 }, input: { copperCoin: 1000 } }),
+      makeRecipe({ id: 'ingot', output: { copperIngot: 1 }, input: { chunkOfCopper: 3 } }),
+    ];
+    const tier = computeDifficultyTier({
+      itemId: 'copperMailBoots',
+      recipe: { id: 'r1', input: { copperIngot: 3 }, required: [] },
+      allMerchantSelling: {},
+      // Only 1 copper coin on hand — nowhere near the 3000 a full ingot chain needs.
+      inventory: { copperCoin: 1 },
+      playerCoins: 0,
+      recipes: meltRecipes,
+    });
+    expect(tier).toBe(5);
+  });
 });
 
 describe('findBlockingItems', () => {
@@ -172,6 +239,17 @@ describe('findBlockingItems', () => {
       recipes,
     );
     expect(result).toEqual([]);
+  });
+
+  it('flags an input where inventory has some but not enough of the required quantity', () => {
+    const chained: RecipeList = [
+      ...recipes,
+      makeRecipe({ id: 'r2', output: { copperIngot: 1 }, input: { copperOre: 2 }, station: null }),
+    ];
+    // copperSword needs 3 copperIngot; only 1 copperOre on hand (needs 6 for 3 ingots).
+    const result = findBlockingItems('copperSword', { hammer: 1, copperOre: 1 }, { stick: { price: 5, quantity: 1 } }, chained);
+    expect(result).toHaveLength(1);
+    expect(result[0]).toEqual({ itemId: 'copperIngot', reason: 'Has a recipe but its ingredients are also not obtainable' });
   });
 
   it('flags a missing required tool', () => {
@@ -240,12 +318,48 @@ describe('computeChainNeeds', () => {
     expect(needs.b).toBe(1);
   });
 
-  it('ignores station recipes', () => {
+  it('includes ingredients of a station-gated recipe (the keep-quantity bound applies regardless of station availability)', () => {
     const stationRecipes: RecipeList = [
       { id: 'bar', input: { copperOre: 3 }, output: { copperBar: 1 }, required: [], station: 'forge' as any },
     ];
     const needs = computeChainNeeds(['copperBar'], stationRecipes);
     expect(needs.copperBar).toBe(1);
-    expect(needs).not.toHaveProperty('copperOre');
+    expect(needs.copperOre).toBe(3);
+  });
+
+  it('caps required-tool quantity at 1 regardless of how many targets share it', () => {
+    const sharedToolRecipes: RecipeList = [
+      { id: 'axe', input: { wood: 2 }, output: { fellingAxe: 1 }, required: ['stoneCarvingKnife'], station: null },
+      { id: 'pick', input: { stone: 2 }, output: { pickaxe: 1 }, required: ['stoneCarvingKnife'], station: null },
+      { id: 'hoe', input: { iron: 2 }, output: { hoe: 1 }, required: ['stoneCarvingKnife'], station: null },
+      { id: 'knife', input: { copper: 1 }, output: { stoneCarvingKnife: 1 }, required: [], station: null },
+    ];
+    const needs = computeChainNeeds(['fellingAxe', 'pickaxe', 'hoe'], sharedToolRecipes);
+    // stoneCarvingKnife required by all three — one is enough regardless
+    expect(needs.stoneCarvingKnife).toBe(1);
+    // copper: only 1 craft of knife needed, not 3
+    expect(needs.copper).toBe(1);
+  });
+
+  it('protects an intermediate item already in inventory but does not recurse into its sub-ingredients', () => {
+    // Already own the handle — keep it, but no need to keep its logs
+    const needs = computeChainNeeds(['stoneFellingAxe'], recipes, { pinewoodAxeHandle: 1 });
+    expect(needs.stoneFellingAxe).toBe(1);
+    expect(needs.pinewoodAxeHandle).toBe(1);
+    expect(needs.pinewoodLog).toBeUndefined();
+    // 2 stone for the axe body, 1 for crafting the required knife (knife not in inventory)
+    expect(needs.stone).toBe(3);
+    expect(needs.stoneCarvingKnife).toBe(1);
+  });
+
+  it('stops recursing into required-tool sub-ingredients when the tool is already in inventory', () => {
+    // Already own handle and knife — only the raw stone for the axe body is needed
+    const needs = computeChainNeeds(['stoneFellingAxe'], recipes, { pinewoodAxeHandle: 1, stoneCarvingKnife: 1 });
+    expect(needs.stoneFellingAxe).toBe(1);
+    expect(needs.pinewoodAxeHandle).toBe(1);
+    expect(needs.stoneCarvingKnife).toBe(1);
+    expect(needs.pinewoodLog).toBeUndefined();
+    // Only 2 stone for the axe body — no stone for the knife since it's already owned
+    expect(needs.stone).toBe(2);
   });
 });

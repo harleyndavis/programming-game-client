@@ -1,5 +1,4 @@
 import { createServer, IncomingMessage, ServerResponse } from "http";
-import { ClientSideNPC, ClientSideMonster, GameObject } from "programming-game/types";
 import { UpgradePlanItem, ToolPlanItem } from "./bot-types";
 import { readFileSync } from "fs";
 import { join } from "path";
@@ -11,38 +10,6 @@ export type Position = {
 };
 
 export type RawEvent = { ts: string; name: string; data: unknown };
-
-export type UnitSnapshot = {
-    id: string;
-    type: string;
-    hp: number | null;
-    position: Position | null;
-};
-
-export type CombatSkillsSnapshot = Record<string, number>;
-
-export type InventorySnapshot = Record<string, number>;
-
-export type SpellbookSnapshot = string[];
-
-export type EquipmentSnapshot = {
-    helm: string | null;
-    chest: string | null;
-    legs: string | null;
-    feet: string | null;
-    hands: string | null;
-    weapon: string | null;
-    offhand: string | null;
-    amulet: string | null;
-    ring1: string | null;
-    ring2: string | null;
-};
-
-export type WorldState = {
-    npcs: ClientSideNPC[];
-    mobs: ClientSideMonster[];
-    objects: GameObject[];
-};
 
 export type StorageFeeInfo = {
     coinsInStorage: number;
@@ -57,6 +24,7 @@ export type DashboardSnapshot = {
     bot: {
         recoveringAtHome: boolean;
         idleAtHome: boolean;
+        pursueQuests: boolean;
         lowHpThresholdPercent: number;
         lowHpThreshold: number;
         /** Item the dashboard user requested to deposit, shown until processed. */
@@ -66,66 +34,31 @@ export type DashboardSnapshot = {
         nearbyBankers: number;
         nearbyMerchants: number;
     };
-    serverState: {
-        action: string | null;
-        actionTarget: string | null;
-        actionDuration: number | null;
-        actionStart: number | null;
-        intentType: string | null;
-        statusEffects: string[];
-    };
-    player: {
-        hp: number | null;
-        maxHp: number | null;
-        mp: number | null;
-        tp: number | null;
-        calories: number | null;
-        attack: number | null;
-        defense: number | null;
-        movementSpeed: number | null;
-        weight: number | null;
-        maxCarryWeight: number | null;
-        name: string | null;
-        position: Position | null;
-        equipment: EquipmentSnapshot;
-        combatSkills: CombatSkillsSnapshot;
-        spellbook: SpellbookSnapshot;
-        inventory: InventorySnapshot;
-        storage: InventorySnapshot;
-    };
-    unitCount: number;
-    monstersVisible: number;
-    units: UnitSnapshot[];
-    /** The unmodified heartbeat object as received from the game server. */
+    // Carry weight requires per-item weight lookups (`items`), which is
+    // intentionally stripped from `raw` to avoid sending the full item
+    // catalog — these two numbers are the exception, computed server-side
+    // while `items` is still available. Everything else about the player
+    // (name, hp, position, equipment, inventory, etc.) is already in `raw`
+    // and is derived client-side instead of being duplicated here.
+    weight: number | null;
+    maxCarryWeight: number | null;
+    /** The heartbeat as received from the game server, minus `recipes`/`items` (sent once, cached client-side). */
     raw: Record<string, unknown>;
     /** Storage fee breakdown — computed by the bot tick. */
     storageFee?: StorageFeeInfo;
-    /** Accumulated world knowledge — managed separately via updateWorld(). */
-    world?: WorldState;
     /** Bot equipment upgrade plans. */
     upgradePlans?: UpgradePlanItem[];
     /** Bot tool crafting plans — managed alongside upgradePlans. */
     toolPlans?: ToolPlanItem[];
     /** Quest rewards captured at acceptance time (server doesn't include them on active quests). */
     questRewards?: Record<string, { items: Record<string, number> }>;
+    /** Quantity of each ingredient the bot's active crafting chains need to keep — used to cap storage hoarding. */
+    chainKeepNeeds?: Record<string, number>;
     /** Recent raw server events captured by onEvent, kept in separate per-category buffers. */
     storageEvents?: RawEvent[];
     harvestEvents?: RawEvent[];
     combatEvents?: RawEvent[];
     arenaEvents?: RawEvent[];
-};
-
-const DEFAULT_EQUIPMENT: EquipmentSnapshot = {
-    helm: null,
-    chest: null,
-    legs: null,
-    feet: null,
-    hands: null,
-    weapon: null,
-    offhand: null,
-    amulet: null,
-    ring1: null,
-    ring2: null,
 };
 
 type DashboardThresholdConfig = {
@@ -136,6 +69,11 @@ type DashboardThresholdConfig = {
 type DashboardIdleAtHomeConfig = {
     getIdleAtHome: () => boolean;
     setIdleAtHome: (value: boolean) => boolean;
+};
+
+type DashboardPursueQuestsConfig = {
+    getPursueQuests: () => boolean;
+    setPursueQuests: (value: boolean) => boolean;
 };
 
 type DashboardDepositRequestConfig = {
@@ -149,6 +87,7 @@ export const createDashboard = (port: number) => {
         bot: {
             recoveringAtHome: false,
             idleAtHome: false,
+            pursueQuests: true,
             lowHpThresholdPercent: 25,
             lowHpThreshold: 0,
             depositItem: null,
@@ -156,55 +95,11 @@ export const createDashboard = (port: number) => {
             nearbyBankers: 0,
             nearbyMerchants: 0,
         },
-        serverState: {
-            action: null,
-            actionTarget: null,
-            actionDuration: null,
-            actionStart: null,
-            intentType: null,
-            statusEffects: [],
-        },
-        player: {
-            name: null,
-            hp: null,
-            maxHp: null,
-            mp: null,
-            tp: null,
-            calories: null,
-            attack: null,
-            defense: null,
-            movementSpeed: null,
-            weight: null,
-            maxCarryWeight: null,
-            position: null,
-            equipment: DEFAULT_EQUIPMENT,
-            combatSkills: {},
-            spellbook: [],
-            inventory: {},
-            storage: {},
-        },
-        unitCount: 0,
-        monstersVisible: 0,
-        units: [],
+        weight: null,
+        maxCarryWeight: null,
         raw: {},
-        world: { npcs: [], mobs: [], objects: [] },
         upgradePlans: [],
         toolPlans: [],
-    };
-
-    /**
-     * Merge next snapshot into prev, keeping any non-null value from prev when
-     * next supplies null for that field. This prevents processed nulls from
-     * erasing values that were valid on an earlier tick.
-     */
-    const mergeNonNull = <T extends Record<string, unknown>>(prev: T, next: T): T => {
-        const result: Record<string, unknown> = { ...next };
-        for (const key of Object.keys(prev)) {
-            if ((result[key] === null || result[key] === undefined) && prev[key] != null) {
-                result[key] = prev[key];
-            }
-        }
-        return result as T;
     };
 
     let thresholdConfig: DashboardThresholdConfig = {
@@ -238,7 +133,16 @@ export const createDashboard = (port: number) => {
         setPendingItem: (_item) => { /* no-op default */ },
     };
 
-    const sseClients = new Set<ServerResponse>();
+    let pursueQuestsConfig: DashboardPursueQuestsConfig = {
+        getPursueQuests: () => latestSnapshot.bot.pursueQuests,
+        setPursueQuests: (value) => {
+            latestSnapshot = {
+                ...latestSnapshot,
+                bot: { ...latestSnapshot.bot, pursueQuests: value },
+            };
+            return value;
+        },
+    };
 
     const loadDashboardHtml = () => readFileSync(join(__dirname, "dashboard.html"), "utf-8");
     const loadDashboardCss = () => readFileSync(join(__dirname, "dashboard.css"), "utf-8");
@@ -279,13 +183,6 @@ export const createDashboard = (port: number) => {
         });
     };
 
-    const broadcastSnapshot = (snapshot: DashboardSnapshot) => {
-        const message = `data: ${JSON.stringify(snapshot)}\n\n`;
-        sseClients.forEach((client) => {
-            client.write(message);
-        });
-    };
-
     let server: ReturnType<typeof createServer> | null = null;
 
     return {
@@ -298,12 +195,11 @@ export const createDashboard = (port: number) => {
         configureDepositRequest(config: DashboardDepositRequestConfig) {
             depositRequestConfig = config;
         },
+        configurePursueQuests(config: DashboardPursueQuestsConfig) {
+            pursueQuestsConfig = config;
+        },
         stop() {
             if (server) {
-                sseClients.forEach((client) => {
-                    try { client.socket?.destroy(); } catch { /* ignore */ }
-                });
-                sseClients.clear();
                 try { (server as any).closeAllConnections?.(); } catch { /* ignore */ }
                 try { server.close(); } catch { /* ignore */ }
                 server = null;
@@ -364,8 +260,14 @@ export const createDashboard = (port: number) => {
                 if (url === "/config/idle-at-home" && req.method === "POST") {
                     const next = !idleAtHomeConfig.getIdleAtHome();
                     const applied = idleAtHomeConfig.setIdleAtHome(next);
-                    broadcastSnapshot(latestSnapshot);
                     writeJson(res, { idleAtHome: applied });
+                    return;
+                }
+
+                if (url === "/config/pursue-quests" && req.method === "POST") {
+                    const next = !pursueQuestsConfig.getPursueQuests();
+                    const applied = pursueQuestsConfig.setPursueQuests(next);
+                    writeJson(res, { pursueQuests: applied });
                     return;
                 }
 
@@ -421,20 +323,6 @@ export const createDashboard = (port: number) => {
                     return;
                 }
 
-                if (url === "/events") {
-                    res.statusCode = 200;
-                    res.setHeader("Content-Type", "text/event-stream");
-                    res.setHeader("Cache-Control", "no-cache");
-                    res.setHeader("Connection", "keep-alive");
-                    res.write(`data: ${JSON.stringify(latestSnapshot)}\n\n`);
-                    sseClients.add(res);
-                    req.on("close", () => {
-                        sseClients.delete(res);
-                        res.end();
-                    });
-                    return;
-                }
-
                 res.statusCode = 404;
                 res.end("Not Found");
             }).listen(port, () => {
@@ -451,13 +339,12 @@ export const createDashboard = (port: number) => {
         publish(snapshot: DashboardSnapshot) {
             latestSnapshot = {
                 ...snapshot,
-                player: mergeNonNull(latestSnapshot.player, snapshot.player),
-                serverState: mergeNonNull(latestSnapshot.serverState, snapshot.serverState),
-                world: snapshot.world ?? latestSnapshot.world,
+                weight: snapshot.weight ?? latestSnapshot.weight,
+                maxCarryWeight: snapshot.maxCarryWeight ?? latestSnapshot.maxCarryWeight,
                 upgradePlans: snapshot.upgradePlans ?? latestSnapshot.upgradePlans,
                 toolPlans: snapshot.toolPlans ?? latestSnapshot.toolPlans,
+                chainKeepNeeds: snapshot.chainKeepNeeds ?? latestSnapshot.chainKeepNeeds,
             };
-            broadcastSnapshot(latestSnapshot);
         },
     };
 };

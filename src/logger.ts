@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { appendFileSync, closeSync, mkdirSync, openSync, readSync, renameSync, statSync, writeFileSync } from 'fs';
+import { appendFileSync, closeSync, mkdirSync, openSync, readdirSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'fs';
 import { join } from 'path';
 
 export type LogCtx = 'overworld' | 'arena';
@@ -43,6 +43,32 @@ const ARENA_DIR = join(LOG_DIR, 'arena');
 // Overworld log rotation: keep up to MAX_GENERATIONS files of MAX_BYTES each.
 const OVERWORLD_MAX_BYTES = 10 * 1024 * 1024; // 10 MB per file
 const OVERWORLD_MAX_GENERATIONS = 5;
+
+// Arena logs get one file per match, which racks up fast — cap by count and age,
+// whichever is stricter. Death snapshots are rarer, so age alone is enough.
+const ARENA_MAX_FILES = 200;
+const ARENA_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+const DEATHS_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+
+/** Deletes the oldest files in `dir` beyond `maxFiles` and/or older than `maxAgeMs`. */
+export const pruneDirectory = (dir: string, maxFiles: number, maxAgeMs: number): void => {
+  try {
+    const now = Date.now();
+    const entries = readdirSync(dir)
+      .map((name) => {
+        const full = join(dir, name);
+        try { return { full, mtimeMs: statSync(full).mtimeMs }; } catch { return null; }
+      })
+      .filter((entry): entry is { full: string; mtimeMs: number } => entry !== null)
+      .sort((a, b) => b.mtimeMs - a.mtimeMs); // newest first
+
+    entries.forEach((entry, i) => {
+      if (i >= maxFiles || now - entry.mtimeMs > maxAgeMs) {
+        try { unlinkSync(entry.full); } catch { /* already gone */ }
+      }
+    });
+  } catch { /* dir doesn't exist yet */ }
+};
 
 export const TICK_BUFFER_SIZE = 60;
 const overworldTickBuffer: TickEntry[] = [];
@@ -116,6 +142,7 @@ export const openArenaMatch = (startTime: Date): void => {
     mkdirSync(ARENA_DIR, { recursive: true });
     const name = startTime.toISOString().slice(0, 19).replace('T', '_').replace(/:/g, '-');
     currentArenaMatchPath = join(ARENA_DIR, `${name}.log`);
+    pruneDirectory(ARENA_DIR, ARENA_MAX_FILES, ARENA_MAX_AGE_MS);
   } catch { /* don't crash bot */ }
 };
 
@@ -192,5 +219,6 @@ export const writeDeathSnapshot = (snapshot: Omit<DeathSnapshot, 'ts' | 'recentT
     };
     writeFileSync(join(DEATHS_DIR, `${snapshot.ctx}-${name}.json`), JSON.stringify(formatNumbers(full), null, 2), 'utf8');
     buffer.length = 0;
+    pruneDirectory(DEATHS_DIR, Infinity, DEATHS_MAX_AGE_MS);
   } catch { /* don't crash bot on snapshot write failure */ }
 };

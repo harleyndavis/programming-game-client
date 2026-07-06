@@ -10,6 +10,7 @@ import {
   findPendingQuestTurnInItems,
   findStalledQuests,
   findQuestToAbandon,
+  findQuestToDismiss,
   questRewardsNeededItem,
 } from '../quests';
 import type { ClientSideNPC, ActiveQuests, ActiveQuest } from 'programming-game/types';
@@ -21,7 +22,7 @@ describe('findQuestTurnInRequiredItemIds', () => {
 
   it('collects required item ids from a turn_in current step', () => {
     const quests: ActiveQuests = {
-      q1: { id: 'q1', start_npc: 'npc1', end_npc: 'npc1', name: 'Q1', steps: [{ type: 'turn_in', target: 'npc1', requiredItems: { ratPelt: 3, stone: 1 }, position: {} }] },
+      q1: { id: 'q1', start_npc: 'npc1', end_npc: 'npc1', name: 'Q1', rewards: { items: {} }, steps: [{ type: 'turn_in', target: 'npc1', requiredItems: { ratPelt: 3, stone: 1 }, position: {} }] },
     };
     const result = findQuestTurnInRequiredItemIds(quests);
     expect(result.has('ratPelt')).toBe(true);
@@ -31,7 +32,7 @@ describe('findQuestTurnInRequiredItemIds', () => {
 
   it('ignores quests whose current step is not a turn_in', () => {
     const quests: ActiveQuests = {
-      q1: { id: 'q1', start_npc: 'npc1', end_npc: 'npc1', name: 'Q1', steps: [{ type: 'kill', targets: { rat: { required: 3, killed: 1 } } } as any] },
+      q1: { id: 'q1', start_npc: 'npc1', end_npc: 'npc1', name: 'Q1', rewards: { items: {} }, steps: [{ type: 'kill', targets: { rat: { required: 3, killed: 1 } } } as any] },
     };
     expect(findQuestTurnInRequiredItemIds(quests).size).toBe(0);
   });
@@ -39,7 +40,7 @@ describe('findQuestTurnInRequiredItemIds', () => {
   it('skips a turn_in step behind an incomplete goto step', () => {
     const quests: ActiveQuests = {
       q1: {
-        id: 'q1', start_npc: 'npc1', end_npc: 'npc1', name: 'Q1',
+        id: 'q1', start_npc: 'npc1', end_npc: 'npc1', name: 'Q1', rewards: { items: {} },
         steps: [
           { type: 'goto', position: { x: 1, y: 1 }, completed: false },
           { type: 'turn_in', target: 'npc1', requiredItems: { ratPelt: 3 }, position: {} },
@@ -52,7 +53,7 @@ describe('findQuestTurnInRequiredItemIds', () => {
   it('finds the turn_in step once a preceding goto step completes', () => {
     const quests: ActiveQuests = {
       q1: {
-        id: 'q1', start_npc: 'npc1', end_npc: 'npc1', name: 'Q1',
+        id: 'q1', start_npc: 'npc1', end_npc: 'npc1', name: 'Q1', rewards: { items: {} },
         steps: [
           { type: 'goto', position: { x: 1, y: 1 }, completed: true },
           { type: 'turn_in', target: 'npc1', requiredItems: { ratPelt: 3 }, position: {} },
@@ -64,7 +65,7 @@ describe('findQuestTurnInRequiredItemIds', () => {
 
   it('treats a turn_in step with no requiredItems as needing nothing', () => {
     const quests: ActiveQuests = {
-      q1: { id: 'q1', start_npc: 'npc1', end_npc: 'npc1', name: 'Q1', steps: [{ type: 'turn_in', target: 'npc1', position: {} }] },
+      q1: { id: 'q1', start_npc: 'npc1', end_npc: 'npc1', name: 'Q1', rewards: { items: {} }, steps: [{ type: 'turn_in', target: 'npc1', position: {} }] },
     };
     expect(findQuestTurnInRequiredItemIds(quests).size).toBe(0);
   });
@@ -77,22 +78,22 @@ describe('findPendingQuestTurnInItems', () => {
 
   it('returns the shortfall against current inventory', () => {
     const quests: ActiveQuests = {
-      q1: { id: 'q1', start_npc: 'npc1', end_npc: 'npc1', name: 'Q1', steps: [{ type: 'turn_in', target: 'npc1', requiredItems: { ratPelt: 5 }, position: {} }] },
+      q1: { id: 'q1', start_npc: 'npc1', end_npc: 'npc1', name: 'Q1', rewards: { items: {} }, steps: [{ type: 'turn_in', target: 'npc1', requiredItems: { ratPelt: 5 }, position: {} }] },
     };
     expect(findPendingQuestTurnInItems(quests, { ratPelt: 2 })).toEqual({ ratPelt: 3 });
   });
 
   it('omits items already fully satisfied', () => {
     const quests: ActiveQuests = {
-      q1: { id: 'q1', start_npc: 'npc1', end_npc: 'npc1', name: 'Q1', steps: [{ type: 'turn_in', target: 'npc1', requiredItems: { ratPelt: 5 }, position: {} }] },
+      q1: { id: 'q1', start_npc: 'npc1', end_npc: 'npc1', name: 'Q1', rewards: { items: {} }, steps: [{ type: 'turn_in', target: 'npc1', requiredItems: { ratPelt: 5 }, position: {} }] },
     };
     expect(findPendingQuestTurnInItems(quests, { ratPelt: 5 })).toEqual({});
   });
 
   it('sums per-quest shortfalls, each computed against the same current inventory', () => {
     const quests: ActiveQuests = {
-      q1: { id: 'q1', start_npc: 'npc1', end_npc: 'npc1', name: 'Q1', steps: [{ type: 'turn_in', target: 'npc1', requiredItems: { ratPelt: 3 }, position: {} }] },
-      q2: { id: 'q2', start_npc: 'npc2', end_npc: 'npc2', name: 'Q2', steps: [{ type: 'turn_in', target: 'npc2', requiredItems: { ratPelt: 4 }, position: {} }] },
+      q1: { id: 'q1', start_npc: 'npc1', end_npc: 'npc1', name: 'Q1', rewards: { items: {} }, steps: [{ type: 'turn_in', target: 'npc1', requiredItems: { ratPelt: 3 }, position: {} }] },
+      q2: { id: 'q2', start_npc: 'npc2', end_npc: 'npc2', name: 'Q2', rewards: { items: {} }, steps: [{ type: 'turn_in', target: 'npc2', requiredItems: { ratPelt: 4 }, position: {} }] },
     };
     // q1 shortfall = 3-1 = 2, q2 shortfall = 4-1 = 3 (each vs. the same pocket qty, not decremented)
     expect(findPendingQuestTurnInItems(quests, { ratPelt: 1 })).toEqual({ ratPelt: 5 });
@@ -106,7 +107,7 @@ describe('findStalledQuests', () => {
 
   it('flags a quest whose turn-in item is short and unobtainable', () => {
     const quests: ActiveQuests = {
-      q1: { id: 'q1', start_npc: 'npc1', end_npc: 'npc1', name: 'Q1', steps: [{ type: 'turn_in', target: 'npc1', requiredItems: { feather: 3 }, position: {} }] },
+      q1: { id: 'q1', start_npc: 'npc1', end_npc: 'npc1', name: 'Q1', rewards: { items: {} }, steps: [{ type: 'turn_in', target: 'npc1', requiredItems: { feather: 3 }, position: {} }] },
     };
     const result = findStalledQuests(quests, {}, new Set(['feather']));
     expect(result.map(q => q.id)).toEqual(['q1']);
@@ -114,29 +115,29 @@ describe('findStalledQuests', () => {
 
   it('does not flag a quest whose item is short but obtainable', () => {
     const quests: ActiveQuests = {
-      q1: { id: 'q1', start_npc: 'npc1', end_npc: 'npc1', name: 'Q1', steps: [{ type: 'turn_in', target: 'npc1', requiredItems: { stone: 3 }, position: {} }] },
+      q1: { id: 'q1', start_npc: 'npc1', end_npc: 'npc1', name: 'Q1', rewards: { items: {} }, steps: [{ type: 'turn_in', target: 'npc1', requiredItems: { stone: 3 }, position: {} }] },
     };
     expect(findStalledQuests(quests, {}, new Set(['feather']))).toEqual([]);
   });
 
   it('does not flag a quest whose item is already satisfied, even if marked unobtainable', () => {
     const quests: ActiveQuests = {
-      q1: { id: 'q1', start_npc: 'npc1', end_npc: 'npc1', name: 'Q1', steps: [{ type: 'turn_in', target: 'npc1', requiredItems: { feather: 3 }, position: {} }] },
+      q1: { id: 'q1', start_npc: 'npc1', end_npc: 'npc1', name: 'Q1', rewards: { items: {} }, steps: [{ type: 'turn_in', target: 'npc1', requiredItems: { feather: 3 }, position: {} }] },
     };
     expect(findStalledQuests(quests, { feather: 3 }, new Set(['feather']))).toEqual([]);
   });
 
   it('ignores quests whose current step is not a turn_in', () => {
     const quests: ActiveQuests = {
-      q1: { id: 'q1', start_npc: 'npc1', end_npc: 'npc1', name: 'Q1', steps: [{ type: 'kill', targets: { rat: { required: 3, killed: 1 } } } as any] },
+      q1: { id: 'q1', start_npc: 'npc1', end_npc: 'npc1', name: 'Q1', rewards: { items: {} }, steps: [{ type: 'kill', targets: { rat: { required: 3, killed: 1 } } } as any] },
     };
     expect(findStalledQuests(quests, {}, new Set(['feather']))).toEqual([]);
   });
 
   it('returns every stalled quest, not just the first', () => {
     const quests: ActiveQuests = {
-      q1: { id: 'q1', start_npc: 'npc1', end_npc: 'npc1', name: 'Q1', steps: [{ type: 'turn_in', target: 'npc1', requiredItems: { feather: 1 }, position: {} }] },
-      q2: { id: 'q2', start_npc: 'npc2', end_npc: 'npc2', name: 'Q2', steps: [{ type: 'turn_in', target: 'npc2', requiredItems: { chickenMeat: 1 }, position: {} }] },
+      q1: { id: 'q1', start_npc: 'npc1', end_npc: 'npc1', name: 'Q1', rewards: { items: {} }, steps: [{ type: 'turn_in', target: 'npc1', requiredItems: { feather: 1 }, position: {} }] },
+      q2: { id: 'q2', start_npc: 'npc2', end_npc: 'npc2', name: 'Q2', rewards: { items: {} }, steps: [{ type: 'turn_in', target: 'npc2', requiredItems: { chickenMeat: 1 }, position: {} }] },
     };
     const result = findStalledQuests(quests, {}, new Set(['feather', 'chickenMeat']));
     expect(result.map(q => q.id).sort()).toEqual(['q1', 'q2']);
@@ -150,14 +151,14 @@ describe('findCompletableQuest', () => {
 
   it('returns null when no quest has required items satisfied', () => {
     const quests = {
-      q1: { id: 'q1', start_npc: 'npc1', end_npc: 'npc1', name: 'Q1', steps: [{ type: 'turn_in' as const, target: 'npc1', requiredItems: { ratPelt: 3 }, position: {} }] },
+      q1: { id: 'q1', start_npc: 'npc1', end_npc: 'npc1', name: 'Q1', rewards: { items: {} }, steps: [{ type: 'turn_in' as const, target: 'npc1', requiredItems: { ratPelt: 3 }, position: {} }] },
     };
     expect(findCompletableQuest(quests, { ratPelt: 2 })).toBeNull();
   });
 
   it('returns quest when turn_in required items are satisfied', () => {
     const quests = {
-      q1: { id: 'q1', start_npc: 'npc1', end_npc: 'npc1', name: 'Q1', steps: [{ type: 'turn_in' as const, target: 'npc1', requiredItems: { ratPelt: 3 }, position: {} }] },
+      q1: { id: 'q1', start_npc: 'npc1', end_npc: 'npc1', name: 'Q1', rewards: { items: {} }, steps: [{ type: 'turn_in' as const, target: 'npc1', requiredItems: { ratPelt: 3 }, position: {} }] },
     };
     const result = findCompletableQuest(quests, { ratPelt: 5 });
     expect(result).not.toBeNull();
@@ -166,15 +167,15 @@ describe('findCompletableQuest', () => {
 
   it('skips quests without turn_in steps', () => {
     const quests = {
-      q1: { id: 'q1', start_npc: 'npc1', end_npc: 'npc1', name: 'Q1', steps: [{ type: 'kill' as const, targets: { rat: { required: 3, killed: 2 } } }] },
+      q1: { id: 'q1', start_npc: 'npc1', end_npc: 'npc1', name: 'Q1', rewards: { items: {} }, steps: [{ type: 'kill' as const, targets: { rat: { required: 3, killed: 2 } } }] },
     };
     expect(findCompletableQuest(quests, {})).toBeNull();
   });
 
   it('returns first completable quest when multiple exist', () => {
     const quests = {
-      q1: { id: 'q1', start_npc: 'npc1', end_npc: 'npc1', name: 'Q1', steps: [{ type: 'turn_in' as const, target: 'npc1', requiredItems: { ratPelt: 3 }, position: {} }] },
-      q2: { id: 'q2', start_npc: 'npc2', end_npc: 'npc2', name: 'Q2', steps: [{ type: 'turn_in' as const, target: 'npc2', requiredItems: { copperOre: 5 }, position: {} }] },
+      q1: { id: 'q1', start_npc: 'npc1', end_npc: 'npc1', name: 'Q1', rewards: { items: {} }, steps: [{ type: 'turn_in' as const, target: 'npc1', requiredItems: { ratPelt: 3 }, position: {} }] },
+      q2: { id: 'q2', start_npc: 'npc2', end_npc: 'npc2', name: 'Q2', rewards: { items: {} }, steps: [{ type: 'turn_in' as const, target: 'npc2', requiredItems: { copperOre: 5 }, position: {} }] },
     };
     const result = findCompletableQuest(quests, { ratPelt: 5, copperOre: 1 });
     expect(result).not.toBeNull();
@@ -189,19 +190,19 @@ describe('findTurnInNpc', () => {
   ] as unknown as ClientSideNPC[];
 
   it('returns the NPC matching quest.end_npc', () => {
-    const quest = { id: 'q1', start_npc: 'npc1', end_npc: 'npc2', name: 'Q1', steps: [] };
+    const quest = { id: 'q1', start_npc: 'npc1', end_npc: 'npc2', name: 'Q1', rewards: { items: {} }, steps: [] };
     const result = findTurnInNpc(quest, npcs);
     expect(result).not.toBeNull();
     expect(result!.id).toBe('npc2');
   });
 
   it('returns null when no NPC matches end_npc', () => {
-    const quest = { id: 'q1', start_npc: 'npc1', end_npc: 'npc3', name: 'Q1', steps: [] };
+    const quest = { id: 'q1', start_npc: 'npc1', end_npc: 'npc3', name: 'Q1', rewards: { items: {} }, steps: [] };
     expect(findTurnInNpc(quest, npcs)).toBeNull();
   });
 
   it('returns null for empty units', () => {
-    const quest = { id: 'q1', start_npc: 'npc1', end_npc: 'npc1', name: 'Q1', steps: [] };
+    const quest = { id: 'q1', start_npc: 'npc1', end_npc: 'npc1', name: 'Q1', rewards: { items: {} }, steps: [] };
     expect(findTurnInNpc(quest, [])).toBeNull();
   });
 });
@@ -239,7 +240,7 @@ describe('findBestQuestToAccept', () => {
   });
 
   it('skips already-active quests', () => {
-    const active = { q1: { id: 'q1', start_npc: 'npc1', end_npc: 'npc1', name: 'Q1', steps: [] } };
+    const active = { q1: { id: 'q1', start_npc: 'npc1', end_npc: 'npc1', name: 'Q1', rewards: { items: {} }, steps: [] } };
     const result = findBestQuestToAccept([npcWithQuests], active, 5);
     expect(result).not.toBeNull();
     expect(result!.quest.id).toBe('q2');
@@ -406,7 +407,7 @@ describe('findBestAvailableQuest', () => {
 
 describe('findQuestToAbandon', () => {
   const stalledQuest: ActiveQuest = {
-    id: 'stalled1', start_npc: 'healer_name', end_npc: 'healer_name', name: 'Stalled',
+    id: 'stalled1', start_npc: 'healer_name', end_npc: 'healer_name', name: 'Stalled', rewards: { items: {} },
     steps: [{ type: 'turn_in', target: 'healer_name', requiredItems: { feather: 1 }, position: {} }],
   };
   const neededQuestCandidate = {
@@ -448,5 +449,30 @@ describe('findQuestToAbandon', () => {
     expect(findQuestToAbandon([stalledQuest], true, patchedCandidate, neededItems)).toBeNull();
     const result = findQuestToAbandon([stalledQuest], true, patchedCandidate, neededItems, { wood_for_stone: { stone: 1 } });
     expect(result?.id).toBe('stalled1');
+  });
+});
+
+describe('findQuestToDismiss', () => {
+  it('returns null for empty active quests', () => {
+    expect(findQuestToDismiss({})).toBeNull();
+  });
+
+  it('returns an active quest when one exists', () => {
+    const quests = {
+      q1: { id: 'q1', start_npc: 'npc1', end_npc: 'npc1', name: 'Q1', rewards: { items: {} }, steps: [] },
+    };
+    const result = findQuestToDismiss(quests);
+    expect(result).not.toBeNull();
+    expect(result!.id).toBe('q1');
+  });
+
+  it('returns one quest at a time when multiple are active', () => {
+    const quests = {
+      q1: { id: 'q1', start_npc: 'npc1', end_npc: 'npc1', name: 'Q1', rewards: { items: {} }, steps: [] },
+      q2: { id: 'q2', start_npc: 'npc2', end_npc: 'npc2', name: 'Q2', rewards: { items: {} }, steps: [] },
+    };
+    const result = findQuestToDismiss(quests);
+    expect(result).not.toBeNull();
+    expect(['q1', 'q2']).toContain(result!.id);
   });
 });

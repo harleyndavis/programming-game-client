@@ -82,7 +82,7 @@ export const getStorageFeeInfo = (
   const storageWeight = storageItemsWeight + storageCoins;
   const feePerCharge = Math.ceil(storageWeight * 0.0025);
   // Capped at half the coins on hand so a heavy hoard can't lock every coin.
-  const minCoins = Math.min(feePerCharge * feeBuffer, Math.floor(storageCoins / 2));
+  const minCoins = feePerCharge * feeBuffer;
   const availableWithdrawal = Math.max(0, storageCoins - minCoins);
   return { storageWeight, feePerCharge, minCoins, availableWithdrawal };
 };

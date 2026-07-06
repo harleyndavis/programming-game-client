@@ -13,6 +13,12 @@ HP"). Goals are non-blocking: compatible activities (healing, shopping,
 equipping) compete for the action slot each tick rather than running in strict
 sequence.
 
+### Decision throttle
+
+`onTick` in `index.ts` only runs its full decision logic (arena and overworld alike) at most once per second (`ON_TICK_MIN_INTERVAL_MS`), regardless of how often the SDK invokes the callback — calls within the window return `undefined` immediately (a documented no-op return; the SDK only updates the server-side intent when `onTick`'s return value is truthy, so `undefined` safely means "leave the current intent as-is," see `base-client.ts`'s `runOnTick`). Emergency-mode handling (graceful shutdown) is exempt and always runs immediately.
+
+This exists because the SDK calls `onTick` on every single socket event, not just on a periodic heartbeat (see `docs/game-reference.md` → *Server event rate*) — a single misbehaving NPC has been observed pushing the effective call rate past 800/sec, which was enough to bog down full decision recomputation (and, before the dashboard moved to polling, the dashboard broadcast). The throttle is a stopgap on the symptom (recomputing decisions needlessly often), not a fix for the underlying event volume, which is a server-side issue outside this codebase's control.
+
 ### Module architecture
 `index.ts` has been partially decomposed (per ADR-0003 conservative extraction) into pure-function libraries. `index.ts` remains the orchestrator, owning all mutable state and decision logic. Dependency flows one direction — modules import from `utils`/`bot-types`/`plan` only, never from each other directly. `plan.ts` was added as a shared acquisition-planning layer (tier/reachability/chain-quantity primitives) once equipment, harvest, and craft planning all needed the same chaining logic — it plays the same role as `utils.ts` but is domain-specific rather than generic:
 
@@ -389,14 +395,9 @@ visible for a short window right after arriving at their location). Chasing
 is last — every other home task takes priority over closing distance on a
 quest NPC that isn't even visible yet.
 
-**Reward visibility — a structural gap, not a bug:** `ActiveQuest` (the shape
-of `player.quests`) has no `rewards` field at all, for every quest, always —
-see `node_modules/programming-game/src/types.ts`. The reward is only ever
-visible in `npc.availableQuests[id].rewards.items`, i.e. *before* accepting.
-Once a quest is active, that data is gone from the heartbeat entirely. This is
-why `questRewards` (in `index.ts`) exists: `execute()`'s `acceptQuest` case
-captures `availableQuest.rewards.items` at the exact moment of accepting,
-before it disappears, keyed by quest id.
+**Reward visibility — was a structural gap, now fixed upstream (workaround not yet removed):** until SDK `0.10.3`, `ActiveQuest` (the shape of `player.quests`) had no `rewards` field at all, for every quest, always. The reward was only ever visible in `npc.availableQuests[id].rewards.items`, i.e. *before* accepting — once a quest was active, that data was gone from the heartbeat entirely. This is why `questRewards` (in `index.ts`) exists: `execute()`'s `acceptQuest` case captures `availableQuest.rewards.items` at the exact moment of accepting, before it disappears, keyed by quest id.
+
+As of SDK `0.10.3`, `ActiveQuest.rewards.items` is a real, always-populated field (confirmed via diff against `0.10.2` — it was the only substantive change in that release). `questRewards`/`KNOWN_QUEST_REWARDS`/`rewardPatches` below are therefore no longer strictly necessary — `quests.ts` could read `quest.rewards.items` directly — but the workaround hasn't been removed yet; this is a known, flagged simplification, not yet done.
 
 **Reward evaluation (`evaluateQuest`):** base score is the sum of reward item
 quantities, but a quest whose reward includes an item the bot's craft chains

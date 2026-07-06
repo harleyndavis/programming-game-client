@@ -28,6 +28,8 @@ Combined with the global cooldown and status effects, an intent sent by the bot 
 
 The server can emit up to 60 events per second during movement (~16–17 ms between events). Extra heartbeat ticks arrive between server events — the client fires one on every server event *and* on a 300 ms poll. Extra ticks carry no new server state; they are time-passing acknowledgements and should not be treated as match activity.
 
+**Anomalous NPC event spam (observed 2026-07-04, reported to game dev):** a specific NPC (`guard_name`) was observed generating `setIntent`/`takingAction` events at 500-580/sec and 270-290/sec respectively — over 95% of all events received while nearby, and far beyond the "up to 60/sec during movement" baseline above. The NPC is stationary; this rate has no plausible in-game explanation. Confirmed via a per-eventName counter in `onEvent` (`index.ts`), and confirmed server-side (not a client artifact) by the game developer checking outgoing data volume — the *count* of small messages was the anomaly, not payload size. Since `base-client.ts`'s `eventsHandler` calls `runOnTick()` unconditionally after every single event (not just the periodic heartbeat), an NPC misbehaving like this drives the client's effective tick rate to 800+/sec regardless of anything the bot itself is doing. Mitigated client-side (see `CONTEXT.md` → *Decision throttle*); the actual event volume is a server-side bug outside our control.
+
 ---
 
 ## Combat
@@ -87,7 +89,9 @@ Each player has a personal bank vault (`player.storage`) accessible through bank
 
 ## Arena
 
-There is no explicit match-start or match-end event. There is a onEvent type "arena" that has the event duration. The onTicks for arena seem to start coming in for them before the onEvent. But it lasts for 60 seconds from the OnEvent.
+As of a 2026-07-03 server patch, the onEvent type "arena" fires at match **start** and accurately resets the countdown (`duration`, typically 60000ms) — it's the authoritative signal for both opening a match and, by elapsing `duration` from that point, closing it. `unitAppeared`/`unitDisappeared`/`despawn` in the `1v1Arena` instance are no longer needed for lifecycle, only for opponent id tracking/logging.
+
+(Historical: before that patch, the `'arena'` event fired at match *end* instead, and the heartbeat could never be used to detect boundaries at all — overworld heartbeats keep arriving interleaved throughout an active match, and `arenaTimeRemaining` itself is not a live countdown, it resets to a fresh value at the old event's firing point and free-runs negative afterward. If arena lifecycle detection ever misbehaves again, check whether the server's event timing has reverted or changed again before re-deriving this from scratch.)
 Arena is exclusively 1v1 currently.
 
 NPCs, Players, and Monsters are all valid targets in the arena.
