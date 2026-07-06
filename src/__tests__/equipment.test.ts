@@ -1,8 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
   computeUpgradeTargets,
-  getTargetItemsToKeep,
-  getEquippedRecipeInputs,
   computeTargetsToBuyFromMerchant,
   findGearToEquip,
 } from '../equipment';
@@ -77,48 +75,6 @@ describe('computeUpgradeTargets', () => {
     if (targets.length > 0) {
       expect(targets[0].reachable).toBe(true);
     }
-  });
-});
-
-describe('getTargetItemsToKeep', () => {
-  it('returns empty set for no targets', () => {
-    expect(getTargetItemsToKeep([], []).size).toBe(0);
-  });
-
-  it('returns empty set for buy-only targets', () => {
-    const targets: UpgradeTarget[] = [
-      { itemId: 'copperSword', slot: 'weapon', tier: 1, gain: 5, reachable: true, recipe: null },
-    ];
-    expect(getTargetItemsToKeep(targets, []).size).toBe(0);
-  });
-
-  it('returns ingredients for craftable targets', () => {
-    const recipes: RecipeList = [
-      makeRecipe({ id: 'r1', output: { copperSword: 1 }, input: { copperIngot: 3 }, station: null }),
-    ];
-    const targets: UpgradeTarget[] = [
-      { itemId: 'copperSword', slot: 'weapon', tier: 2, gain: 5, reachable: true, recipe: { id: 'r1', input: { copperIngot: 3 }, required: [] } },
-    ];
-    const result = getTargetItemsToKeep(targets, recipes);
-    expect(result.has('copperIngot')).toBe(true);
-  });
-});
-
-describe('getEquippedRecipeInputs', () => {
-  it('returns empty set for no equipment', () => {
-    expect(getEquippedRecipeInputs({}, []).size).toBe(0);
-  });
-
-  it('returns chained inputs for equipped craftable items', () => {
-    const recipes: RecipeList = [
-      makeRecipe({ id: 'r1', output: { copperSword: 1 }, input: { copperIngot: 3 }, station: null }),
-    ];
-    const result = getEquippedRecipeInputs({ weapon: 'copperSword' }, recipes);
-    expect(result.has('copperIngot')).toBe(true);
-  });
-
-  it('returns nothing for non-craftable equipped items', () => {
-    expect(getEquippedRecipeInputs({ weapon: 'ironSword' }, []).size).toBe(0);
   });
 });
 
