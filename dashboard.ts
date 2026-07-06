@@ -52,6 +52,8 @@ export type DashboardSnapshot = {
     toolPlans?: ToolPlanItem[];
     /** Quest rewards captured at acceptance time (server doesn't include them on active quests). */
     questRewards?: Record<string, { items: Record<string, number> }>;
+    /** Quantity of each ingredient the bot's active crafting chains need to keep — used to cap storage hoarding. */
+    chainKeepNeeds?: Record<string, number>;
     /** Recent raw server events captured by onEvent, kept in separate per-category buffers. */
     storageEvents?: RawEvent[];
     harvestEvents?: RawEvent[];
@@ -341,6 +343,7 @@ export const createDashboard = (port: number) => {
                 maxCarryWeight: snapshot.maxCarryWeight ?? latestSnapshot.maxCarryWeight,
                 upgradePlans: snapshot.upgradePlans ?? latestSnapshot.upgradePlans,
                 toolPlans: snapshot.toolPlans ?? latestSnapshot.toolPlans,
+                chainKeepNeeds: snapshot.chainKeepNeeds ?? latestSnapshot.chainKeepNeeds,
             };
         },
     };

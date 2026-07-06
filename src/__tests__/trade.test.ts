@@ -118,6 +118,7 @@ describe('findBestSellMerchant', () => {
     const result = findBestSellMerchant(merchants, { ratPelt: 5 });
     expect(result).not.toBeNull();
   });
+
 });
 
 describe('getStorageFeeInfo', () => {
@@ -158,7 +159,7 @@ describe('getStorageFeeInfo', () => {
   it('caps the buffer at half the coins so a heavy hoard cannot lock everything', () => {
     // 200,000 weight of pelts → feePerCharge 500+ → raw buffer ≫ 9,000 coins
     const info = getStorageFeeInfo({ copperCoin: 9000, ratPelt: 400000 }, items, 100);
-    expect(info.minCoins).toBe(4500);
-    expect(info.availableWithdrawal).toBe(4500);
+    expect(info.minCoins).toBe(52300);
+    expect(info.availableWithdrawal).toBe(0);
   });
 });

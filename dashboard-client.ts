@@ -6,6 +6,7 @@ const snapshotTimeEl = document.getElementById("snapshotTime");
 const snapshotBtnEl = document.getElementById("snapshotBtn");
 const upgradePlansListEl = document.getElementById("upgradePlansList");
 const toolPlansListEl = document.getElementById("toolPlansList");
+const chainKeepNeedsListEl = document.getElementById("chainKeepNeedsList");
 const npcsListEl = document.getElementById("npcsList");
 const questsListEl = document.getElementById("questsList");
 const mobsListEl = document.getElementById("mobsList");
@@ -1046,6 +1047,7 @@ const render = (payload: any) => {
   }
 
   renderWorld(world, payload.upgradePlans, payload.toolPlans, (payload.raw?.player as Record<string, unknown> | undefined)?.quests as Record<string, ActiveQuestData> | undefined, payload.questRewards || {});
+  renderRecordList(chainKeepNeedsListEl, payload.chainKeepNeeds, "No chain keep needs computed yet.");
 
   // ── Events ──────────────────────────────────────────────────────────────────
   // Each category arrives from the server as its own buffer. renderEvents() just
