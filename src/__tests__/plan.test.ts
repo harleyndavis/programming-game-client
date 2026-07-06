@@ -326,4 +326,40 @@ describe('computeChainNeeds', () => {
     expect(needs.copperBar).toBe(1);
     expect(needs.copperOre).toBe(3);
   });
+
+  it('caps required-tool quantity at 1 regardless of how many targets share it', () => {
+    const sharedToolRecipes: RecipeList = [
+      { id: 'axe', input: { wood: 2 }, output: { fellingAxe: 1 }, required: ['stoneCarvingKnife'], station: null },
+      { id: 'pick', input: { stone: 2 }, output: { pickaxe: 1 }, required: ['stoneCarvingKnife'], station: null },
+      { id: 'hoe', input: { iron: 2 }, output: { hoe: 1 }, required: ['stoneCarvingKnife'], station: null },
+      { id: 'knife', input: { copper: 1 }, output: { stoneCarvingKnife: 1 }, required: [], station: null },
+    ];
+    const needs = computeChainNeeds(['fellingAxe', 'pickaxe', 'hoe'], sharedToolRecipes);
+    // stoneCarvingKnife required by all three — one is enough regardless
+    expect(needs.stoneCarvingKnife).toBe(1);
+    // copper: only 1 craft of knife needed, not 3
+    expect(needs.copper).toBe(1);
+  });
+
+  it('protects an intermediate item already in inventory but does not recurse into its sub-ingredients', () => {
+    // Already own the handle — keep it, but no need to keep its logs
+    const needs = computeChainNeeds(['stoneFellingAxe'], recipes, { pinewoodAxeHandle: 1 });
+    expect(needs.stoneFellingAxe).toBe(1);
+    expect(needs.pinewoodAxeHandle).toBe(1);
+    expect(needs.pinewoodLog).toBeUndefined();
+    // 2 stone for the axe body, 1 for crafting the required knife (knife not in inventory)
+    expect(needs.stone).toBe(3);
+    expect(needs.stoneCarvingKnife).toBe(1);
+  });
+
+  it('stops recursing into required-tool sub-ingredients when the tool is already in inventory', () => {
+    // Already own handle and knife — only the raw stone for the axe body is needed
+    const needs = computeChainNeeds(['stoneFellingAxe'], recipes, { pinewoodAxeHandle: 1, stoneCarvingKnife: 1 });
+    expect(needs.stoneFellingAxe).toBe(1);
+    expect(needs.pinewoodAxeHandle).toBe(1);
+    expect(needs.stoneCarvingKnife).toBe(1);
+    expect(needs.pinewoodLog).toBeUndefined();
+    // Only 2 stone for the axe body — no stone for the knife since it's already owned
+    expect(needs.stone).toBe(2);
+  });
 });

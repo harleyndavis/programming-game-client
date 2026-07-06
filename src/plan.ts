@@ -31,22 +31,27 @@ export const getChainedIngredients = (
 };
 
 /**
- * Gross quantity of every item (targets + transitive ingredients + required
- * tools) needed to craft one of each target via no-station recipes.
+ * Quantity of every item (targets + transitive ingredients + required tools)
+ * consumed by crafting one of each target. Callers use this as a "keep this
+ * many, anything beyond is sellable surplus" bound. Shared ingredients
+ * accumulate across targets (axe + knife each needing stone → stone: 2).
  *
- * Deliberately ignores current inventory: callers use the result as a
- * "keep this many, anything beyond is sellable surplus" bound, so it must not
- * shrink as materials are gathered. Shared ingredients accumulate across
- * targets (axe + knife each needing stone → stone: 2).
+ * When `inventory` is provided, intermediate items already present in the
+ * required quantity are protected (added to needs) but not recursed into —
+ * their sub-ingredients are not needed since the assembled item is on hand.
  */
 export const computeChainNeeds = (
   targetItemIds: string[],
   recipes: RecipeList,
+  inventory: Partial<Record<string, number>> = {},
 ): Record<string, number> => {
   const needs: Record<string, number> = {};
   const walk = (itemId: string, qty: number, visited: Set<string>): void => {
     if (visited.has(itemId)) return;
     needs[itemId] = (needs[itemId] ?? 0) + qty;
+    // If we already have enough of this item, its sub-ingredients don't need
+    // to be kept — we won't be crafting it from scratch.
+    if ((inventory[itemId] ?? 0) >= qty) return;
     const recipe = recipes.find(r => itemId in (r.output ?? {}));
     if (!recipe) return;
     const outQty = (recipe.output ?? {})[itemId] ?? 1;
@@ -57,9 +62,15 @@ export const computeChainNeeds = (
       walk(inputId, (inputQty ?? 0) * crafts, next);
     }
     for (const reqId of recipe.required ?? []) {
-      walk(String(reqId), 1, next);
+      const req = String(reqId);
+      // Required tools are not consumed — skip if already in needs, since one
+      // satisfies every recipe that uses it and its sub-ingredients were already
+      // computed the first time it was encountered.
+      if (req in needs) continue;
+      walk(req, 1, next);
     }
   };
+
   for (const targetId of Array.from(new Set(targetItemIds))) {
     walk(targetId, 1, new Set());
   }
@@ -162,8 +173,8 @@ export const computeDifficultyTier = (opts: {
       craftTier = 2;
     } else {
       const allObtainable =
-        Object.entries(recipe.input).every(([id, qty]) => canObtainChain(id, inventory, allMerchantSelling, recipes, undefined, qty ?? 0)) &&
-        recipe.required.every(id => canObtainChain(id as string, inventory, allMerchantSelling, recipes, undefined, 1));
+        Object.entries(recipe.input).every(([id]) => canObtainChain(id, inventory, allMerchantSelling, recipes)) &&
+        recipe.required.every(id => canObtainChain(id as string, inventory, allMerchantSelling, recipes));
       craftTier = allObtainable ? 4 : 5;
     }
   }
