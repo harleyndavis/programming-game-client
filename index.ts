@@ -1530,13 +1530,31 @@ disconnectFromGame = connect({
     // already required internally (via availableStationTypes/isRecipeAvailable),
     // so the only additional gate needed is "not mid-combat" — if we can
     // finish crafting, do it and wear/use it now.
+    //
+    // Deliberately does NOT re-run findCraftableTarget/findCraftableFromList
+    // against pocket-only inventory: that re-derives a fresh answer from
+    // scratch, and isFullyAchievableFromInventory's required-tool check
+    // (src/craft.ts) demands the *final* recipe's tool already be in pocket —
+    // which stalls every intermediate sub-step (e.g. crafting lightLeather
+    // from rat pelts) whenever that tool is sitting in storage, since the
+    // tool isn't withdrawn until the last step actually needs it. Instead,
+    // reuse activeCraft/toolToCraftFromStorage (already computed against
+    // combinedInventory, so storage-only tools/ingredients count toward
+    // reachability) and only check that *this* sub-step's own ingredients are
+    // in pocket right now — the withdraw branches above pull them in first.
+    const isReadyInPocket = (recipe: { input: Partial<Record<string, number>>; required: readonly string[]; station?: string | null } | null | undefined): boolean =>
+      !!recipe &&
+      Object.entries(recipe.input).every(([id, qty]) => (invRecord[id] ?? 0) >= (qty ?? 0)) &&
+      recipe.required.every(id => (invRecord[String(id)] ?? 0) >= 1) &&
+      isRecipeAvailable(recipe, availableStationTypes);
+
     const safeToCraft = !nearbyThreat && !attackingMonster;
-    const recipeToCraft = safeToCraft
-      ? findCraftableTarget(upgradeTargets, player.inventory ?? {}, recipesArray, availableStationTypes)
+    const recipeToCraft = safeToCraft && isReadyInPocket(activeCraft?.recipe)
+      ? activeCraft
       : null;
 
-    const toolToCraft = safeToCraft && allToolCraftTargets.length > 0
-      ? findCraftableFromList(allToolCraftTargets, player.inventory ?? {}, recipesArray, availableStationTypes)
+    const toolToCraft = safeToCraft && isReadyInPocket(toolToCraftFromStorage?.recipe)
+      ? toolToCraftFromStorage
       : null;
 
     const recipeToCraftStationId = recipeToCraft?.recipe
