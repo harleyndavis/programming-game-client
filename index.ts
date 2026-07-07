@@ -1574,13 +1574,16 @@ disconnectFromGame = connect({
       : undefined;
 
     const upgradePlanItems: UpgradePlanItem[] = upgradeTargets.map((target, index) => {
-      const inventory = (player.inventory ?? {}) as Record<string, number>;
       const equipped = (player.equipment ?? {}) as Record<string, string | null | undefined>;
+      // combinedInventory (storage + pocket), not player.inventory alone —
+      // otherwise depositing an ingredient makes the dashboard show it as
+      // freshly missing even though it's still owned and will be withdrawn
+      // when needed.
       const requirements = target.recipe
         ? Object.entries(target.recipe.input).map(([itemId, qty]) => ({
           item: itemId as any,
           quantity: qty ?? 0,
-          have: inventory[itemId] ?? 0,
+          have: combinedInventory[itemId] ?? 0,
         }))
         : [];
       return {
