@@ -35,6 +35,34 @@ export const isRecipeAvailable = (
   stationTypes: ReadonlySet<string> = new Set(),
 ): boolean => recipe.station == null || stationTypes.has(recipe.station);
 
+/**
+ * TEMPORARY manual override — remove once recipe selection can rank multiple
+ * candidate recipes per output by cost/obtainability instead of every
+ * `recipes.find(r => itemId in r.output ...)` call site (src/craft.ts,
+ * src/equipment.ts, src/harvest.ts, this file) just taking the first array
+ * match. Until then, disabling only the coin-melt step itself
+ * (`chunkOfCopper`, which spends `copperCoin` currency) isn't enough: its
+ * consumer `copperIngot` (chunkOfCopper → copperIngot) would still be the
+ * first match for output `copperIngot`, and — now unable to obtain
+ * chunkOfCopper — would report the whole ingot as blocked (tier 5) instead
+ * of falling through to `copperIngot2` (copperOre → copperIngot, mined for
+ * free besides tool wear). So both recipe ids in the coin-melt chain are
+ * disabled together, letting `.find()` land on the ore-based recipe.
+ *
+ * Revisit when smelting/copperIngot upgrade targets actually come up — for
+ * now mining is cheap and coins are not, see index.ts's KNOWN_HARVESTABLE_ITEMS.
+ */
+const DISABLED_RECIPE_IDS: ReadonlySet<string> = new Set(['chunkOfCopper', 'copperIngot']);
+
+/**
+ * Preprocessing pass: strips DISABLED_RECIPE_IDS out of a recipe list. Call
+ * this once, right where the raw heartbeat recipe list is turned into the
+ * `RecipeList` every planning function consumes (index.ts) — everything
+ * downstream then simply never sees the disabled recipes exist.
+ */
+export const filterDisabledRecipes = (recipes: RecipeList): RecipeList =>
+  recipes.filter(r => !r.id || !DISABLED_RECIPE_IDS.has(r.id));
+
 export const getChainedIngredients = (
   targetItemId: string,
   recipes: RecipeList,

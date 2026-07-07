@@ -7,7 +7,7 @@ import { UpgradePlanItem, ToolPlanItem, UpgradeRequirement, QuestMap, RecipeList
 import * as logger from "./src/logger";
 import { isFiniteNumber, isFinitePosition, distanceBetween } from "./src/utils";
 import { ENCUMBRANCE_THRESHOLD, getInventoryWeight, findHeaviestInventoryItem, findCheapestFood, computeItemsToSell } from "./src/inventory";
-import { getChainedIngredients, canObtainChain, computeChainNeeds, computeDifficultyTier, findBlockingItems, isRecipeAvailable } from "./src/plan";
+import { getChainedIngredients, canObtainChain, computeChainNeeds, computeDifficultyTier, findBlockingItems, isRecipeAvailable, filterDisabledRecipes } from "./src/plan";
 import { computeUpgradeTargets, computeTargetsToBuyFromMerchant, findGearToEquip } from "./src/equipment";
 import { findCraftableTarget, findNextCraftTarget, findCraftableFromList, computeCraftIngredientsToBuyFromMerchant, collectVisibleStations, getAvailableStationTypes, findStationForType } from "./src/craft";
 import { getHarvestableTarget, getMissingHarvestToolIds, collectHarvestToolItemIds, collectHarvestCraftingChainToolIds, collectCraftableInputIngredients } from "./src/harvest";
@@ -1174,9 +1174,12 @@ disconnectFromGame = connect({
     const playerCoins = (player.inventory as Record<string, number>)['copperCoin'] ?? 0;
 
     // heartbeat.recipes is typed as Recipe[] but the server sends a Record keyed by id at runtime.
-    const recipesArray: RecipeList = Array.isArray(heartbeat.recipes)
-      ? heartbeat.recipes
-      : Object.values(heartbeat.recipes as any);
+    // filterDisabledRecipes is a preprocessing pass — every planning function
+    // below consumes recipesArray, so applying it once here means nothing
+    // downstream ever sees the disabled recipes at all (see src/plan.ts).
+    const recipesArray: RecipeList = filterDisabledRecipes(
+      Array.isArray(heartbeat.recipes) ? heartbeat.recipes : Object.values(heartbeat.recipes as any),
+    );
 
     // Determine next upgrade target per slot from all items we know how to acquire.
     // This drives sell-protection, buy plans, and craft decisions.
