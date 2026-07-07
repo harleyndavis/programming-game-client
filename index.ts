@@ -46,7 +46,6 @@ const HUNT_THREAT_RADIUS = 20;
 // below) but a distinct, independent constant — one sizes a memory grid, the
 // other gates real-time hunting-threat proximity; they shouldn't move
 // together just because they happen to match today.
-const FLEE_DROP_RADIUS = 12; // drop heaviest item to outrun a monster within this distance
 const HOME_CHORES_CLEAR_RADIUS = 2; // must be this close to home before declaring chores done
 // If we've closed to within this distance of a remembered quest NPC position and
 // still can't see/act on them, give up rather than sitting on the spot forever —
@@ -422,11 +421,14 @@ const decide = (opts: {
   if (cheapestFood !== null && calorieDeficit >= cheapestFood.calories) {
     return { type: "eat", item: cheapestFood.item };
   }
-  // Overweight: drop to flee if a threat is very close, otherwise head home to sell.
+  // Overweight: the default response is always to head home and sell off the
+  // excess. Dropping is a last resort to regain movement speed while actually
+  // fleeing — only when something is actively attacking us, not just
+  // nearby. A monster merely being close by isn't a flee scenario on its
+  // own; that was dumping real gear (e.g. a displaced weapon) for no reason
+  // whenever an unrelated monster happened to wander within range.
   if (isEncumbered) {
-    const closeMonster = nearbyMonster !== undefined && nearbyMonster.distance < FLEE_DROP_RADIUS;
-    const closeThreat = nearbyThreat !== undefined;
-    if ((closeMonster || closeThreat) && heaviestInventoryItem) {
+    if (attackingMonster && heaviestInventoryItem) {
       return { type: "drop", ...heaviestInventoryItem };
     }
     if (sellOpportunity) return { type: "sell", items: sellOpportunity.items, merchant: sellOpportunity.merchant };
@@ -1473,11 +1475,15 @@ disconnectFromGame = connect({
       ] : []),
     ]);
 
+    // Shared "don't give this up" set — chain-protected items (equipped gear,
+    // ingredients, harvest tool chain) plus quest turn-in items. Used both for
+    // selling and for the emergency drop below (findHeaviestInventoryItem).
+    const protectedItems = new Set(Object.keys(chainKeepNeeds).concat(Array.from(questTurnInItems)));
     const toSell = computeItemsToSell({
       inventory: player.inventory ?? {},
       items: heartbeat.items as unknown as ItemMap,
       quests: (player.quests ?? {}) as QuestMap,
-      keepItems: new Set(Object.keys(chainKeepNeeds).concat(Array.from(questTurnInItems))),
+      keepItems: protectedItems,
       keepQuantities: pocketKeepQuantities,
       maxCalories,
     });
@@ -1513,7 +1519,7 @@ disconnectFromGame = connect({
       if (depositQty > 0) toDeposit[itemId] = depositQty;
     }
     const heaviestInventoryItem = isEncumbered
-      ? findHeaviestInventoryItem(player.inventory ?? {}, heartbeat.items)
+      ? findHeaviestInventoryItem(player.inventory ?? {}, heartbeat.items, protectedItems)
       : null;
 
     // Compute storage fee buffer for withdrawal calculations.

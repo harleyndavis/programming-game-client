@@ -66,6 +66,24 @@ describe('findHeaviestInventoryItem', () => {
     const result = findHeaviestInventoryItem({ copperCoin: 0, copperSword: 1 }, items);
     expect(result).toEqual({ item: 'copperSword', amount: 1 });
   });
+
+  it('excludes a protected item even when it is the heaviest', () => {
+    const result = findHeaviestInventoryItem(
+      { copperCoin: 10, copperSword: 1, ratMeat: 10 },
+      items,
+      new Set(['copperSword']),
+    );
+    expect(result).toEqual({ item: 'ratMeat', amount: 10 });
+  });
+
+  it('returns null when every item is protected', () => {
+    const result = findHeaviestInventoryItem(
+      { copperSword: 1 },
+      items,
+      new Set(['copperSword']),
+    );
+    expect(result).toBeNull();
+  });
 });
 
 describe('findCheapestFood', () => {
