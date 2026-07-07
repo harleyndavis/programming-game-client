@@ -17,6 +17,8 @@ import {
     getCombatHistory,
     getLootRates,
     getKnownQuestsForNpc,
+    getExploredCells,
+    ASSUMED_SIGHT_RANGE,
 } from "./src/memory";
 
 export type Position = {
@@ -241,6 +243,16 @@ export const createDashboard = (port: number, memoryDb: Database.Database) => {
             },
         }).outputText;
     };
+    const loadMapHtml = () => readFileSync(join(__dirname, "map.html"), "utf-8");
+    const loadMapClientJs = () => {
+        const mapClientTs = readFileSync(join(__dirname, "map-client.ts"), "utf-8");
+        return transpileModule(mapClientTs, {
+            compilerOptions: {
+                target: ScriptTarget.ES2020,
+                module: ModuleKind.None,
+            },
+        }).outputText;
+    };
 
     const writeJson = (res: ServerResponse, body: unknown) => {
         res.statusCode = 200;
@@ -365,6 +377,55 @@ export const createDashboard = (port: number, memoryDb: Database.Database) => {
                         writeJson(res, buildMemorySnapshot(memoryDb));
                     } catch (err) {
                         writeError(res, 500, `failed to read memory store: ${String(err)}`);
+                    }
+                    return;
+                }
+
+                if (url === "/map") {
+                    try {
+                        res.statusCode = 200;
+                        res.setHeader("Content-Type", "text/html; charset=utf-8");
+                        res.setHeader("Cache-Control", "no-store");
+                        res.end(loadMapHtml());
+                    } catch (err) {
+                        writeError(res, 500, `failed to load map html: ${String(err)}`);
+                    }
+                    return;
+                }
+
+                if (url === "/map-client.js") {
+                    try {
+                        res.statusCode = 200;
+                        res.setHeader("Content-Type", "application/javascript; charset=utf-8");
+                        res.setHeader("Cache-Control", "no-store");
+                        res.end(loadMapClientJs());
+                    } catch (err) {
+                        writeError(res, 500, `failed to load map client js: ${String(err)}`);
+                    }
+                    return;
+                }
+
+                if (url === "/map/data") {
+                    try {
+                        const exploredCells = getExploredCells(memoryDb).map((c) => ({ cellX: c.cellX, cellY: c.cellY }));
+                        const heatMap = getHeatMapSightings(memoryDb).map((h) => ({
+                            cellX: Math.floor(h.position.x / ASSUMED_SIGHT_RANGE),
+                            cellY: Math.floor(h.position.y / ASSUMED_SIGHT_RANGE),
+                            entityType: h.entityType,
+                            entityName: h.entityName,
+                            observationCount: h.observationCount,
+                        }));
+                        const raw = latestSnapshot.raw as Record<string, unknown> | undefined;
+                        const player = raw?.player as Record<string, unknown> | undefined;
+                        const pos = player?.position as { x?: number; y?: number } | undefined;
+                        const botPosition =
+                            pos && typeof pos.x === "number" && typeof pos.y === "number"
+                                ? { x: pos.x, y: pos.y }
+                                : null;
+                        const generatedAt = latestSnapshot.receivedAt;
+                        writeJson(res, { generatedAt, exploredCells, heatMap, botPosition });
+                    } catch (err) {
+                        writeError(res, 500, `failed to read map data: ${String(err)}`);
                     }
                     return;
                 }

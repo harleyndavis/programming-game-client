@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Programming Game Map</title>
+  <link rel="stylesheet" href="/dashboard.css" />
+  <style>
+    .map-toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+    .map-toolbar .nav-link { margin-right: auto; }
+    canvas { display: block; margin: 0 auto; border: 1px solid #374151; border-radius: 8px; background: #0b1220; max-width: 100%; }
+    .map-legend { display: flex; justify-content: center; gap: 16px; margin-top: 12px; flex-wrap: wrap; font-size: 12px; }
+    .legend-item { display: flex; align-items: center; gap: 4px; }
+    .legend-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+    .legend-diamond { width: 10px; height: 10px; transform: rotate(45deg); display: inline-block; flex-shrink: 0; }
+    .legend-square { width: 10px; height: 10px; border-radius: 2px; display: inline-block; flex-shrink: 0; }
+    .legend-icon-sm { width: 14px; height: 14px; display: inline-block; flex-shrink: 0; background-size: contain; background-repeat: no-repeat; background-position: center; }
+    .legend-label { color: var(--muted); }
+
+    /* Tooltip */
+    .map-tooltip {
+      position: fixed;
+      display: none;
+      z-index: 100;
+      background: #1f2937;
+      border: 1px solid #4b5563;
+      border-radius: 6px;
+      padding: 8px 12px;
+      font-size: 12px;
+      color: #e5e7eb;
+      pointer-events: none;
+      white-space: nowrap;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+      line-height: 1.6;
+    }
+    .map-tooltip .tooltip-group-label {
+      font-weight: 600;
+      color: #d1d5db;
+      margin-top: 4px;
+    }
+    .map-tooltip .tooltip-group-label:first-child { margin-top: 0; }
+    .map-tooltip .tooltip-entity { padding-left: 8px; }
+    .map-tooltip .tooltip-count { color: #9ca3af; }
+  </style>
+</head>
+
+<body>
+  <div class="wrap">
+    <header class="memory-header">
+      <a href="/" class="nav-link">&larr; Dashboard</a>
+      <h1>Map</h1>
+      <a href="/memory" target="_blank" rel="noopener" class="nav-link">Memory &rarr;</a>
+      <span id="mapUpdatedAt" class="control-note">Loading...</span>
+      <span id="mapAutoRefreshNote" class="control-note">Live</span>
+      <button id="mapRefreshBtn" type="button">Refresh</button>
+    </header>
+    <p class="sub">Explored cells and entity sightings from persistent memory. Hover a cell for details.</p>
+    <canvas id="mapCanvas"></canvas>
+    <div id="mapTooltip" class="map-tooltip"></div>
+    <div class="map-legend" id="mapLegend"></div>
+  </div>
+  <script src="/map-client.js"></script>
+</body>
+
+</html>
