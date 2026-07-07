@@ -7,6 +7,7 @@ import {
   collectHarvestCraftingChainToolIds,
   collectCraftableInputIngredients,
   findHarvestToolToEquip,
+  findHarvestToolToWithdraw,
   TREE_TYPE_LOG_ITEM,
   ORE_TYPE_ITEM,
   KNOWN_HARVESTABLE_ITEMS,
@@ -409,5 +410,53 @@ describe('findHarvestToolToEquip', () => {
   it('does not switch away from a combat weapon when nothing is needed', () => {
     const equipment = { weapon: 'copperSword' };
     expect(findHarvestToolToEquip(new Set(), { stonePickaxe: 1 }, equipment, items)).toBeNull();
+  });
+});
+
+describe('findHarvestToolToWithdraw', () => {
+  const items = {
+    stoneFellingAxe: { type: 'fellingAxe' },
+    copperFellingAxe: { type: 'fellingAxe' },
+    stonePickaxe: { type: 'pickaxe' },
+    copperPickaxe: { type: 'pickaxe' },
+    copperSword: { type: 'oneHandedSword' },
+  };
+
+  it('returns null when nothing is needed', () => {
+    expect(findHarvestToolToWithdraw(new Set(), { stonePickaxe: 1 }, {}, {}, items)).toBeNull();
+  });
+
+  it('returns the pickaxe sitting in storage when ore is needed and none is owned in pocket', () => {
+    const result = findHarvestToolToWithdraw(new Set(['copperOre']), { stonePickaxe: 1 }, {}, {}, items);
+    expect(result).toEqual({ item: 'stonePickaxe' });
+  });
+
+  it('returns null when a matching tool is already owned in pocket (equip handles it, not withdraw)', () => {
+    const result = findHarvestToolToWithdraw(
+      new Set(['copperOre']), { stonePickaxe: 1 }, { stonePickaxe: 1 }, {}, items,
+    );
+    expect(result).toBeNull();
+  });
+
+  it('returns null when the equipped weapon already matches the need', () => {
+    const equipment = { weapon: 'stonePickaxe' };
+    const result = findHarvestToolToWithdraw(new Set(['copperOre']), { stonePickaxe: 1 }, {}, equipment, items);
+    expect(result).toBeNull();
+  });
+
+  it('returns null when nothing matching is owned anywhere', () => {
+    expect(findHarvestToolToWithdraw(new Set(['copperOre']), {}, {}, {}, items)).toBeNull();
+  });
+
+  it('prefers the higher-tier tool in storage', () => {
+    const result = findHarvestToolToWithdraw(
+      new Set(['pinewoodLog']), { stoneFellingAxe: 1, copperFellingAxe: 1 }, {}, {}, items,
+    );
+    expect(result).toEqual({ item: 'copperFellingAxe' });
+  });
+
+  it('does not fire for a combat weapon when nothing is needed', () => {
+    const equipment = { weapon: 'copperSword' };
+    expect(findHarvestToolToWithdraw(new Set(), { stonePickaxe: 1 }, {}, equipment, items)).toBeNull();
   });
 });

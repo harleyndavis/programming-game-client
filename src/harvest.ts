@@ -129,27 +129,21 @@ const HARVEST_ITEM_TOOL_TYPE: Record<string, string> = (() => {
 })();
 
 /**
- * The harvest tool to switch into the weapon slot, if the currently equipped
- * weapon doesn't already match what `neededItems` requires (see
- * neededHarvestItems in index.ts) and a suitable one is owned. Prefers the
- * highest-tier owned tool of the needed type (HARVEST_TOOL_TIER_ORDER).
+ * Which harvest tool type (if any) `neededItems` calls for that the currently
+ * equipped weapon doesn't already satisfy. Shared by findHarvestToolToEquip
+ * (owned in pocket) and findHarvestToolToWithdraw (owned in storage) so both
+ * pick the same tool type via the same tie-break rule.
  *
  * When items of both tool types are needed at once (e.g. a log and an ore
  * are both short), picks whichever type appears first in `neededItems` — an
  * arbitrary but deterministic tie-break, since only one tool fits the weapon
  * slot; the other need just waits its turn.
- *
- * Returns null when nothing needs a tool switch (nothing needed, the
- * equipped weapon already matches, or no matching tool is owned — in which
- * case the shopping/crafting paths for that tool are the ones responsible
- * for getting one, not this function).
  */
-export function findHarvestToolToEquip(
+function pickNeededToolType(
   neededItems: ReadonlySet<string>,
-  inventory: Partial<Record<string, number>>,
   equipment: Record<string, string | null | undefined>,
   items: Record<string, { type?: string }>,
-): { item: string; slot: string } | null {
+): string | null {
   const equippedType = equipment.weapon ? items[equipment.weapon]?.type : undefined;
   const neededToolTypes = new Set<string>();
   for (const itemId of Array.from(neededItems)) {
@@ -157,18 +151,74 @@ export function findHarvestToolToEquip(
     if (toolType) neededToolTypes.add(toolType);
   }
   if (neededToolTypes.size === 0 || (equippedType && neededToolTypes.has(equippedType))) return null;
+  return Array.from(neededToolTypes)[0];
+}
 
-  const toolType = Array.from(neededToolTypes)[0];
+/** Highest-tier item of `toolType` with qty > 0 in `source` (HARVEST_TOOL_TIER_ORDER). */
+function bestOwnedTool(
+  toolType: string,
+  source: Partial<Record<string, number>>,
+  items: Record<string, { type?: string }>,
+): string | null {
   let best: string | null = null;
   let bestTier = -1;
-  for (const [itemId, qty] of Object.entries(inventory)) {
+  for (const [itemId, qty] of Object.entries(source)) {
     if (typeof qty !== 'number' || qty <= 0) continue;
     if (items[itemId]?.type !== toolType) continue;
     const tier = HARVEST_TOOL_TIER_ORDER[itemId] ?? 0;
     if (tier > bestTier) { best = itemId; bestTier = tier; }
   }
+  return best;
+}
+
+/**
+ * The harvest tool to switch into the weapon slot, if the currently equipped
+ * weapon doesn't already match what `neededItems` requires (see
+ * neededHarvestItems in index.ts) and a suitable one is owned in pocket.
+ * Prefers the highest-tier owned tool of the needed type.
+ *
+ * Returns null when nothing needs a tool switch (nothing needed, the
+ * equipped weapon already matches, or no matching tool is owned in pocket —
+ * either nothing owned at all, in which case the shopping/crafting paths are
+ * responsible for getting one, or owned only in storage, in which case
+ * findHarvestToolToWithdraw is what surfaces it).
+ */
+export function findHarvestToolToEquip(
+  neededItems: ReadonlySet<string>,
+  inventory: Partial<Record<string, number>>,
+  equipment: Record<string, string | null | undefined>,
+  items: Record<string, { type?: string }>,
+): { item: string; slot: string } | null {
+  const toolType = pickNeededToolType(neededItems, equipment, items);
+  if (!toolType) return null;
+  const best = bestOwnedTool(toolType, inventory, items);
   if (!best || equipment.weapon === best) return null;
   return { item: best, slot: 'weapon' };
+}
+
+/**
+ * The harvest tool to withdraw from storage, when `neededItems` calls for a
+ * tool type not already equipped, none is owned in pocket, but one is sitting
+ * in storage — e.g. previously crafted/bought then auto-deposited home. Without
+ * this, findHarvestToolToEquip has nothing to work with (it only ever looks at
+ * pocket inventory) and the tool sits in storage forever while the bot never
+ * carries it and never harvests the resource it's needed for.
+ *
+ * Returns null once anything matching is already in pocket — that's
+ * findHarvestToolToEquip's job from that point on.
+ */
+export function findHarvestToolToWithdraw(
+  neededItems: ReadonlySet<string>,
+  storage: Partial<Record<string, number>>,
+  inventory: Partial<Record<string, number>>,
+  equipment: Record<string, string | null | undefined>,
+  items: Record<string, { type?: string }>,
+): { item: string } | null {
+  const toolType = pickNeededToolType(neededItems, equipment, items);
+  if (!toolType) return null;
+  if (bestOwnedTool(toolType, inventory, items)) return null;
+  const best = bestOwnedTool(toolType, storage, items);
+  return best ? { item: best } : null;
 }
 
 /**
