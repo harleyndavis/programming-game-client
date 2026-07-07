@@ -62,6 +62,27 @@ describe('findCraftableTarget', () => {
     ];
     expect(findCraftableTarget(targets, {}, [])).toBeNull();
   });
+
+  it('does not report a station-gated target as craftable when no matching station is nearby, even with ingredients in hand', () => {
+    const targets: UpgradeTarget[] = [
+      {
+        itemId: 'ironSword', slot: 'weapon', tier: 4, gain: 5, reachable: true,
+        recipe: { id: 'r1', input: { ironIngot: 3 }, required: [], station: 'smithing' },
+      },
+    ];
+    expect(findCraftableTarget(targets, { ironIngot: 3 }, [])).toBeNull();
+  });
+
+  it('reports a station-gated target as craftable once a matching station is nearby', () => {
+    const targets: UpgradeTarget[] = [
+      {
+        itemId: 'ironSword', slot: 'weapon', tier: 4, gain: 5, reachable: true,
+        recipe: { id: 'r1', input: { ironIngot: 3 }, required: [], station: 'smithing' },
+      },
+    ];
+    const result = findCraftableTarget(targets, { ironIngot: 3 }, [], new Set(['smithing']));
+    expect(result?.itemId).toBe('ironSword');
+  });
 });
 
 describe('findNextCraftTarget', () => {
@@ -114,14 +135,13 @@ describe('findCraftableSubStep', () => {
     expect(result).toBeNull();
   });
 
-  it('returns the sub-recipe once its station is available', () => {
+  it('returns the sub-recipe once its station type is available', () => {
     const recipes: RecipeList = [
       { id: 'r2', input: { copperOre: 2 }, output: { copperIngot: 1 }, required: [], station: 'furnace' },
     ];
     const recipe = { id: 'r1', input: { copperIngot: 3 }, required: ['hammer'] };
     const result = findCraftableSubStep(recipe, { copperOre: 6, hammer: 1 }, recipes, new Set(), new Set(['furnace']));
-    expect(result).not.toBeNull();
-    expect(result!.recipeId).toBe('r2');
+    expect(result?.recipeId).toBe('r2');
   });
 
   it('returns null when sub-recipe is missing from recipe list', () => {
@@ -182,7 +202,7 @@ describe('findCraftableFromList', () => {
     expect(result).toBeNull();
   });
 
-  it('returns the recipe once its station is available', () => {
+  it('includes a recipe that requires a station once that station type is available', () => {
     const recipes: RecipeList = [
       { id: 'r1', input: { copperIngot: 3, pinewoodAxeHandle: 1, leatherStrips: 2, pinewoodBits: 1 }, output: { copperFellingAxe: 1 }, required: [], station: 'smithing' },
     ];
@@ -192,8 +212,7 @@ describe('findCraftableFromList', () => {
       recipes,
       new Set(['smithing']),
     );
-    expect(result).not.toBeNull();
-    expect(result!.itemId).toBe('copperFellingAxe');
+    expect(result?.itemId).toBe('copperFellingAxe');
   });
 
   it('prioritizes earlier items in the list', () => {
@@ -277,6 +296,21 @@ describe('computeCraftIngredientsToBuyFromMerchant', () => {
     const basket = computeCraftIngredientsToBuyFromMerchant(['stoneFellingAxe'], {}, recipes, {}, 100);
     expect(basket).toEqual({});
   });
+
+  it('ignores a station-gated recipe by default, but shops toward it once that station type is known', () => {
+    const recipes: RecipeList = [
+      { id: 'sword', input: { ironIngot: 2 }, output: { ironSword: 1 }, required: [], station: 'smithing' },
+    ];
+    const withoutKnowledge = computeCraftIngredientsToBuyFromMerchant(
+      ['ironSword'], {}, recipes, { ironIngot: { price: 5, quantity: 10 } }, 100,
+    );
+    expect(withoutKnowledge).toEqual({});
+
+    const withKnowledge = computeCraftIngredientsToBuyFromMerchant(
+      ['ironSword'], {}, recipes, { ironIngot: { price: 5, quantity: 10 } }, 100, new Set(['smithing']),
+    );
+    expect(withKnowledge).toEqual({ ironIngot: 2 });
+  });
 });
 
 describe('isFullyAchievableFromInventory', () => {
@@ -309,6 +343,15 @@ describe('isFullyAchievableFromInventory', () => {
       { id: 'leatherR', input: { ratPelt: 3 }, output: { leather: 1 }, required: [], station: null },
     ];
     expect(isFullyAchievableFromInventory(recipe, {}, recipes)).toBe(false);
+  });
+
+  it('a station-gated sub-recipe only counts as achievable once its station type is nearby', () => {
+    const recipe = { id: 'sword', input: { ironIngot: 1 }, required: [] };
+    const recipes: RecipeList = [
+      { id: 'ingotR', input: { ironOre: 2 }, output: { ironIngot: 1 }, required: [], station: 'smelting' },
+    ];
+    expect(isFullyAchievableFromInventory(recipe, { ironOre: 2 }, recipes)).toBe(false);
+    expect(isFullyAchievableFromInventory(recipe, { ironOre: 2 }, recipes, new Set(), new Set(['smelting']))).toBe(true);
   });
 });
 

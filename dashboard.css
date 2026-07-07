@@ -92,6 +92,69 @@ h1 {
   padding: 12px;
 }
 
+/* ── Memory page ─────────────────────────────────────────────── */
+
+.nav-link {
+  color: var(--accent);
+  text-decoration: none;
+  font-size: 14px;
+}
+
+.nav-link:hover {
+  text-decoration: underline;
+}
+
+.memory-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.memory-header h1 {
+  margin: 0;
+  flex: 1;
+}
+
+.memory-tab-bar {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+
+.empty-note {
+  color: var(--muted);
+}
+
+.memory-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.memory-table th {
+  text-align: left;
+  padding: 6px 10px;
+  cursor: pointer;
+  user-select: none;
+  border-bottom: 1px solid #374151;
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+  white-space: nowrap;
+}
+
+.memory-table th.sorted {
+  color: var(--accent);
+}
+
+.memory-table td {
+  padding: 6px 10px;
+  border-bottom: 1px solid rgba(55, 65, 81, 0.5);
+}
+
+.memory-table tbody tr:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
 /* ── Tab bar (shared, world tabs override columns) ───────────── */
 
 .tab-bar {

@@ -156,8 +156,8 @@ describe('getStorageFeeInfo', () => {
     expect(info.availableWithdrawal).toBe(0);
   });
 
-  it('caps the buffer at half the coins so a heavy hoard cannot lock everything', () => {
-    // 200,000 weight of pelts → feePerCharge 500+ → raw buffer ≫ 9,000 coins
+  it('does not cap the buffer — a heavy enough hoard can still drive availableWithdrawal to zero', () => {
+    // 200,000 weight of pelts → feePerCharge 500+ → uncapped buffer ≫ 9,000 coins
     const info = getStorageFeeInfo({ copperCoin: 9000, ratPelt: 400000 }, items, 100);
     expect(info.minCoins).toBe(52300);
     expect(info.availableWithdrawal).toBe(0);

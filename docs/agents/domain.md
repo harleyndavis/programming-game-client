@@ -31,6 +31,7 @@ If any of these files don't exist, **proceed silently**. Don't flag their absenc
 │   ├── equipment.ts     ← gear upgrade planning
 │   ├── craft.ts         ← crafting target selection
 │   ├── trade.ts         ← merchant/banker helpers
+│   ├── memory.ts        ← SQLite-backed persistent world knowledge (dumb store)
 │   └── __tests__/       ← unit tests (Vitest)
 └── node_modules/programming-game/   ← READ-ONLY game client SDK
     └── src/
@@ -44,8 +45,9 @@ If any of these files don't exist, **proceed silently**. Don't flag their absenc
 
 **Planned expansion** — as the bot grows, modules will be extracted into `src/`. Likely candidates discussed so far:
 
-- `src/memory/` — SQLite-backed persistent world knowledge (safe locations, heat map, combat history, drop tables, merchant knowledge)
 - `src/decisions/` — utility scoring engine, action candidates, hysteresis/commitment logic
+
+`src/memory.ts` (SQLite-backed persistent world knowledge — safe locations, heat map, combat history, drop tables, merchant knowledge, quests) landed as a single file per issue #6; promote to `src/memory/` if it outgrows one file.
 
 When a `src/` folder exists, treat it as the primary location for bot logic alongside `index.ts`. Update this file map when modules are actually extracted.
 

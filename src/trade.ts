@@ -81,7 +81,10 @@ export const getStorageFeeInfo = (
     }, 0);
   const storageWeight = storageItemsWeight + storageCoins;
   const feePerCharge = Math.ceil(storageWeight * 0.0025);
-  // Capped at half the coins on hand so a heavy hoard can't lock every coin.
+  // Uncapped: scales purely with storage weight. A prior half-coins cap was
+  // removed — it masked bankruptcy risk from hoarding rather than preventing
+  // it; hoarding itself is bounded elsewhere via chainKeepNeeds-driven surplus
+  // selling, not by artificially capping this buffer.
   const minCoins = feePerCharge * feeBuffer;
   const availableWithdrawal = Math.max(0, storageCoins - minCoins);
   return { storageWeight, feePerCharge, minCoins, availableWithdrawal };

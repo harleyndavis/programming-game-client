@@ -70,8 +70,12 @@ describe('canObtainChain', () => {
     expect(canObtainChain('copperSword', inventory, {}, recipes)).toBe(true);
   });
 
-  it('treats a station-gated recipe as obtainable (station availability is a real-time tier concern, not a chain-reachability one)', () => {
-    expect(canObtainChain('magicSword', { goldIngot: 3 }, {}, recipes)).toBe(true);
+  it('treats a station-gated recipe as unobtainable when the station type has never been seen', () => {
+    expect(canObtainChain('magicSword', { goldIngot: 3 }, {}, recipes)).toBe(false);
+  });
+
+  it('treats a station-gated recipe as obtainable once that station type is known, regardless of current visibility', () => {
+    expect(canObtainChain('magicSword', { goldIngot: 3 }, {}, recipes, undefined, 1, new Set(['anvil']))).toBe(true);
   });
 
   it('returns false when inventory has some of an ingredient but not enough (owning 1 coin does not satisfy a 1000-coin recipe)', () => {
@@ -82,12 +86,20 @@ describe('canObtainChain', () => {
     expect(canObtainChain('copperIngot', { copperCoin: 1 }, {}, meltRecipes)).toBe(false);
   });
 
-  it('returns true once inventory has enough of the ingredient for the full chain', () => {
+  it('returns true once inventory has enough of the ingredient for the full chain, given the station type is known', () => {
     const meltRecipes: RecipeList = [
       makeRecipe({ id: 'chunk', output: { chunkOfCopper: 1 }, input: { copperCoin: 1000 }, station: 'smelting' }),
       makeRecipe({ id: 'ingot', output: { copperIngot: 1 }, input: { chunkOfCopper: 3 }, station: 'smelting' }),
     ];
-    expect(canObtainChain('copperIngot', { copperCoin: 3000 }, {}, meltRecipes)).toBe(true);
+    expect(canObtainChain('copperIngot', { copperCoin: 3000 }, {}, meltRecipes, undefined, 1, new Set(['smelting']))).toBe(true);
+  });
+
+  it('returns false for a full-chain-satisfied recipe when its station type is not known', () => {
+    const meltRecipes: RecipeList = [
+      makeRecipe({ id: 'chunk', output: { chunkOfCopper: 1 }, input: { copperCoin: 1000 }, station: 'smelting' }),
+      makeRecipe({ id: 'ingot', output: { copperIngot: 1 }, input: { chunkOfCopper: 3 }, station: 'smelting' }),
+    ];
+    expect(canObtainChain('copperIngot', { copperCoin: 3000 }, {}, meltRecipes)).toBe(false);
   });
 
   it('scales ingredient needs by how many crafts are required when neededQty exceeds one craft\'s output', () => {
@@ -109,6 +121,22 @@ describe('canObtainChain', () => {
       makeRecipe({ id: 'r2', output: { b: 1 }, input: { a: 1 }, station: null }),
     ];
     expect(canObtainChain('a', {}, {}, cyclic)).toBe(false);
+  });
+
+  it('returns true when the item is a known loot drop/harvest yield, with no recipe and no merchant', () => {
+    expect(canObtainChain('pinewoodLog', {}, {}, recipes, undefined, 1, new Set(), new Set(['pinewoodLog']))).toBe(true);
+  });
+
+  it('returns true when the item is a known quest reward, with no recipe and no merchant', () => {
+    expect(canObtainChain('rareGem', {}, {}, recipes, undefined, 1, new Set(), new Set(), new Set(['rareGem']))).toBe(true);
+  });
+
+  it('treats a recipe ingredient as obtainable via a known loot source, satisfying the whole chain', () => {
+    const withRawIngredient: RecipeList = [
+      makeRecipe({ id: 'r1', output: { copperSword: 1 }, input: { pinewoodLog: 1 }, station: null }),
+    ];
+    expect(canObtainChain('copperSword', {}, {}, withRawIngredient, undefined, 1, new Set(), new Set(['pinewoodLog']))).toBe(true);
+    expect(canObtainChain('copperSword', {}, {}, withRawIngredient)).toBe(false);
   });
 });
 
@@ -188,6 +216,37 @@ describe('computeDifficultyTier', () => {
     expect(tier).toBe(2);
   });
 
+  it('returns tier 5 (not 4) when a chain ingredient requires a station type that has never been seen', () => {
+    const stationRecipes: RecipeList = [
+      makeRecipe({ id: 'ingot', output: { ironIngot: 1 }, input: { ironOre: 2 }, station: 'smelting' }),
+    ];
+    const tier = computeDifficultyTier({
+      itemId: 'ironSword',
+      recipe: { id: 'r1', input: { ironIngot: 3 }, required: [] },
+      allMerchantSelling: {},
+      inventory: { ironOre: 6 },
+      playerCoins: 0,
+      recipes: stationRecipes,
+    });
+    expect(tier).toBe(5);
+  });
+
+  it('returns tier 4 for the same chain once the required station type is known', () => {
+    const stationRecipes: RecipeList = [
+      makeRecipe({ id: 'ingot', output: { ironIngot: 1 }, input: { ironOre: 2 }, station: 'smelting' }),
+    ];
+    const tier = computeDifficultyTier({
+      itemId: 'ironSword',
+      recipe: { id: 'r1', input: { ironIngot: 3 }, required: [] },
+      allMerchantSelling: {},
+      inventory: { ironOre: 6 },
+      playerCoins: 0,
+      recipes: stationRecipes,
+      knownStationTypes: new Set(['smelting']),
+    });
+    expect(tier).toBe(4);
+  });
+
   it('returns tier 5 (not 4) when a chain ingredient is short on quantity, even though some is on hand', () => {
     const meltRecipes: RecipeList = [
       makeRecipe({ id: 'chunk', output: { chunkOfCopper: 1 }, input: { copperCoin: 1000 } }),
@@ -204,6 +263,61 @@ describe('computeDifficultyTier', () => {
     });
     expect(tier).toBe(5);
   });
+
+  it('returns tier 5 (not 4) when the chain can produce only 1 unit of an ingredient but the recipe needs more', () => {
+    const stationRecipes: RecipeList = [
+      makeRecipe({ id: 'ingot', output: { ironIngot: 1 }, input: { ironOre: 2 } }),
+    ];
+    const tier = computeDifficultyTier({
+      itemId: 'ironSword',
+      recipe: { id: 'r1', input: { ironIngot: 3 }, required: [] },
+      allMerchantSelling: {},
+      // Enough ironOre for exactly 1 ironIngot, not the 3 the recipe needs.
+      inventory: { ironOre: 2 },
+      playerCoins: 0,
+      recipes: stationRecipes,
+    });
+    expect(tier).toBe(5);
+  });
+
+  it('returns tier 4 (not 5) for a no-recipe item that is a known loot drop', () => {
+    const tier = computeDifficultyTier({
+      itemId: 'pinewoodLog',
+      recipe: null,
+      allMerchantSelling: {},
+      inventory: {},
+      playerCoins: 0,
+      recipes,
+      knownLootItems: new Set(['pinewoodLog']),
+    });
+    expect(tier).toBe(4);
+  });
+
+  it('returns tier 4 (not 5) for a no-recipe item that is a known quest reward', () => {
+    const tier = computeDifficultyTier({
+      itemId: 'rareGem',
+      recipe: null,
+      allMerchantSelling: {},
+      inventory: {},
+      playerCoins: 0,
+      recipes,
+      knownQuestRewardItems: new Set(['rareGem']),
+    });
+    expect(tier).toBe(4);
+  });
+
+  it('a known loot/quest-reward source does not override a better tier already reachable via merchant', () => {
+    const tier = computeDifficultyTier({
+      itemId: 'copperSword',
+      recipe: null,
+      allMerchantSelling: { copperSword: { price: 100, quantity: 1 } },
+      inventory: {},
+      playerCoins: 200,
+      recipes,
+      knownLootItems: new Set(['copperSword']),
+    });
+    expect(tier).toBe(1);
+  });
 });
 
 describe('findBlockingItems', () => {
@@ -218,7 +332,7 @@ describe('findBlockingItems', () => {
   it('flags an input with no recipe and no merchant as a dead end', () => {
     const result = findBlockingItems('copperSword', { hammer: 1 }, { stick: { price: 5, quantity: 1 } }, recipes);
     expect(result).toHaveLength(1);
-    expect(result[0]).toEqual({ itemId: 'copperIngot', reason: 'Not in inventory, no recipe, and not sold at any merchant' });
+    expect(result[0]).toEqual({ itemId: 'copperIngot', reason: 'Not in inventory, no recipe, not sold, not a known loot drop, and not a known quest reward' });
   });
 
   it('flags an input with a recipe whose own ingredients are unobtainable', () => {
@@ -237,6 +351,31 @@ describe('findBlockingItems', () => {
       { hammer: 1 },
       { copperIngot: { price: 10, quantity: 1 }, stick: { price: 5, quantity: 1 } },
       recipes,
+    );
+    expect(result).toEqual([]);
+  });
+
+  it('does not flag an input that is a known loot drop, even with no recipe/merchant', () => {
+    const result = findBlockingItems(
+      'copperSword',
+      { hammer: 1 },
+      { stick: { price: 5, quantity: 1 } },
+      recipes,
+      new Set(),
+      new Set(['copperIngot']),
+    );
+    expect(result).toEqual([]);
+  });
+
+  it('does not flag an input that is a known quest reward, even with no recipe/merchant', () => {
+    const result = findBlockingItems(
+      'copperSword',
+      { hammer: 1 },
+      { stick: { price: 5, quantity: 1 } },
+      recipes,
+      new Set(),
+      new Set(),
+      new Set(['copperIngot']),
     );
     expect(result).toEqual([]);
   });
@@ -261,6 +400,32 @@ describe('findBlockingItems', () => {
     );
     expect(result).toHaveLength(1);
     expect(result[0].itemId).toBe('hammer');
+  });
+
+  it('flags a station-gated ingredient as blocked when its station type has never been seen', () => {
+    const chained: RecipeList = [
+      ...recipes,
+      makeRecipe({ id: 'r2', output: { copperIngot: 1 }, input: { copperOre: 2 }, station: 'smelting' }),
+    ];
+    const result = findBlockingItems('copperSword', { hammer: 1, copperOre: 6 }, { stick: { price: 5, quantity: 1 } }, chained);
+    expect(result).toHaveLength(1);
+    expect(result[0].itemId).toBe('copperIngot');
+  });
+
+  it('a station-gated ingredient is not flagged as blocked once its station type is known', () => {
+    const chained: RecipeList = [
+      ...recipes,
+      makeRecipe({ id: 'r2', output: { copperIngot: 1 }, input: { copperOre: 2 }, station: 'smelting' }),
+    ];
+    const result = findBlockingItems(
+      // copperSword needs 3 copperIngot; each craft of copperIngot needs 2 copperOre, so 6 total.
+      'copperSword',
+      { hammer: 1, copperOre: 6 },
+      { stick: { price: 5, quantity: 1 } },
+      chained,
+      new Set(['smelting']),
+    );
+    expect(result).toEqual([]);
   });
 });
 

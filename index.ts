@@ -1,25 +1,28 @@
 import { connect } from "programming-game";
 import { config } from "dotenv";
-import { UNIT_TYPE, NPC_TYPE, ClientSideUnit, ClientSideNPC, Tree, MiningNode, ActiveQuest } from "programming-game/types";
+import { UNIT_TYPE, NPC_TYPE, ClientSideUnit, ClientSideNPC, ClientSideMonster, GameObject, Station, Tree, MiningNode, ActiveQuest } from "programming-game/types";
 import { createDashboard } from "./dashboard";
 import { toDashboardSnapshot } from "./snapshot";
 import { UpgradePlanItem, ToolPlanItem, UpgradeRequirement, QuestMap, RecipeList, ItemMap, UpgradeTarget } from "./bot-types";
 import * as logger from "./src/logger";
 import { isFiniteNumber, isFinitePosition, distanceBetween } from "./src/utils";
 import { ENCUMBRANCE_THRESHOLD, getInventoryWeight, findHeaviestInventoryItem, findCheapestFood, computeItemsToSell } from "./src/inventory";
-import { getChainedIngredients, canObtainChain, computeChainNeeds, computeDifficultyTier, findBlockingItems } from "./src/plan";
+import { getChainedIngredients, canObtainChain, computeChainNeeds, computeDifficultyTier, findBlockingItems, isRecipeAvailable } from "./src/plan";
 import { computeUpgradeTargets, computeTargetsToBuyFromMerchant, findGearToEquip } from "./src/equipment";
 import { findCraftableTarget, findNextCraftTarget, findCraftableFromList, computeCraftIngredientsToBuyFromMerchant, collectVisibleStations, getAvailableStationTypes, findStationForType } from "./src/craft";
 import { getHarvestableTarget, getMissingHarvestToolIds, collectHarvestToolItemIds, collectHarvestCraftingChainToolIds, collectCraftableInputIngredients } from "./src/harvest";
 import { findBestSellMerchant } from "./src/trade";
 import { findCompletableQuest, findTurnInNpc, findBestQuestToAccept, findBestAvailableQuest, findQuestGivers, findQuestTurnInRequiredItemIds, findPendingQuestTurnInItems, findStalledQuests, findQuestToAbandon, findQuestToDismiss } from "./src/quests";
+import { openMemoryDb, getEntity, recordResourceSighting, recordMerchantTrades, recordNpcSighting, recordQuestSighting, recordMonsterKill, recordHarvest, recordLoot, recordMonsterSighting, recordCombatHit, recordSafeLocation, recordExploredCell, recordQuestEndNpc, recordQuestCompleted, getKnownStationTypes, getAllKnownSellingOffers, getKnownLootItems, getKnownQuestRewardItems, ASSUMED_SIGHT_RANGE } from "./src/memory";
 
 config({
   path: ".env",
 });
 
 
-const dashboard = createDashboard(Number(process.env.DASHBOARD_PORT ?? "8787"));
+const memoryDb = openMemoryDb(process.env.MEMORY_DB_PATH ?? "memory.db");
+
+const dashboard = createDashboard(Number(process.env.DASHBOARD_PORT ?? "8787"), memoryDb);
 
 
 const clampThresholdPercent = (value: number) => {
@@ -39,6 +42,10 @@ const HUNT_RADIUS_INCREMENT = 30;
 const HUNT_TICKS_PER_PASS = 150;
 const HUNT_PASSES_TO_ESCALATE = 2;
 const HUNT_THREAT_RADIUS = 20;
+// Coincidentally the same value as memory.ts's ASSUMED_SIGHT_RANGE (imported
+// below) but a distinct, independent constant — one sizes a memory grid, the
+// other gates real-time hunting-threat proximity; they shouldn't move
+// together just because they happen to match today.
 const FLEE_DROP_RADIUS = 12; // drop heaviest item to outrun a monster within this distance
 const HOME_CHORES_CLEAR_RADIUS = 2; // must be this close to home before declaring chores done
 // If we've closed to within this distance of a remembered quest NPC position and
@@ -121,10 +128,14 @@ const huntPatrolTo = (playerPos: { x: number; y: number }, radius: number): { x:
 
 // ── Upgrade targeting ──────────────────────────────────────────────────────────
 
-// Returns true if itemId has any known acquisition path reachable without world
-// exploration memory: in inventory, sold by a visible merchant, or craftable
-// (no-station recipe) from ingredients that are themselves obtainable.
-// Only no-station recipes are considered since the bot has no station-visiting logic.
+// Returns true if itemId has any known acquisition path: in inventory, sold
+// by any known merchant (visible now or remembered from memory), or craftable
+// from ingredients that are themselves obtainable — including station-gated
+// recipes once memory has seen a station of the required type anywhere
+// (knownStationTypes), independent of whether the bot is standing at one
+// right now. See src/plan.ts's isRecipeAvailable and the knownStationTypes vs
+// availableStationTypes split (the latter still correctly gates "craftable this
+// instant" on actually being at a matching station).
 // Acquisition difficulty tier for a single candidate item (lower = easier):
 //   1  immediately buyable  — merchant visible and we can afford it
 //   2  immediately craftable — all ingredients + tools already in inventory
@@ -228,6 +239,23 @@ let myUnitId: string | null = null;
 let lastOnTickProcessedMs = 0;
 const ON_TICK_MIN_INTERVAL_MS = 1000;
 
+// Snapshots updated every overworld tick, used only to resolve identity for
+// memory-write event correlation in onEvent (which has no heartbeat access of
+// its own) — e.g. looking up a killed unit's monsterId, or a harvested
+// object's treeType/oreType, before it disappears from the next heartbeat.
+let lastUnits: Record<string, ClientSideUnit> = {};
+let lastGameObjects: Record<string, GameObject> = {};
+
+// The SDK's `loot` event carries no source reference (just who received the
+// items) — there is no correlation id anywhere linking it back to a kill or
+// harvest. So a loot event is attributed to whichever of these is freshest
+// within LOOT_ATTRIBUTION_WINDOW_MS; if both are fresh (ambiguous) or neither
+// is, the loot event is discarded rather than risking a wrong attribution —
+// min/max variance tracking is only trustworthy if attribution is trustworthy.
+let recentKill: { monsterId: string; at: number } | null = null;
+let recentHarvest: { resourceName: string; at: number } | null = null;
+const LOOT_ATTRIBUTION_WINDOW_MS = 2000;
+
 type RawEvent = { ts: string; name: string; data: unknown };
 const EVENT_BUFFER_SIZE = 200;
 const ARENA_EVENT_BUFFER_SIZE = 20;
@@ -325,11 +353,13 @@ const decide = (opts: {
 
   // Shared home chores: runs for recoveringAtHome, idlingAtHome, and
   // finishingHomeChores. Returns a decision if there's a chore to do, or null
-  // when nothing is left. 'recover' mode skips chores until close to home.
-  const homeChores = (mode: 'recover' | 'idle' | 'chores'): Decision | null => {
-    if (mode === 'recover' && distanceBetween(playerPosition, HOME_POSITION) >= HOME_CHORES_CLEAR_RADIUS) {
-      return null;
-    }
+  // when nothing is left. Not gated by distance to home — each branch below
+  // is already gated by the proximity it actually needs (nearbyBanker for
+  // withdraw, a visible NPC for quest turn-in/accept, a visible merchant for
+  // buy/sell), or needs none at all (equip, quest abandon/dismiss). Craft
+  // execution is gated by safety (see recipeToCraft/toolToCraft's own
+  // computation) rather than location.
+  const homeChores = (): Decision | null => {
     if (gearToEquip) return { type: "equip", item: gearToEquip.item, slot: gearToEquip.slot };
     if (activeCraft?.recipe && nearbyBanker) {
       const toWithdraw = computeRecipeWithdraw(activeCraft.recipe, playerInventory, storageRecord);
@@ -365,7 +395,7 @@ const decide = (opts: {
   };
 
   if (recoveringAtHome) {
-    const chore = homeChores('recover');
+    const chore = homeChores();
     if (chore) return chore;
     return { type: "return-home-recover" };
   }
@@ -396,13 +426,13 @@ const decide = (opts: {
     return { type: "attack", targetId: attackingMonster.unit.id, distance: attackingMonster.distance };
 
   if (idlingAtHome) {
-    const chore = homeChores('idle');
+    const chore = homeChores();
     if (chore) return chore;
     return { type: "return-home-idle" };
   }
 
   if (finishingHomeChores) {
-    const chore = homeChores('chores');
+    const chore = homeChores();
     if (chore) return chore;
   }
   // Attack nearby monsters when not busy.
@@ -597,26 +627,94 @@ disconnectFromGame = connect({
         }
       }
 
+      // Record combat history and kills in arena, same as overworld — but skip
+      // loot (arena inventories are ephemeral and don't reflect overworld drops).
+      if (eventName === 'attacked' && myUnitId) {
+        if (evt.attacked === myUnitId) {
+          const attackerUnit = lastUnits[evt.attacker];
+          const attackerMonsterId = attackerUnit?.type === UNIT_TYPE.monster ? (attackerUnit as ClientSideMonster).monsterId : undefined;
+          if (attackerMonsterId) {
+            const monsterHp = typeof attackerUnit?.hp === "number" ? attackerUnit.hp : 0;
+            recordCombatHit(memoryDb, attackerMonsterId, monsterHp, evt.damage ?? 0, Date.now());
+          }
+        }
+        if (evt.attacker === myUnitId && evt.hp <= 0) {
+          const killedUnit = lastUnits[evt.attacked];
+          const monsterId = killedUnit?.type === UNIT_TYPE.monster ? (killedUnit as ClientSideMonster).monsterId : undefined;
+          if (monsterId) {
+            recordMonsterKill(memoryDb, monsterId, Date.now());
+          }
+        }
+      }
+
       pushEvent(arenaEventBuffer, ARENA_EVENT_BUFFER_SIZE, eventName, evt);
     } else if (eventName === 'beganHarvesting' || eventName === 'harvested') {
       pushEvent(harvestEventBuffer, EVENT_BUFFER_SIZE, eventName, evt);
       logger.addExtra(eventName, { objectId: evt.objectId, ...(eventName === 'beganHarvesting' ? { duration: evt.duration, gameTime: evt.gameTime } : {}) });
+      if (eventName === 'harvested' && myUnitId && evt.unitId === myUnitId) {
+        // 'harvested' carries no item data — the yield itself arrives via a
+        // later 'loot' event, attributed by timing (see the 'loot' branch below).
+        const harvested = lastGameObjects[evt.objectId] as (Tree | MiningNode | undefined);
+        const resourceName = harvested?.type === 'tree' ? harvested.treeType : harvested?.type === 'miningNode' ? harvested.oreType : undefined;
+        if (resourceName) {
+          const now = Date.now();
+          recordHarvest(memoryDb, resourceName, now);
+          recentHarvest = { resourceName, at: now };
+        }
+      }
     } else if (eventName === 'takingAction' && evt.action === 'attack' && myUnitId && evt.actionTarget === myUnitId) {
       // Proactive defense: a unit started an attack targeting us.
       lastAttackerId = evt.unitId;
       lastAttackerTicksLeft = LAST_ATTACKER_TICK_TIMEOUT;
       pushEvent(combatEventBuffer, EVENT_BUFFER_SIZE, 'attackStarted', { attacker: evt.unitId });
       logger.addExtra('defensiveTrigger', { attacker: evt.unitId, source: 'takingAction' });
-    } else if (eventName === 'attacked' && myUnitId && evt.attacked === myUnitId) {
-      lastAttackerId = evt.attacker;
-      lastAttackerTicksLeft = LAST_ATTACKER_TICK_TIMEOUT;
-      pushEvent(combatEventBuffer, EVENT_BUFFER_SIZE, eventName, evt);
-      logger.addExtra('attacked', { attacker: evt.attacker, damage: evt.damage, hp: evt.hp });
+    } else if (eventName === 'attacked' && myUnitId) {
+      if (evt.attacked === myUnitId) {
+        lastAttackerId = evt.attacker;
+        lastAttackerTicksLeft = LAST_ATTACKER_TICK_TIMEOUT;
+        pushEvent(combatEventBuffer, EVENT_BUFFER_SIZE, eventName, evt);
+        logger.addExtra('attacked', { attacker: evt.attacker, damage: evt.damage, hp: evt.hp });
+        // A hit we took — resolved from the last known unit snapshot, same as the kill branch below.
+        const attackerUnit = lastUnits[evt.attacker];
+        const attackerMonsterId = attackerUnit?.type === UNIT_TYPE.monster ? (attackerUnit as ClientSideMonster).monsterId : undefined;
+        if (attackerMonsterId) {
+          const monsterHp = typeof attackerUnit?.hp === "number" ? attackerUnit.hp : 0;
+          recordCombatHit(memoryDb, attackerMonsterId, monsterHp, evt.damage ?? 0, Date.now());
+        }
+      }
+      if (evt.attacker === myUnitId && evt.hp <= 0) {
+        // A kill — resolved from the last known unit snapshot before it despawns.
+        const killedUnit = lastUnits[evt.attacked];
+        const monsterId = killedUnit?.type === UNIT_TYPE.monster ? (killedUnit as ClientSideMonster).monsterId : undefined;
+        if (monsterId) {
+          const now = Date.now();
+          recordMonsterKill(memoryDb, monsterId, now);
+          recentKill = { monsterId, at: now };
+        }
+      }
+    } else if (eventName === 'loot' && myUnitId && evt.unitId === myUnitId) {
+      // Neither 'attacked'/'died' nor 'harvested' carries the actual loot — this
+      // is the sole source, and it carries no source reference at all. Attribute
+      // to whichever of a recent kill/harvest is freshest; discard if both are
+      // fresh (ambiguous) or neither is, rather than risk a wrong attribution.
+      const now = Date.now();
+      const killFresh = !!recentKill && now - recentKill.at <= LOOT_ATTRIBUTION_WINDOW_MS;
+      const harvestFresh = !!recentHarvest && now - recentHarvest.at <= LOOT_ATTRIBUTION_WINDOW_MS;
+      if (killFresh && !harvestFresh) {
+        const entity = getEntity(memoryDb, 'monster', recentKill!.monsterId);
+        if (entity) recordLoot(memoryDb, entity.id, evt.items ?? {}, now);
+      } else if (harvestFresh && !killFresh) {
+        const entity = getEntity(memoryDb, 'resource', recentHarvest!.resourceName);
+        if (entity) recordLoot(memoryDb, entity.id, evt.items ?? {}, now);
+      }
+      recentKill = null;
+      recentHarvest = null;
     } else if (eventName === 'acceptedQuest') {
       logger.addExtra('acceptedQuest', { questId: evt.quest?.id, questName: evt.quest?.name });
     } else if (eventName === 'completedQuest') {
       delete questRewards[evt.questId];
       logger.addExtra('completedQuest', { questId: evt.questId, questName: evt.questName });
+      recordQuestCompleted(memoryDb, evt.questId, Date.now());
     } else if (eventName === 'abandonedQuest') {
       delete questRewards[evt.questId];
       logger.addExtra('abandonedQuest', { questId: evt.questId, questName: evt.questName });
@@ -670,6 +768,9 @@ disconnectFromGame = connect({
 
     // ── Arena tick ───────────────────────────────────────────────────────────
     if ('arenaTimeRemaining' in heartbeat) {
+      // Snapshot arena units so onEvent can resolve monsterId from attacker/killed
+      // unit IDs (same pattern as the overworld tick below).
+      lastUnits = heartbeat.units;
       const arenaTimeRemaining = heartbeat.arenaTimeRemaining;
 
       const { player } = heartbeat;
@@ -812,6 +913,11 @@ disconnectFromGame = connect({
       stickyTargetLostTicks = 0;
     }
 
+    // Snapshot units/gameObjects for onEvent's memory-write correlation, since
+    // onEvent has no heartbeat access of its own (see recentKill/recentHarvest above).
+    lastUnits = heartbeat.units;
+    lastGameObjects = heartbeat.gameObjects ?? {};
+
     // Scan for nearby harvestable objects (trees, mining nodes) given equipped weapon.
     const harvestTarget = getHarvestableTarget(
       heartbeat.gameObjects ?? {},
@@ -819,18 +925,40 @@ disconnectFromGame = connect({
       heartbeat.items ?? {},
       playerPosition,
     );
-    const treeObjects = Object.values(heartbeat.gameObjects ?? {}).filter(
-      (obj): obj is Tree => obj.type === 'tree' && isFinitePosition(obj.position),
-    );
-    if (treeObjects.length > 0) {
-      tickExtras.treesFound = treeObjects.map(t => ({ id: t.id, treeType: t.treeType, pos: t.position }));
+    // Single pass over every game object: log it for debugging and record its
+    // sighting into memory. recordResourceSighting already treats trees, mining
+    // nodes, and stations uniformly (it derives entity type/name from the
+    // object itself) — no reason to scan gameObjects three times to give each
+    // type its own special-cased loop.
+    const treesFound: Array<{ id: string; treeType: string; pos: { x: number; y: number } }> = [];
+    const miningNodesFound: Array<{ id: string; oreType: string; pos: { x: number; y: number } }> = [];
+    const stationsFound: Array<{ id: string; stationType: string; stationSubtype: string; pos: { x: number; y: number } }> = [];
+    const gameObjectScanNow = Date.now();
+    for (const obj of Object.values(heartbeat.gameObjects ?? {})) {
+      if (!isFinitePosition(obj.position)) continue;
+      if (obj.type === 'tree') {
+        treesFound.push({ id: obj.id, treeType: obj.treeType, pos: obj.position });
+      } else if (obj.type === 'miningNode') {
+        miningNodesFound.push({ id: obj.id, oreType: obj.oreType, pos: obj.position });
+      } else if (obj.type === 'station') {
+        stationsFound.push({ id: obj.id, stationType: obj.stationType, stationSubtype: obj.stationSubtype, pos: obj.position });
+      }
+      recordResourceSighting(memoryDb, obj, ASSUMED_SIGHT_RANGE, gameObjectScanNow);
     }
-    const miningNodeObjects = Object.values(heartbeat.gameObjects ?? {}).filter(
-      (obj): obj is MiningNode => obj.type === 'miningNode' && isFinitePosition(obj.position),
-    );
-    if (miningNodeObjects.length > 0) {
-      tickExtras.miningNodesFound = miningNodeObjects.map(n => ({ id: n.id, oreType: n.oreType, pos: n.position }));
+    if (treesFound.length > 0) tickExtras.treesFound = treesFound;
+    if (miningNodesFound.length > 0) tickExtras.miningNodesFound = miningNodesFound;
+    if (stationsFound.length > 0) tickExtras.stationsFound = stationsFound;
+
+    // Single pass over every visible monster: record its sighting into memory,
+    // same one-scan-per-role idiom as the game-object and NPC scans.
+    for (const unit of Object.values(heartbeat.units)) {
+      if (unit.type !== UNIT_TYPE.monster || !isFinitePosition(unit.position)) continue;
+      recordMonsterSighting(memoryDb, unit as ClientSideMonster, ASSUMED_SIGHT_RANGE, gameObjectScanNow);
     }
+
+    // Marks the ground the bot has actually stood on as explored.
+    recordExploredCell(memoryDb, playerPosition, ASSUMED_SIGHT_RANGE, gameObjectScanNow);
+    recordSafeLocation(memoryDb, 'home', 'town', HOME_POSITION, gameObjectScanNow);
     const isHarvesting = player.action === 'harvest';
     if (isHarvesting && player.actionStart) {
       tickExtras.isHarvesting = { duration: player.actionDuration, target: player.actionTarget, remaining: (player.actionStart + (player.actionDuration ?? 0)) - (heartbeat.gameTime ?? 0) };
@@ -930,39 +1058,58 @@ disconnectFromGame = connect({
     const inventoryWeight = getInventoryWeight(player.inventory ?? {}, heartbeat.items, player.equipment);
     const isEncumbered = inventoryWeight >= maxCarryWeight * ENCUMBRANCE_THRESHOLD;
 
-    // Collect selling inventories from every visible merchant — used both for
-    // upgrade-target computation (to know what's buyable) and for building
-    // per-merchant buy baskets.
+    // ── NPC scan (single pass) ───────────────────────────────────────────────
+    // One scan over every visible NPC, whatever its role: record its sighting,
+    // additionally record merchant trades if it's a merchant, additionally
+    // record any quests it's offering if it has any. Every other NPC-shaped
+    // list below (merchants, bankers, quest givers) is derived from this one
+    // pass instead of re-scanning heartbeat.units per role.
+    const visibleNpcs: ClientSideNPC[] = [];
     const visibleMerchants: Array<{ unit: ClientSideUnit; selling: Record<string, { price: number; quantity: number } | undefined>; buying: Record<string, { price: number; quantity: number } | undefined> }> = [];
-    const allMerchantSelling: Record<string, { price: number; quantity: number } | undefined> = {};
+    const visibleBankers: ClientSideUnit[] = [];
+    // Seeded from persisted memory so items sold by a merchant that isn't
+    // currently visible don't flicker out of the upgrade plan — live sightings
+    // below override remembered ones; remembered only fills gaps.
+    const allMerchantSelling: Record<string, { price: number; quantity: number } | undefined> = {
+      ...getAllKnownSellingOffers(memoryDb),
+    };
+    const npcScanNow = Date.now();
     for (const unit of Object.values(heartbeat.units)) {
-      if (
-        unit.type !== UNIT_TYPE.npc ||
-        (unit as { npcType?: string }).npcType !== NPC_TYPE.merchant ||
-        !isFinitePosition(unit.position)
-      ) continue;
-      const selling = ((unit as any).trades?.selling ?? {}) as Record<string, { price: number; quantity: number } | undefined>;
-      const buying = ((unit as any).trades?.buying ?? {}) as Record<string, { price: number; quantity: number } | undefined>;
-      if (!lastLoggedMerchants.has(unit.id)) {
-        lastLoggedMerchants.add(unit.id);
-        const seen = (tickExtras.merchantsSeen as Array<{ id: string; sells: string[] }> | undefined) ?? [];
-        seen.push({ id: unit.id, sells: Object.keys(selling) });
-        tickExtras.merchantsSeen = seen;
+      if (unit.type !== UNIT_TYPE.npc || !isFinitePosition(unit.position)) continue;
+      const npc = unit as unknown as ClientSideNPC;
+      visibleNpcs.push(npc);
+      const npcType = (unit as { npcType?: string }).npcType;
+
+      // Every NPC gets exactly one sighting call, regardless of role.
+      recordNpcSighting(memoryDb, npc, ASSUMED_SIGHT_RANGE, npcScanNow);
+
+      if (npcType === NPC_TYPE.merchant) {
+        const selling = ((unit as any).trades?.selling ?? {}) as Record<string, { price: number; quantity: number } | undefined>;
+        const buying = ((unit as any).trades?.buying ?? {}) as Record<string, { price: number; quantity: number } | undefined>;
+        if (!lastLoggedMerchants.has(unit.id)) {
+          lastLoggedMerchants.add(unit.id);
+          const seen = (tickExtras.merchantsSeen as Array<{ id: string; sells: string[] }> | undefined) ?? [];
+          seen.push({ id: unit.id, sells: Object.keys(selling) });
+          tickExtras.merchantsSeen = seen;
+        }
+        visibleMerchants.push({ unit, selling, buying });
+        Object.assign(allMerchantSelling, selling);
+        for (const [itemId, offer] of Object.entries(selling)) {
+          if (offer) rememberedMerchantSelling[itemId] = offer;
+        }
+        recordMerchantTrades(memoryDb, npc, npcScanNow);
+      } else if (npcType === NPC_TYPE.banker) {
+        visibleBankers.push(unit);
+        if (isFinitePosition(unit.position)) recordSafeLocation(memoryDb, npc.name, 'banker', unit.position, npcScanNow);
       }
-      visibleMerchants.push({ unit, selling, buying });
-      Object.assign(allMerchantSelling, selling);
-      for (const [itemId, offer] of Object.entries(selling)) {
-        if (offer) rememberedMerchantSelling[itemId] = offer;
+
+      // Every NPC's quest offers are recorded the same way, regardless of role.
+      if (npc.availableQuests) {
+        for (const quest of Object.values(npc.availableQuests)) {
+          recordQuestSighting(memoryDb, npc.name, quest, npcScanNow);
+        }
       }
     }
-
-    // ── Banker detection ──────────────────────────────────────────────────────
-    const visibleBankers = Object.values(heartbeat.units).filter(
-      (unit) =>
-        unit.type === UNIT_TYPE.npc &&
-        (unit as { npcType?: string }).npcType === NPC_TYPE.banker &&
-        isFinitePosition(unit.position),
-    ) as ClientSideUnit[];
     if (visibleBankers.length > 0) {
       tickExtras.bankersFound = visibleBankers.map(u => ({ id: u.id, pos: u.position }));
     }
@@ -1056,13 +1203,31 @@ disconnectFromGame = connect({
       }
     }
 
+    // Station knowledge for stabilizing upgrade-plan reachability across location:
+    // knownStationTypes (persisted memory) governs "obtainable in principle" so
+    // the plan doesn't flicker with visibility; availableStationTypes (this tick's
+    // visible stations, from collectVisibleStations/getAvailableStationTypes above)
+    // still correctly gates "craftable right now" — see src/plan.ts's
+    // isRecipeAvailable and the knownStationTypes/availableStationTypes split
+    // documented there.
+    const knownStationTypes = new Set(getKnownStationTypes(memoryDb));
+    // Same "known persisted, stable regardless of visibility" role as
+    // knownStationTypes, extended to the other two acquisition paths
+    // canObtainChain/computeDifficultyTier didn't previously recognize at
+    // all: a known loot/harvest source, or a known quest reward.
+    const knownLootItems = new Set(getKnownLootItems(memoryDb));
+    const knownQuestRewardItems = new Set(getKnownQuestRewardItems(memoryDb));
+
     const upgradeTargets = computeUpgradeTargets({
       equipment: (player.equipment ?? {}) as Record<string, string | null | undefined>,
       inventory: combinedInventory,
       items: heartbeat.items as unknown as ItemMap,
       recipes: recipesArray,
       allMerchantSelling,
+      knownLootItems,
+      knownQuestRewardItems,
       playerCoins,
+      knownStationTypes,
       availableStationTypes,
     });
     // Update lastEquipment each tick but never clear on death: this keeps
@@ -1095,8 +1260,10 @@ disconnectFromGame = connect({
     const atHome = recoveringAtHome || idlingAtHome || finishingHomeChores;
 
     // The upgrade target we'd craft next from combined (storage + pocket) inventory.
-    // Drives deposit exclusion and the withdraw-for-craft override below.
-    const activeCraft = atHome ? findCraftableTarget(upgradeTargets, combinedInventory, recipesArray, availableStationTypes) : null;
+    // Drives deposit exclusion and the withdraw-for-craft override below — not
+    // location-gated, since withdrawing just needs a nearby banker (checked
+    // downstream in homeChores), not being at home.
+    const activeCraft = findCraftableTarget(upgradeTargets, combinedInventory, recipesArray, availableStationTypes);
     // Display-only — no inventory or withdraw impact (risk of death loss).
     const nextCraftTarget = activeCraft ?? findNextCraftTarget(upgradeTargets);
 
@@ -1109,15 +1276,13 @@ disconnectFromGame = connect({
     // (e.g. stoneCarvingKnife, stoneCutterTools). These are prerequisites that
     // must be owned before harvest tools can be crafted.
     const harvestChainToolIds = missingHarvestTools.length > 0
-      ? collectHarvestCraftingChainToolIds(missingHarvestTools, recipesArray)
+      ? collectHarvestCraftingChainToolIds(missingHarvestTools, recipesArray, knownStationTypes)
       : [];
-    // Missing chain tools that have a craftable recipe (station-gated ones are
-    // still tried — findCraftableFromList gates the actual craft on station
-    // visibility) — prepended to the craft target list so they're tried before
-    // the harvest tools themselves.
+    // Missing chain tools that have a craftable recipe (known station type, if any) — prepended
+    // to the craft target list so they're tried before the harvest tools themselves.
     const missingCraftableChainTools = harvestChainToolIds.filter(id =>
       (combinedInventory[id] ?? 0) < 1 &&
-      recipesArray.some(r => id in (r.output ?? {})),
+      recipesArray.some(r => id in (r.output ?? {}) && isRecipeAvailable(r, knownStationTypes)),
     );
     // Craftable input ingredients we're short on (e.g. pinewoodAxeHandle for
     // stoneFellingAxe). These live in recipe.input, not recipe.required, so they
@@ -1127,6 +1292,7 @@ disconnectFromGame = connect({
       [...missingHarvestTools, ...harvestChainToolIds],
       combinedInventory,
       recipesArray,
+      knownStationTypes,
     );
     // Full craft target list: required-tool prerequisites → craftable input
     // ingredients → harvest tools themselves.
@@ -1169,8 +1335,10 @@ disconnectFromGame = connect({
     }
 
     // toolToCraftFromStorage: what we'd craft next if all storage items were in pocket.
-    // Used for deposit exclusion and storage withdrawal — keeps ingredients safe.
-    const toolToCraftFromStorage = atHome && allToolCraftTargets.length > 0
+    // Used for deposit exclusion and storage withdrawal — keeps ingredients
+    // safe. Not location-gated; withdrawal only needs a nearby banker
+    // (checked downstream in homeChores).
+    const toolToCraftFromStorage = allToolCraftTargets.length > 0
       ? findCraftableFromList(allToolCraftTargets, combinedInventory, recipesArray, availableStationTypes)
       : null;
 
@@ -1242,9 +1410,10 @@ disconnectFromGame = connect({
       }, 0);
     const storageWeight = storageItemsWeight + storageCoins;
     const feePerCharge = Math.ceil(storageWeight * 0.0025);
-    // Cap the fee buffer at half the coins on hand: with heavy storage the raw
-    // 100× buffer can exceed total wealth, which would lock every coin forever
-    // (availableWithdrawal 0 → effectiveCoins 0 → no purchase can ever happen).
+    // Uncapped: scales purely with storage weight. A prior half-coins cap was
+    // removed — it masked bankruptcy risk from hoarding rather than preventing
+    // it; hoarding itself is bounded elsewhere via chainKeepNeeds-driven
+    // surplus selling, not by artificially capping this buffer.
     const minStorageCoins = feePerCharge * STORAGE_FEE_BUFFER;
     const availableStorageWithdrawal = Math.max(0, storageCoins - minStorageCoins);
 
@@ -1283,6 +1452,7 @@ disconnectFromGame = connect({
             recipesArray,
             selling,
             effectiveCoins,
+            knownStationTypes,
           );
           Object.assign(basket, toolBasket);
         }
@@ -1292,7 +1462,7 @@ disconnectFromGame = connect({
         // appear in the buy basket even when coins are tight.
         for (const chainToolId of harvestChainToolIds) {
           if ((combinedInventory[chainToolId] ?? 0) >= 1 || basket[chainToolId]) continue;
-          if (recipesArray.some(r => chainToolId in (r.output ?? {}))) continue;
+          if (recipesArray.some(r => chainToolId in (r.output ?? {}) && isRecipeAvailable(r, knownStationTypes))) continue;
           const offer = selling[chainToolId];
           if (offer && offer.quantity > 0 && offer.price > 0 && offer.price <= effectiveCoins) {
             basket[chainToolId] = 1;
@@ -1348,19 +1518,24 @@ disconnectFromGame = connect({
       if (val === undefined || val <= 0) delete toDeposit[key as keyof typeof toDeposit];
     }
 
-    const gearToEquip = atHome
-      ? findGearToEquip({
-        inventory: player.inventory ?? {},
-        equipment: (player.equipment ?? {}) as Record<string, string | null | undefined>,
-        items: heartbeat.items as unknown as ItemMap,
-      })
-      : null;
+    // Not location-gated — may need to switch weapons/gear whenever mining or
+    // fighting something, not just at home.
+    const gearToEquip = findGearToEquip({
+      inventory: player.inventory ?? {},
+      equipment: (player.equipment ?? {}) as Record<string, string | null | undefined>,
+      items: heartbeat.items as unknown as ItemMap,
+    });
 
-    const recipeToCraft = atHome
+    // Craft execution is gated by safety, not location: station proximity is
+    // already required internally (via availableStationTypes/isRecipeAvailable),
+    // so the only additional gate needed is "not mid-combat" — if we can
+    // finish crafting, do it and wear/use it now.
+    const safeToCraft = !nearbyThreat && !attackingMonster;
+    const recipeToCraft = safeToCraft
       ? findCraftableTarget(upgradeTargets, player.inventory ?? {}, recipesArray, availableStationTypes)
       : null;
 
-    const toolToCraft = atHome && allToolCraftTargets.length > 0
+    const toolToCraft = safeToCraft && allToolCraftTargets.length > 0
       ? findCraftableFromList(allToolCraftTargets, player.inventory ?? {}, recipesArray, availableStationTypes)
       : null;
 
@@ -1394,7 +1569,7 @@ disconnectFromGame = connect({
         isNextCraft: nextCraftTarget?.itemId === target.itemId,
         tier: target.tier,
         blocked: !target.reachable,
-        blockedBy: !target.reachable ? findBlockingItems(target.itemId, planningInventory, allMerchantSelling, recipesArray) : undefined,
+        blockedBy: !target.reachable ? findBlockingItems(target.itemId, planningInventory, allMerchantSelling, recipesArray, knownStationTypes, knownLootItems, knownQuestRewardItems) : undefined,
       };
     });
 
@@ -1415,15 +1590,18 @@ disconnectFromGame = connect({
         return ta - tb || a.localeCompare(b);
       })
       .map((itemId, index) => {
-        const recipe = recipesArray.find(r => itemId in (r.output ?? {}));
+        const recipe = recipesArray.find(r => itemId in (r.output ?? {}) && isRecipeAvailable(r, knownStationTypes));
         const tier = computeDifficultyTier({
           itemId,
-          recipe: recipe ? { id: recipe.id!, input: recipe.input as Partial<Record<string, number>>, required: recipe.required ?? [], station: recipe.station } : null,
+          recipe: recipe ? { id: recipe.id!, input: recipe.input as Partial<Record<string, number>>, required: recipe.required ?? [], station: recipe.station ?? null } : null,
           allMerchantSelling,
           inventory: planningInventory,
           playerCoins: effectiveCoins,
           recipes: recipesArray,
+          knownStationTypes,
           availableStationTypes,
+          knownLootItems,
+          knownQuestRewardItems,
         });
         const requirements: UpgradeRequirement[] = [];
         if (recipe) {
@@ -1456,7 +1634,7 @@ disconnectFromGame = connect({
           isNextCraft: toolToCraft?.itemId === itemId,
           tier,
           blocked: tier === 5,
-          blockedBy: tier === 5 ? findBlockingItems(itemId, planningInventory, allMerchantSelling, recipesArray) : undefined,
+          blockedBy: tier === 5 ? findBlockingItems(itemId, planningInventory, allMerchantSelling, recipesArray, knownStationTypes, knownLootItems, knownQuestRewardItems) : undefined,
         };
       });
 
@@ -1465,15 +1643,18 @@ disconnectFromGame = connect({
     const allChainPlanIds = Array.from(new Set([...harvestChainToolIds, ...craftableInputIngredients]));
 
     const chainToolPlanItems: ToolPlanItem[] = allChainPlanIds.map((itemId, index) => {
-      const recipe = recipesArray.find(r => itemId in (r.output ?? {}));
+      const recipe = recipesArray.find(r => itemId in (r.output ?? {}) && isRecipeAvailable(r, knownStationTypes));
       const tier = computeDifficultyTier({
         itemId,
-        recipe: recipe ? { id: recipe.id!, input: recipe.input as Partial<Record<string, number>>, required: recipe.required ?? [], station: recipe.station } : null,
+        recipe: recipe ? { id: recipe.id!, input: recipe.input as Partial<Record<string, number>>, required: recipe.required ?? [], station: recipe.station ?? null } : null,
         allMerchantSelling,
         inventory: planningInventory,
         playerCoins: effectiveCoins,
         recipes: recipesArray,
+        knownStationTypes,
         availableStationTypes,
+        knownLootItems,
+        knownQuestRewardItems,
       });
       const requirements: UpgradeRequirement[] = [];
       if (recipe) {
@@ -1498,7 +1679,7 @@ disconnectFromGame = connect({
         isNextCraft: toolToCraft?.itemId === itemId,
         tier,
         blocked: tier === 5,
-        blockedBy: tier === 5 ? findBlockingItems(itemId, planningInventory, allMerchantSelling, recipesArray) : undefined,
+        blockedBy: tier === 5 ? findBlockingItems(itemId, planningInventory, allMerchantSelling, recipesArray, knownStationTypes, knownLootItems, knownQuestRewardItems) : undefined,
       };
     });
 
@@ -1539,10 +1720,19 @@ disconnectFromGame = connect({
     // Must be before withdrawal overrides so sell-withdrawal doesn't fire
     // while the quest NPC is visible, moving the bot away before re-accept.
     const activeQuests = rawQuestsForProtection;
-
-    const visibleNpcs = Object.values(heartbeat.units).filter(
-      (u): u is ClientSideNPC => u.type === UNIT_TYPE.npc && isFinitePosition(u.position),
-    );
+    // quest.start_npc/end_npc are raw SDK unit ids, not display names.
+    // recordQuestEndNpc resolves start_npc_id from the existing quests row
+    // (written correctly, by name, at sighting time) rather than re-deriving
+    // identity from the id. end_npc has no prior row to fall back on, so its
+    // name is resolved here via findTurnInNpc against this tick's visible
+    // NPCs; null (left untouched) when the turn-in NPC isn't currently
+    // visible. Update-only (see recordQuestEndNpc), so unconditional every
+    // tick is safe: a no-op for any quest never seen as an AvailableQuest sighting.
+    const activeQuestScanNow = Date.now();
+    for (const quest of Object.values(activeQuests)) {
+      const endNpcName = findTurnInNpc(quest, visibleNpcs)?.name ?? null;
+      recordQuestEndNpc(memoryDb, quest, endNpcName, activeQuestScanNow);
+    }
     const completableQuestResult = findCompletableQuest(activeQuests, player.inventory ?? {});
     const completableQuest: { quest: ActiveQuest; npc: ClientSideNPC } | null =
       completableQuestResult
@@ -1635,8 +1825,10 @@ disconnectFromGame = connect({
       upgradesPlan.length === 0 &&
       toolToCraft === null &&
       toolToCraftFromStorage === null;
+    // Not location-gated — go to the quest NPC to turn in/re-accept wherever
+    // it is, not just when already at home.
     const questNpcTarget: { x: number; y: number } | null =
-      lastQuestNpcPosition !== null && (atHome || finishingHomeChores) &&
+      lastQuestNpcPosition !== null &&
         (completableQuestResult !== null || needQuestForHarvestTools)
         ? lastQuestNpcPosition
         : null;
@@ -1728,7 +1920,8 @@ disconnectFromGame = connect({
 
     // ── Post-decision: sell surplus from storage ─────────────────────────────
     // Only when at home with nothing better to do and not in a quest cycle.
-    if (atHome && nearbyBanker && decision.type !== "withdraw"
+    // !depositOverride: don't clobber a pending manual dashboard deposit.
+    if (atHome && nearbyBanker && !depositOverride && decision.type !== "withdraw"
       && completableQuest === null && questToAccept === null) {
       const toWithdrawFromStorage: Partial<Record<string, number>> = {};
       let capacityLeft = Math.max(0, maxCarryWeight - inventoryWeight);
@@ -1767,7 +1960,12 @@ disconnectFromGame = connect({
     }
 
     // ── Post-decision: auto-deposit surplus ──────────────────────────────────
-    if (atHome && nearbyBanker && decision.type === "explore" && Object.keys(toDeposit).length > 0) {
+    // "explore"/"return-home-idle"/"return-home-recover" are decide()'s
+    // "nothing left to do" outputs — deposit as the last thing once chores
+    // are truly finished, not narrower than that.
+    if (atHome && nearbyBanker
+      && (decision.type === "explore" || decision.type === "return-home-idle" || decision.type === "return-home-recover")
+      && Object.keys(toDeposit).length > 0) {
       decision = { type: "deposit", items: toDeposit, banker: nearbyBanker };
       tickExtras.autoDeposit = { items: toDeposit, banker: nearbyBanker.id };
     }

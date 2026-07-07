@@ -1,6 +1,7 @@
 import type { GameObject, Position, Station } from "programming-game/types";
 import type { RecipeList, UpgradeTarget } from "../bot-types";
 import { distanceBetween, isFinitePosition } from "./utils";
+import { isRecipeAvailable } from "./plan";
 
 /** Every station game object currently visible (same appear/disappear visibility as merchants/bankers/trees). */
 export const collectVisibleStations = (
@@ -41,12 +42,11 @@ export const findCraftableTarget = (
   targets: UpgradeTarget[],
   inventory: Partial<Record<string, number>>,
   recipes: RecipeList,
-  availableStationTypes: Set<string> = new Set(),
+  availableStationTypes: ReadonlySet<string> = new Set(),
 ): UpgradeTarget | null => {
   for (const target of targets) {
     if (!target.recipe) continue;
-    const stationReady = target.recipe.station == null || availableStationTypes.has(target.recipe.station);
-    let canCraft = stationReady;
+    let canCraft = isRecipeAvailable(target.recipe, availableStationTypes);
     for (const [inputId, qty] of Object.entries(target.recipe.input)) {
       if ((inventory[inputId] ?? 0) < (qty ?? 0)) { canCraft = false; break; }
     }
@@ -60,7 +60,7 @@ export const findCraftableTarget = (
     // the current inventory (all ingredients present or recursively craftable).
     // Without this guard we'd e.g. craft leather for a chest that also needs
     // copperBar (not in inventory, no recipe) — wasting materials on a dead end.
-    if (isFullyAchievableFromInventory(target.recipe, inventory, recipes)) {
+    if (isFullyAchievableFromInventory(target.recipe, inventory, recipes, new Set(), availableStationTypes)) {
       const subStep = findCraftableSubStep(target.recipe, inventory, recipes, new Set<string>(), availableStationTypes);
       if (subStep) {
         return {
@@ -88,13 +88,12 @@ export function findCraftableFromList(
   itemIds: string[],
   inventory: Partial<Record<string, number>>,
   recipes: RecipeList,
-  availableStationTypes: Set<string> = new Set(),
+  availableStationTypes: ReadonlySet<string> = new Set(),
 ): { itemId: string; recipe: { id: string; input: Partial<Record<string, number>>; required: readonly string[]; station?: string | null } } | null {
   for (const itemId of itemIds) {
-    const recipe = recipes.find(r => itemId in (r.output ?? {}));
+    const recipe = recipes.find(r => itemId in (r.output ?? {}) && isRecipeAvailable(r, availableStationTypes));
     if (!recipe) continue;
-    const stationReady = recipe.station == null || availableStationTypes.has(recipe.station);
-    let canCraft = stationReady;
+    let canCraft = true;
     for (const [inputId, qty] of Object.entries(recipe.input ?? {})) {
       if ((inventory[inputId] ?? 0) < (qty ?? 0)) { canCraft = false; break; }
     }
@@ -106,16 +105,16 @@ export function findCraftableFromList(
     if (canCraft) {
       return {
         itemId,
-        recipe: { id: recipe.id!, input: recipe.input as Partial<Record<string, number>>, required: recipe.required ?? [], station: recipe.station },
+        recipe: { id: recipe.id!, input: recipe.input as Partial<Record<string, number>>, required: recipe.required ?? [], station: recipe.station ?? null },
       };
     }
     const subRecipe: { id: string; input: Partial<Record<string, number>>; required: readonly string[]; station?: string | null } = {
       id: recipe.id!,
       input: recipe.input as Partial<Record<string, number>>,
       required: recipe.required ?? [],
-      station: recipe.station,
+      station: recipe.station ?? null,
     };
-    if (isFullyAchievableFromInventory(subRecipe, inventory, recipes)) {
+    if (isFullyAchievableFromInventory(subRecipe, inventory, recipes, new Set(), availableStationTypes)) {
       const subStep = findCraftableSubStep(subRecipe, inventory, recipes, new Set<string>(), availableStationTypes);
       if (subStep && subStep.recipe) return { itemId: subStep.recipeId, recipe: subStep.recipe };
     }
@@ -125,9 +124,11 @@ export function findCraftableFromList(
 
 /**
  * Returns items to buy from a single merchant to enable crafting any of the
- * given target item IDs (including their sub-crafts). Gathers ingredients for
- * station-gated recipes too — buying ahead of a station visit is fine even
- * when the station isn't in view right now. Does not spend more than playerCoins.
+ * given target item IDs (including their sub-crafts). This is a shopping list
+ * toward a future craft, not an immediate craft action, so it uses the
+ * persisted knownStationTypes (a station-gated recipe is worth shopping toward
+ * even if the bot isn't standing at the station right now). Does not spend
+ * more than playerCoins.
  */
 export function computeCraftIngredientsToBuyFromMerchant(
   targetItemIds: string[],
@@ -135,6 +136,7 @@ export function computeCraftIngredientsToBuyFromMerchant(
   recipes: RecipeList,
   merchantSelling: Record<string, { price: number; quantity: number } | undefined>,
   playerCoins: number,
+  knownStationTypes: ReadonlySet<string> = new Set(),
 ): Partial<Record<string, number>> {
   const basket: Partial<Record<string, number>> = {};
   let coinsLeft = playerCoins;
@@ -155,7 +157,7 @@ export function computeCraftIngredientsToBuyFromMerchant(
       return;
     }
 
-    const recipe = recipes.find(r => itemId in (r.output ?? {}));
+    const recipe = recipes.find(r => itemId in (r.output ?? {}) && isRecipeAvailable(r, knownStationTypes));
     if (!recipe) return;
     const outQty = (recipe.output ?? {})[itemId] ?? 1;
     const craftsNeeded = Math.ceil(shortfall / outQty);
@@ -171,7 +173,7 @@ export function computeCraftIngredientsToBuyFromMerchant(
   };
 
   for (const toolId of targetItemIds) {
-    const recipe = recipes.find(r => toolId in (r.output ?? {}));
+    const recipe = recipes.find(r => toolId in (r.output ?? {}) && isRecipeAvailable(r, knownStationTypes));
     if (!recipe) continue;
     const visited = new Set<string>([toolId]);
     for (const [inputId, qty] of Object.entries(recipe.input ?? {})) {
@@ -187,7 +189,9 @@ export function computeCraftIngredientsToBuyFromMerchant(
 
 /**
  * Returns true if every ingredient in the recipe is either already in
- * inventory or can be crafted (recursively) from what IS in inventory.
+ * inventory or can be crafted (recursively) from what IS in inventory, at a
+ * currently-reachable recipe (availableStationTypes, since this feeds sub-step
+ * crafting that executes immediately — see findCraftableSubStep).
  * Ingredients with no recipe and not in inventory → false.
  *
  * This is used to gate sub-step crafting: we only pre-craft an intermediate
@@ -200,15 +204,16 @@ export const isFullyAchievableFromInventory = (
   inventory: Partial<Record<string, number>>,
   recipes: RecipeList,
   visited = new Set<string>(),
+  availableStationTypes: ReadonlySet<string> = new Set(),
 ): boolean => {
   for (const [inputId, qty] of Object.entries(recipe.input)) {
     if ((inventory[inputId] ?? 0) >= (qty ?? 0)) continue;
     if (visited.has(inputId)) return false;
     const next = new Set(visited);
     next.add(inputId);
-    const subRecipe = recipes.find(r => inputId in (r.output ?? {}));
+    const subRecipe = recipes.find(r => inputId in (r.output ?? {}) && isRecipeAvailable(r, availableStationTypes));
     if (!subRecipe || !subRecipe.id) return false;
-    if (!isFullyAchievableFromInventory({ id: subRecipe.id, input: subRecipe.input as Partial<Record<string, number>>, required: subRecipe.required ?? [], station: subRecipe.station }, inventory, recipes, next)) return false;
+    if (!isFullyAchievableFromInventory({ id: subRecipe.id, input: subRecipe.input as Partial<Record<string, number>>, required: subRecipe.required ?? [], station: subRecipe.station ?? null }, inventory, recipes, next, availableStationTypes)) return false;
   }
   for (const toolId of recipe.required) {
     if ((inventory[String(toolId)] ?? 0) < 1) return false;
@@ -221,7 +226,7 @@ export const findCraftableSubStep = (
   inventory: Partial<Record<string, number>>,
   recipes: RecipeList,
   visited: Set<string>,
-  availableStationTypes: Set<string> = new Set(),
+  availableStationTypes: ReadonlySet<string> = new Set(),
 ): { recipeId: string; recipe: UpgradeTarget['recipe'] } | null => {
   // Check required tools first — a missing craftable tool blocks the whole recipe
   for (const toolId of recipe.required) {
@@ -229,10 +234,9 @@ export const findCraftableSubStep = (
     if ((inventory[toolStr] ?? 0) >= 1) continue;
     if (visited.has(toolStr)) continue;
     visited.add(toolStr);
-    const toolRecipe = recipes.find(r => toolStr in r.output);
+    const toolRecipe = recipes.find(r => toolStr in r.output && isRecipeAvailable(r, availableStationTypes));
     if (!toolRecipe || !toolRecipe.id) continue;
-    const stationReady = toolRecipe.station == null || availableStationTypes.has(toolRecipe.station);
-    let canCraft = stationReady;
+    let canCraft = true;
     for (const [subId, subQty] of Object.entries(toolRecipe.input)) {
       if ((inventory[subId] ?? 0) < (subQty ?? 0)) { canCraft = false; break; }
     }
@@ -248,7 +252,7 @@ export const findCraftableSubStep = (
           id: toolRecipe.id,
           input: toolRecipe.input as Partial<Record<string, number>>,
           required: toolRecipe.required ?? [],
-          station: toolRecipe.station,
+          station: toolRecipe.station ?? null,
         },
       };
     }
@@ -256,7 +260,7 @@ export const findCraftableSubStep = (
       id: toolRecipe.id,
       input: toolRecipe.input as Partial<Record<string, number>>,
       required: toolRecipe.required ?? [],
-      station: toolRecipe.station,
+      station: toolRecipe.station ?? null,
     };
     const deeper = findCraftableSubStep(subRecipe, inventory, recipes, visited, availableStationTypes);
     if (deeper) return deeper;
@@ -268,10 +272,9 @@ export const findCraftableSubStep = (
     if (have >= (neededQty ?? 0)) continue;
     if (visited.has(inputId)) continue;
     visited.add(inputId);
-    const inputRecipe = recipes.find(r => inputId in r.output);
+    const inputRecipe = recipes.find(r => inputId in r.output && isRecipeAvailable(r, availableStationTypes));
     if (!inputRecipe || !inputRecipe.id) continue;
-    const stationReady = inputRecipe.station == null || availableStationTypes.has(inputRecipe.station);
-    let canCraft = stationReady;
+    let canCraft = true;
     for (const [subId, subQty] of Object.entries(inputRecipe.input)) {
       if ((inventory[subId] ?? 0) < (subQty ?? 0)) { canCraft = false; break; }
     }
@@ -287,7 +290,7 @@ export const findCraftableSubStep = (
           id: inputRecipe.id,
           input: inputRecipe.input as Partial<Record<string, number>>,
           required: inputRecipe.required ?? [],
-          station: inputRecipe.station,
+          station: inputRecipe.station ?? null,
         },
       };
     }
@@ -295,7 +298,7 @@ export const findCraftableSubStep = (
       id: inputRecipe.id,
       input: inputRecipe.input as Partial<Record<string, number>>,
       required: inputRecipe.required ?? [],
-      station: inputRecipe.station,
+      station: inputRecipe.station ?? null,
     };
     const deeper = findCraftableSubStep(subRecipe, inventory, recipes, visited, availableStationTypes);
     if (deeper) return deeper;

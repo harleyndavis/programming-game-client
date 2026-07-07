@@ -24,6 +24,11 @@ out/
 logs
 npm-debug.log*
 
+# Bot memory (SQLite)
+memory.db
+memory.db-wal
+memory.db-shm
+
 # OS
 .DS_Store
 Thumbs.db

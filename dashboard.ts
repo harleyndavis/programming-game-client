@@ -3,6 +3,23 @@ import { UpgradePlanItem, ToolPlanItem } from "./bot-types";
 import { readFileSync } from "fs";
 import { join } from "path";
 import { ModuleKind, ScriptTarget, transpileModule } from "typescript";
+import type Database from "better-sqlite3";
+import type { Monsters } from "programming-game/monsters";
+import {
+    Entity,
+    HeatMapSighting,
+    MerchantTradeRow,
+    CombatStats,
+    QuestRecord,
+    getKnownEntities,
+    getHeatMapSightings,
+    getAllMerchantTrades,
+    getCombatHistory,
+    getLootRates,
+    getKnownQuestsForNpc,
+    getExploredCells,
+    ASSUMED_SIGHT_RANGE,
+} from "./src/memory";
 
 export type Position = {
     x: number;
@@ -61,6 +78,67 @@ export type DashboardSnapshot = {
     arenaEvents?: RawEvent[];
 };
 
+export type MemoryLootRateRow = {
+    entityType: string;
+    entityName: string;
+    item: string;
+    dropChance: number;
+    avgQuantityPerEvent: number;
+    minQuantity: number | null;
+    maxQuantity: number | null;
+};
+
+export type MemoryQuestEntry = QuestRecord & { npcName: string };
+
+export type MemorySnapshot = {
+    generatedAt: string;
+    entities: Entity[];
+    heatMap: HeatMapSighting[];
+    merchantTrades: MerchantTradeRow[];
+    combatHistory: CombatStats[];
+    lootRates: MemoryLootRateRow[];
+    quests: MemoryQuestEntry[];
+};
+
+/**
+ * Composes several single-domain memory reads into one dashboard-shaped view. This is
+ * presentation logic, not a store concern — memory.ts stays a dumb store, this is the
+ * one consumer that needs "everything known" fanned out per entity.
+ */
+const buildMemorySnapshot = (memoryDb: Database.Database): MemorySnapshot => {
+    const combatHistory = getKnownEntities(memoryDb, { entityType: "monster" })
+        .map((e) => getCombatHistory(memoryDb, e.entityName as Monsters))
+        .filter((c): c is CombatStats => c !== null);
+
+    const lootRates: MemoryLootRateRow[] = getKnownEntities(memoryDb)
+        .filter((e) => e.entityType === "monster" || e.entityType === "resource")
+        .flatMap((e) =>
+            getLootRates(memoryDb, e.entityType, e.entityName).map((r) => ({
+                entityType: e.entityType,
+                entityName: e.entityName,
+                item: r.item,
+                dropChance: r.dropChance,
+                avgQuantityPerEvent: r.avgQuantityPerEvent,
+                minQuantity: r.minQuantity,
+                maxQuantity: r.maxQuantity,
+            })),
+        );
+
+    const quests = getKnownEntities(memoryDb, { entityType: "npc" }).flatMap((npc) =>
+        getKnownQuestsForNpc(memoryDb, npc.entityName).map((q) => ({ ...q, npcName: npc.entityName })),
+    );
+
+    return {
+        generatedAt: new Date().toISOString(),
+        entities: getKnownEntities(memoryDb),
+        heatMap: getHeatMapSightings(memoryDb),
+        merchantTrades: getAllMerchantTrades(memoryDb),
+        combatHistory,
+        lootRates,
+        quests,
+    };
+};
+
 type DashboardThresholdConfig = {
     getThresholdPercent: () => number;
     setThresholdPercent: (nextPercent: number) => number;
@@ -81,7 +159,7 @@ type DashboardDepositRequestConfig = {
     setPendingItem: (item: string | null) => void;
 };
 
-export const createDashboard = (port: number) => {
+export const createDashboard = (port: number, memoryDb: Database.Database) => {
     let latestSnapshot: DashboardSnapshot = {
         receivedAt: new Date().toISOString(),
         bot: {
@@ -149,6 +227,26 @@ export const createDashboard = (port: number) => {
     const loadDashboardClientJs = () => {
         const dashboardClientTs = readFileSync(join(__dirname, "dashboard-client.ts"), "utf-8");
         return transpileModule(dashboardClientTs, {
+            compilerOptions: {
+                target: ScriptTarget.ES2020,
+                module: ModuleKind.None,
+            },
+        }).outputText;
+    };
+    const loadMemoryHtml = () => readFileSync(join(__dirname, "memory.html"), "utf-8");
+    const loadMemoryClientJs = () => {
+        const memoryClientTs = readFileSync(join(__dirname, "memory-client.ts"), "utf-8");
+        return transpileModule(memoryClientTs, {
+            compilerOptions: {
+                target: ScriptTarget.ES2020,
+                module: ModuleKind.None,
+            },
+        }).outputText;
+    };
+    const loadMapHtml = () => readFileSync(join(__dirname, "map.html"), "utf-8");
+    const loadMapClientJs = () => {
+        const mapClientTs = readFileSync(join(__dirname, "map-client.ts"), "utf-8");
+        return transpileModule(mapClientTs, {
             compilerOptions: {
                 target: ScriptTarget.ES2020,
                 module: ModuleKind.None,
@@ -247,6 +345,88 @@ export const createDashboard = (port: number) => {
 
                 if (url === "/state") {
                     writeJson(res, latestSnapshot);
+                    return;
+                }
+
+                if (url === "/memory") {
+                    try {
+                        res.statusCode = 200;
+                        res.setHeader("Content-Type", "text/html; charset=utf-8");
+                        res.setHeader("Cache-Control", "no-store");
+                        res.end(loadMemoryHtml());
+                    } catch (err) {
+                        writeError(res, 500, `failed to load memory html: ${String(err)}`);
+                    }
+                    return;
+                }
+
+                if (url === "/memory-client.js") {
+                    try {
+                        res.statusCode = 200;
+                        res.setHeader("Content-Type", "application/javascript; charset=utf-8");
+                        res.setHeader("Cache-Control", "no-store");
+                        res.end(loadMemoryClientJs());
+                    } catch (err) {
+                        writeError(res, 500, `failed to load memory client js: ${String(err)}`);
+                    }
+                    return;
+                }
+
+                if (url === "/memory/data") {
+                    try {
+                        writeJson(res, buildMemorySnapshot(memoryDb));
+                    } catch (err) {
+                        writeError(res, 500, `failed to read memory store: ${String(err)}`);
+                    }
+                    return;
+                }
+
+                if (url === "/map") {
+                    try {
+                        res.statusCode = 200;
+                        res.setHeader("Content-Type", "text/html; charset=utf-8");
+                        res.setHeader("Cache-Control", "no-store");
+                        res.end(loadMapHtml());
+                    } catch (err) {
+                        writeError(res, 500, `failed to load map html: ${String(err)}`);
+                    }
+                    return;
+                }
+
+                if (url === "/map-client.js") {
+                    try {
+                        res.statusCode = 200;
+                        res.setHeader("Content-Type", "application/javascript; charset=utf-8");
+                        res.setHeader("Cache-Control", "no-store");
+                        res.end(loadMapClientJs());
+                    } catch (err) {
+                        writeError(res, 500, `failed to load map client js: ${String(err)}`);
+                    }
+                    return;
+                }
+
+                if (url === "/map/data") {
+                    try {
+                        const exploredCells = getExploredCells(memoryDb).map((c) => ({ cellX: c.cellX, cellY: c.cellY }));
+                        const heatMap = getHeatMapSightings(memoryDb).map((h) => ({
+                            cellX: Math.floor(h.position.x / ASSUMED_SIGHT_RANGE),
+                            cellY: Math.floor(h.position.y / ASSUMED_SIGHT_RANGE),
+                            entityType: h.entityType,
+                            entityName: h.entityName,
+                            observationCount: h.observationCount,
+                        }));
+                        const raw = latestSnapshot.raw as Record<string, unknown> | undefined;
+                        const player = raw?.player as Record<string, unknown> | undefined;
+                        const pos = player?.position as { x?: number; y?: number } | undefined;
+                        const botPosition =
+                            pos && typeof pos.x === "number" && typeof pos.y === "number"
+                                ? { x: pos.x, y: pos.y }
+                                : null;
+                        const generatedAt = latestSnapshot.receivedAt;
+                        writeJson(res, { generatedAt, exploredCells, heatMap, botPosition });
+                    } catch (err) {
+                        writeError(res, 500, `failed to read map data: ${String(err)}`);
+                    }
                     return;
                 }
 

@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Programming Game Memory</title>
+  <link rel="stylesheet" href="/dashboard.css" />
+</head>
+
+<body>
+  <div class="wrap">
+    <header class="memory-header">
+      <a href="/" class="nav-link">&larr; Dashboard</a>
+      <h1>Memory</h1>
+      <a href="/map" target="_blank" rel="noopener" class="nav-link">Map &rarr;</a>
+      <span id="memoryUpdatedAt" class="control-note">Loading...</span>
+      <button id="memoryRefreshBtn" type="button">Refresh</button>
+    </header>
+    <nav class="tab-bar memory-tab-bar" role="tablist" aria-label="Memory tabs">
+      <button class="tab-button active" data-memory-tab="entities" type="button">Entities</button>
+      <button class="tab-button" data-memory-tab="heatmap" type="button">Heat Map</button>
+      <button class="tab-button" data-memory-tab="merchants" type="button">Merchants</button>
+      <button class="tab-button" data-memory-tab="combat" type="button">Combat</button>
+      <button class="tab-button" data-memory-tab="loot" type="button">Loot</button>
+      <button class="tab-button" data-memory-tab="quests" type="button">Quests</button>
+    </nav>
+    <main>
+      <section class="tab-panel active" data-memory-panel="entities">
+        <div id="memoryEntitiesTable"></div>
+      </section>
+      <section class="tab-panel" data-memory-panel="heatmap">
+        <div id="memoryHeatmapTable"></div>
+      </section>
+      <section class="tab-panel" data-memory-panel="merchants">
+        <div id="memoryMerchantsTable"></div>
+      </section>
+      <section class="tab-panel" data-memory-panel="combat">
+        <div id="memoryCombatTable"></div>
+      </section>
+      <section class="tab-panel" data-memory-panel="loot">
+        <div id="memoryLootTable"></div>
+      </section>
+      <section class="tab-panel" data-memory-panel="quests">
+        <div id="memoryQuestsTable"></div>
+      </section>
+    </main>
+  </div>
+  <script src="/memory-client.js"></script>
+</body>
+
+</html>

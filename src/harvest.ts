@@ -1,6 +1,7 @@
 import type { Position, Tree, MiningNode, GameObject } from "programming-game/types";
 import type { RecipeList } from "../bot-types";
 import { isFinitePosition, distanceBetween } from "./utils";
+import { isRecipeAvailable } from "./plan";
 
 export const HARVEST_WEAPON_TYPES = new Set(['fellingAxe', 'pickaxe']);
 
@@ -53,22 +54,24 @@ export const HARVEST_TOOL_TIER_ORDER: Record<string, number> = {
 };
 
 /**
- * Walks the no-station recipe chain for each missing harvest tool and collects
- * every item ID that appears in a `required` array — these are the crafting
- * tools (e.g. stoneCarvingKnife) and purchasable tools (e.g. stoneCutterTools)
- * needed as prerequisites before any harvest tool can be made.
+ * Walks the recipe chain (available per knownStationTypes) for each missing
+ * harvest tool and collects every item ID that appears in a `required` array
+ * — these are the crafting tools (e.g. stoneCarvingKnife) and purchasable
+ * tools (e.g. stoneCutterTools) needed as prerequisites before any harvest
+ * tool can be made.
  * Items that are themselves harvest weapons are excluded (they're tracked separately).
  */
 export function collectHarvestCraftingChainToolIds(
   missingHarvestToolIds: string[],
   recipes: RecipeList,
+  knownStationTypes: ReadonlySet<string> = new Set(),
 ): string[] {
   const result = new Set<string>();
 
   const visit = (itemId: string, seen: Set<string>): void => {
     if (seen.has(itemId)) return;
     seen.add(itemId);
-    const recipe = recipes.find(r => itemId in (r.output ?? {}));
+    const recipe = recipes.find(r => itemId in (r.output ?? {}) && isRecipeAvailable(r, knownStationTypes));
     if (!recipe) return;
     for (const reqId of recipe.required ?? []) {
       const reqStr = String(reqId);
@@ -99,6 +102,7 @@ export function collectCraftableInputIngredients(
   targetItemIds: string[],
   combinedInventory: Partial<Record<string, number>>,
   recipes: RecipeList,
+  knownStationTypes: ReadonlySet<string> = new Set(),
 ): string[] {
   const result: string[] = [];
   const visited = new Set<string>();
@@ -107,7 +111,7 @@ export function collectCraftableInputIngredients(
     if (visited.has(itemId)) return;
     visited.add(itemId);
 
-    const recipe = recipes.find(r => itemId in (r.output ?? {}));
+    const recipe = recipes.find(r => itemId in (r.output ?? {}) && isRecipeAvailable(r, knownStationTypes));
     if (!recipe) return;
 
     for (const reqId of recipe.required ?? []) walk(String(reqId));
@@ -117,7 +121,7 @@ export function collectCraftableInputIngredients(
       const have = combinedInventory[inputId] ?? 0;
       const need = qty ?? 0;
       if (have < need) {
-        const subRecipe = recipes.find(r => inputId in (r.output ?? {}));
+        const subRecipe = recipes.find(r => inputId in (r.output ?? {}) && isRecipeAvailable(r, knownStationTypes));
         if (subRecipe && !result.includes(inputId)) result.push(inputId);
       }
     }

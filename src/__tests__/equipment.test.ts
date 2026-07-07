@@ -76,6 +76,77 @@ describe('computeUpgradeTargets', () => {
       expect(targets[0].reachable).toBe(true);
     }
   });
+
+  it('a station-gated recipe is unreachable by default but reachable once the station type is known — stays stable regardless of current location', () => {
+    const stationRecipes: RecipeList = [
+      makeRecipe({ id: 'r1', output: { ironHelm: 1 }, input: { ironIngot: 3 }, station: 'smithing' }),
+    ];
+    const withoutKnowledge = computeUpgradeTargets({
+      equipment: { helm: 'copperHelm' },
+      inventory: {},
+      items,
+      recipes: stationRecipes,
+      allMerchantSelling: {},
+      playerCoins: 0,
+    });
+    const helmWithout = withoutKnowledge.find(t => t.slot === 'helm');
+    expect(helmWithout?.reachable).toBe(false);
+
+    const withKnowledge = computeUpgradeTargets({
+      equipment: { helm: 'copperHelm' },
+      inventory: {},
+      items,
+      recipes: stationRecipes,
+      allMerchantSelling: {},
+      playerCoins: 0,
+      knownStationTypes: new Set(['smithing']),
+    });
+    const helmWith = withKnowledge.find(t => t.slot === 'helm');
+    expect(helmWith?.reachable).toBe(true);
+    expect(helmWith?.recipe?.station).toBe('smithing');
+  });
+
+  it('a craftable target blocked on a raw ingredient becomes tier 4 (not 5) once that ingredient is a known loot drop', () => {
+    const rawIngredientRecipes: RecipeList = [
+      makeRecipe({ id: 'r1', output: { ironHelm: 1 }, input: { pinewoodLog: 3 }, station: null }),
+    ];
+    const withoutKnowledge = computeUpgradeTargets({
+      equipment: { helm: 'copperHelm' },
+      inventory: {},
+      items,
+      recipes: rawIngredientRecipes,
+      allMerchantSelling: {},
+      playerCoins: 0,
+    });
+    expect(withoutKnowledge.find(t => t.slot === 'helm')?.tier).toBe(5);
+
+    const withKnowledge = computeUpgradeTargets({
+      equipment: { helm: 'copperHelm' },
+      inventory: {},
+      items,
+      recipes: rawIngredientRecipes,
+      allMerchantSelling: {},
+      playerCoins: 0,
+      knownLootItems: new Set(['pinewoodLog']),
+    });
+    expect(withKnowledge.find(t => t.slot === 'helm')?.tier).toBe(4);
+  });
+
+  it('a craftable target blocked on a raw ingredient becomes tier 4 (not 5) once that ingredient is a known quest reward', () => {
+    const rawIngredientRecipes: RecipeList = [
+      makeRecipe({ id: 'r1', output: { ironHelm: 1 }, input: { rareGem: 1 }, station: null }),
+    ];
+    const withKnowledge = computeUpgradeTargets({
+      equipment: { helm: 'copperHelm' },
+      inventory: {},
+      items,
+      recipes: rawIngredientRecipes,
+      allMerchantSelling: {},
+      playerCoins: 0,
+      knownQuestRewardItems: new Set(['rareGem']),
+    });
+    expect(withKnowledge.find(t => t.slot === 'helm')?.tier).toBe(4);
+  });
 });
 
 describe('computeTargetsToBuyFromMerchant', () => {
@@ -129,6 +200,39 @@ describe('computeTargetsToBuyFromMerchant', () => {
       inventory: { copperIngot: 3 },
     });
     expect(result.hammer).toBe(1);
+  });
+
+  it('still buys gear with all ingredients in hand when its recipe needs a station that is not nearby', () => {
+    const targets: UpgradeTarget[] = [
+      {
+        itemId: 'ironSword', slot: 'weapon', tier: 4, gain: 5, reachable: true,
+        recipe: { id: 'r1', input: { ironIngot: 3 }, required: [], station: 'smithing' },
+      },
+    ];
+    const result = computeTargetsToBuyFromMerchant({
+      targets,
+      merchantSelling: { ironSword: { price: 100, quantity: 1 } },
+      playerCoins: 200,
+      inventory: { ironIngot: 3 },
+    });
+    expect(result.ironSword).toBe(1);
+  });
+
+  it('skips buying gear once a matching station is nearby, since it can be crafted this instant instead', () => {
+    const targets: UpgradeTarget[] = [
+      {
+        itemId: 'ironSword', slot: 'weapon', tier: 2, gain: 5, reachable: true,
+        recipe: { id: 'r1', input: { ironIngot: 3 }, required: [], station: 'smithing' },
+      },
+    ];
+    const result = computeTargetsToBuyFromMerchant({
+      targets,
+      merchantSelling: { ironSword: { price: 100, quantity: 1 } },
+      playerCoins: 200,
+      inventory: { ironIngot: 3 },
+      availableStationTypes: new Set(['smithing']),
+    });
+    expect(result).not.toHaveProperty('ironSword');
   });
 });
 
