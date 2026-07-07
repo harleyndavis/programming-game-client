@@ -27,6 +27,7 @@ import {
   recordResourceSighting,
   getHeatMapSightings,
   recordCombatHit,
+  recordMonsterMaxHp,
   recordMonsterKill,
   recordHarvest,
   getCombatHistory,
@@ -118,7 +119,7 @@ describe('openMemoryDb', () => {
     );
     const version = db.prepare('SELECT version FROM schema_version').get() as { version: number };
     // A fresh database is created directly at the latest shape — no migration needed.
-    expect(version.version).toBe(2);
+    expect(version.version).toBe(3);
     db.close();
   });
 
@@ -138,7 +139,13 @@ describe('schema migration v1 -> v2 (heat_map re-keyed by cell)', () => {
     while (tempDirs.length) rmSync(tempDirs.pop()!, { recursive: true, force: true });
   });
 
-  /** Hand-writes a pre-migration (schema version 1) database file — the exact shape real accumulated data had before cell-bucketing. */
+  /**
+   * Hand-writes a pre-migration (schema version 1) database file — the exact
+   * shape real accumulated data had before cell-bucketing. Includes
+   * combat_history in its pre-v3 shape (monster_hp, not monster_max_hp) too,
+   * since a real v1 database already had that table — opening it runs both
+   * the v1->v2 and v2->v3 migrations in sequence.
+   */
   const makeV1Db = (path: string): void => {
     const raw = new Database(path);
     raw.exec(`
@@ -157,6 +164,15 @@ describe('schema migration v1 -> v2 (heat_map re-keyed by cell)', () => {
         last_seen_at INTEGER NOT NULL,
         PRIMARY KEY (entity_id, x, y)
       );
+      CREATE TABLE combat_history (
+        entity_id INTEGER PRIMARY KEY REFERENCES entities(id),
+        monster_hp INTEGER NOT NULL DEFAULT 0,
+        hits_received INTEGER NOT NULL DEFAULT 0,
+        total_damage_received INTEGER NOT NULL DEFAULT 0,
+        min_damage_per_hit INTEGER,
+        max_damage_per_hit INTEGER,
+        last_updated_at INTEGER NOT NULL
+      );
     `);
     raw.prepare('INSERT INTO schema_version (version) VALUES (1)').run();
     const ratId = raw.prepare('INSERT INTO entities (entity_type, entity_name) VALUES (?, ?)').run('monster', Monsters.rat).lastInsertRowid;
@@ -172,7 +188,7 @@ describe('schema migration v1 -> v2 (heat_map re-keyed by cell)', () => {
     raw.close();
   };
 
-  it('collapses old exact-position rows into cell-bucketed rows, aggregating per entity, and bumps schema_version to 2', () => {
+  it('collapses old exact-position rows into cell-bucketed rows, aggregating per entity, and bumps schema_version to the current version', () => {
     const dir = mkdtempSync(join(tmpdir(), 'memory-migration-test-'));
     tempDirs.push(dir);
     const path = join(dir, 'memory.db');
@@ -180,7 +196,8 @@ describe('schema migration v1 -> v2 (heat_map re-keyed by cell)', () => {
 
     const db = openMemoryDb(path);
     const version = db.prepare('SELECT version FROM schema_version').get() as { version: number };
-    expect(version.version).toBe(2);
+    // Chains through v2->v3 (combat_history rename) too, since a v1 database is below both.
+    expect(version.version).toBe(3);
 
     const ratSightings = getHeatMapSightings(db, { entityType: 'monster', entityName: Monsters.rat });
     expect(ratSightings).toHaveLength(2);
@@ -205,10 +222,79 @@ describe('schema migration v1 -> v2 (heat_map re-keyed by cell)', () => {
     db1.close();
     const db2 = openMemoryDb(path);
     const version = db2.prepare('SELECT version FROM schema_version').get() as { version: number };
-    expect(version.version).toBe(2);
+    expect(version.version).toBe(3);
     const rows = db2.prepare('SELECT version FROM schema_version').all();
     expect(rows.length).toBe(1);
     expect(getHeatMapSightings(db2, { entityType: 'monster', entityName: Monsters.rat })).toHaveLength(2);
+    db2.close();
+  });
+});
+
+describe('schema migration v2 -> v3 (combat_history monster_hp renamed to monster_max_hp)', () => {
+  const tempDirs: string[] = [];
+  afterEach(() => {
+    while (tempDirs.length) rmSync(tempDirs.pop()!, { recursive: true, force: true });
+  });
+
+  /** Hand-writes a pre-migration (schema version 2) database file — combat_history in its old shape, with a populated row. */
+  const makeV2Db = (path: string): void => {
+    const raw = new Database(path);
+    raw.exec(`
+      CREATE TABLE schema_version (version INTEGER NOT NULL);
+      CREATE TABLE entities (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        entity_type TEXT NOT NULL,
+        entity_name TEXT NOT NULL,
+        UNIQUE (entity_type, entity_name)
+      );
+      CREATE TABLE combat_history (
+        entity_id INTEGER PRIMARY KEY REFERENCES entities(id),
+        monster_hp INTEGER NOT NULL DEFAULT 0,
+        hits_received INTEGER NOT NULL DEFAULT 0,
+        total_damage_received INTEGER NOT NULL DEFAULT 0,
+        min_damage_per_hit INTEGER,
+        max_damage_per_hit INTEGER,
+        last_updated_at INTEGER NOT NULL
+      );
+    `);
+    raw.prepare('INSERT INTO schema_version (version) VALUES (2)').run();
+    const ratId = raw.prepare('INSERT INTO entities (entity_type, entity_name) VALUES (?, ?)').run('monster', Monsters.rat).lastInsertRowid;
+    // Old semantics: 4 is the rat's remaining HP at the moment it last hit the player, not its max HP.
+    raw.prepare(
+      'INSERT INTO combat_history (entity_id, monster_hp, hits_received, total_damage_received, min_damage_per_hit, max_damage_per_hit, last_updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    ).run(ratId, 4, 3, 15, 3, 8, 1000);
+    raw.close();
+  };
+
+  it('renames monster_hp to monster_max_hp and resets stale values to 0, preserving the other columns, bumping schema_version to 3', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'memory-migration-test-'));
+    tempDirs.push(dir);
+    const path = join(dir, 'memory.db');
+    makeV2Db(path);
+
+    const db = openMemoryDb(path);
+    const version = db.prepare('SELECT version FROM schema_version').get() as { version: number };
+    expect(version.version).toBe(3);
+
+    const history = getCombatHistory(db, Monsters.rat);
+    // The old value (4) is meaningless under the new semantics, so it's reset rather than carried forward.
+    expect(history).toMatchObject({ monsterMaxHp: 0, hitsReceived: 3, totalDamageReceived: 15, minDamagePerHit: 3, maxDamagePerHit: 8 });
+    db.close();
+  });
+
+  it('is idempotent — reopening an already-migrated file does not re-run the migration or error', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'memory-migration-test-'));
+    tempDirs.push(dir);
+    const path = join(dir, 'memory.db');
+    makeV2Db(path);
+
+    const db1 = openMemoryDb(path);
+    db1.close();
+    const db2 = openMemoryDb(path);
+    const version = db2.prepare('SELECT version FROM schema_version').get() as { version: number };
+    expect(version.version).toBe(3);
+    const rows = db2.prepare('SELECT version FROM schema_version').all();
+    expect(rows.length).toBe(1);
     db2.close();
   });
 });
@@ -610,14 +696,14 @@ describe('getLastKnownPosition', () => {
 });
 
 describe('combat history', () => {
-  it('accumulates hits received and damage, tracking the latest known monster hp', () => {
+  it('accumulates hits received and damage, tracking the monster\'s max hp', () => {
     const db = openMemoryDb(':memory:');
     recordCombatHit(db, Monsters.rat, 12, 3, 1000);
-    recordCombatHit(db, Monsters.rat, 9, 5, 1500);
+    recordCombatHit(db, Monsters.rat, 12, 5, 1500);
     const history = getCombatHistory(db, Monsters.rat);
     expect(history).toEqual({
       monsterId: Monsters.rat,
-      monsterHp: 9,
+      monsterMaxHp: 12,
       killCount: 0,
       hitsReceived: 2,
       totalDamageReceived: 8,
@@ -626,6 +712,24 @@ describe('combat history', () => {
       maxDamagePerHit: 5,
       lastUpdatedAt: 1500,
     });
+    db.close();
+  });
+
+  it('recordMonsterMaxHp records maxHp from the player\'s own attacks without touching hit-received counters', () => {
+    const db = openMemoryDb(':memory:');
+    // A monster killed before it ever hits the player — no recordCombatHit call at all.
+    recordMonsterMaxHp(db, Monsters.rat, 12, 1000);
+    const history = getCombatHistory(db, Monsters.rat);
+    expect(history).toMatchObject({ monsterMaxHp: 12, hitsReceived: 0, totalDamageReceived: 0 });
+    db.close();
+  });
+
+  it('recordMonsterMaxHp updates maxHp on an existing row without disturbing hit-received stats', () => {
+    const db = openMemoryDb(':memory:');
+    recordCombatHit(db, Monsters.rat, 0, 5, 1000);
+    recordMonsterMaxHp(db, Monsters.rat, 12, 1500);
+    const history = getCombatHistory(db, Monsters.rat);
+    expect(history).toMatchObject({ monsterMaxHp: 12, hitsReceived: 1, totalDamageReceived: 5 });
     db.close();
   });
 

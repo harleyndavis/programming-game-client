@@ -76,9 +76,14 @@ CREATE TABLE IF NOT EXISTS merchant_trades (
   PRIMARY KEY (entity_id, item)
 );
 
+-- monster_max_hp is the monster's maximum HP (UnitStats.maxHp), not its
+-- current/remaining HP at the moment of the last hit — recordMonsterMaxHp
+-- writes it from either side's attacks (see index.ts), independent of the
+-- hit-received counters below, which are specifically about damage the
+-- player took.
 CREATE TABLE IF NOT EXISTS combat_history (
   entity_id              INTEGER PRIMARY KEY REFERENCES entities(id),
-  monster_hp             INTEGER NOT NULL DEFAULT 0,
+  monster_max_hp         INTEGER NOT NULL DEFAULT 0,
   hits_received          INTEGER NOT NULL DEFAULT 0,
   total_damage_received  INTEGER NOT NULL DEFAULT 0,
   min_damage_per_hit     INTEGER,
@@ -170,7 +175,7 @@ CREATE TABLE IF NOT EXISTS quest_required_items (
 );
 `;
 
-const CURRENT_SCHEMA_VERSION = 2;
+const CURRENT_SCHEMA_VERSION = 3;
 
 /**
  * v1 -> v2: heat_map was keyed by exact (x, y); re-key by cell to match
@@ -229,6 +234,25 @@ const migrateV1ToV2_bucketHeatMapByCell = (db: Database.Database): void => {
   })();
 };
 
+/**
+ * v2 -> v3: combat_history's monster_hp column was actually the monster's
+ * current/remaining HP at the moment it last hit the player (from
+ * attackerUnit.hp), not its maximum HP — despite the dashboard displaying it
+ * as "Monster HP" implying total health. Renamed to monster_max_hp to match
+ * what's now actually stored (UnitStats.maxHp, see index.ts). Old values are
+ * meaningless under the new semantics (a snapshot of remaining HP at some
+ * past hit has no relationship to the monster's actual max HP), so they're
+ * reset to 0 rather than carried forward as if they were ever valid —
+ * recordMonsterMaxHp repopulates it correctly the next time that monster is
+ * fought, from either side's attacks.
+ */
+const migrateV2ToV3_renameMonsterHpToMaxHp = (db: Database.Database): void => {
+  db.transaction(() => {
+    db.exec('ALTER TABLE combat_history RENAME COLUMN monster_hp TO monster_max_hp');
+    db.exec('UPDATE combat_history SET monster_max_hp = 0');
+  })();
+};
+
 const migrate = (db: Database.Database): void => {
   // Creates any missing tables at the current shape; a no-op for tables that
   // already exist, regardless of whether their actual shape matches — schema
@@ -245,6 +269,10 @@ const migrate = (db: Database.Database): void => {
   if (version < 2) {
     migrateV1ToV2_bucketHeatMapByCell(db);
     version = 2;
+  }
+  if (version < 3) {
+    migrateV2ToV3_renameMonsterHpToMaxHp(db);
+    version = 3;
   }
   if (version !== row.version) {
     db.prepare('UPDATE schema_version SET version = ?').run(version);
@@ -722,7 +750,7 @@ export const getAllKnownSellingOffers = (
 
 export type CombatStats = {
   monsterId: Monsters;
-  monsterHp: number;
+  monsterMaxHp: number;
   killCount: number;
   hitsReceived: number;
   totalDamageReceived: number;
@@ -734,26 +762,54 @@ export type CombatStats = {
   lastUpdatedAt: number;
 };
 
-/** Records one hit the player took from `monsterId`, and the monster's latest known HP. */
+/**
+ * Records one hit the player took from `monsterId`, and the monster's
+ * maximum HP (UnitStats.maxHp — not its current/remaining HP at the moment
+ * of this hit, which tells you nothing about its total health).
+ */
 export const recordCombatHit = (
   db: Database.Database,
   monsterId: Monsters,
-  monsterHp: number,
+  monsterMaxHp: number,
   damageToPlayer: number,
   now: number,
 ): void => {
   const entityId = getOrCreateEntity(db, 'monster', monsterId);
   db.prepare(
-    `INSERT INTO combat_history (entity_id, monster_hp, hits_received, total_damage_received, min_damage_per_hit, max_damage_per_hit, last_updated_at)
-     VALUES (@entityId, @monsterHp, 1, @damageToPlayer, @damageToPlayer, @damageToPlayer, @now)
+    `INSERT INTO combat_history (entity_id, monster_max_hp, hits_received, total_damage_received, min_damage_per_hit, max_damage_per_hit, last_updated_at)
+     VALUES (@entityId, @monsterMaxHp, 1, @damageToPlayer, @damageToPlayer, @damageToPlayer, @now)
      ON CONFLICT(entity_id) DO UPDATE SET
-       monster_hp = excluded.monster_hp,
+       monster_max_hp = excluded.monster_max_hp,
        hits_received = hits_received + 1,
        total_damage_received = total_damage_received + excluded.total_damage_received,
        min_damage_per_hit = MIN(min_damage_per_hit, excluded.min_damage_per_hit),
        max_damage_per_hit = MAX(max_damage_per_hit, excluded.max_damage_per_hit),
        last_updated_at = excluded.last_updated_at`,
-  ).run({ entityId, monsterHp, damageToPlayer, now });
+  ).run({ entityId, monsterMaxHp, damageToPlayer, now });
+};
+
+/**
+ * Records only a monster's maximum HP, without touching the hit-received
+ * counters — for capturing it from the player's own outgoing attacks, not
+ * just hits taken (recordCombatHit above). Without this, a monster killed
+ * before it ever lands a hit (very possible — a rat dies in one swing) would
+ * never get its maxHp recorded at all, since combat_history would have no
+ * row for it yet.
+ */
+export const recordMonsterMaxHp = (
+  db: Database.Database,
+  monsterId: Monsters,
+  monsterMaxHp: number,
+  now: number,
+): void => {
+  const entityId = getOrCreateEntity(db, 'monster', monsterId);
+  db.prepare(
+    `INSERT INTO combat_history (entity_id, monster_max_hp, hits_received, total_damage_received, min_damage_per_hit, max_damage_per_hit, last_updated_at)
+     VALUES (@entityId, @monsterMaxHp, 0, 0, NULL, NULL, @now)
+     ON CONFLICT(entity_id) DO UPDATE SET
+       monster_max_hp = excluded.monster_max_hp,
+       last_updated_at = excluded.last_updated_at`,
+  ).run({ entityId, monsterMaxHp, now });
 };
 
 /** Records a kill, bumping the shared kill/harvest denominator (action_counts). */
@@ -788,7 +844,7 @@ export const getCombatHistory = (db: Database.Database, monsterId: Monsters): Co
   const row = db
     .prepare(
       `SELECT e.entity_name,
-              COALESCE(ch.monster_hp, 0) AS monster_hp,
+              COALESCE(ch.monster_max_hp, 0) AS monster_max_hp,
               COALESCE(ch.hits_received, 0) AS hits_received,
               COALESCE(ch.total_damage_received, 0) AS total_damage_received,
               ch.min_damage_per_hit,
@@ -803,7 +859,7 @@ export const getCombatHistory = (db: Database.Database, monsterId: Monsters): Co
     )
     .get(monsterId) as {
       entity_name: Monsters;
-      monster_hp: number;
+      monster_max_hp: number;
       hits_received: number;
       total_damage_received: number;
       min_damage_per_hit: number | null;
@@ -814,7 +870,7 @@ export const getCombatHistory = (db: Database.Database, monsterId: Monsters): Co
   if (!row) return null;
   return {
     monsterId: row.entity_name,
-    monsterHp: row.monster_hp,
+    monsterMaxHp: row.monster_max_hp,
     killCount: row.kill_count,
     hitsReceived: row.hits_received,
     totalDamageReceived: row.total_damage_received,

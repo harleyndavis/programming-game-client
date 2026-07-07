@@ -13,7 +13,7 @@ import { findCraftableTarget, findNextCraftTarget, findCraftableFromList, comput
 import { getHarvestableTarget, getMissingHarvestToolIds, collectHarvestToolItemIds, collectHarvestCraftingChainToolIds, collectCraftableInputIngredients, findHarvestToolToEquip, KNOWN_HARVESTABLE_ITEMS } from "./src/harvest";
 import { findBestSellMerchant } from "./src/trade";
 import { findCompletableQuest, findTurnInNpc, findBestQuestToAccept, findBestAvailableQuest, findQuestGivers, findQuestTurnInRequiredItemIds, findPendingQuestTurnInItems, findStalledQuests, findQuestToAbandon, findQuestToDismiss } from "./src/quests";
-import { openMemoryDb, getEntity, recordResourceSighting, recordMerchantTrades, recordNpcSighting, recordQuestSighting, recordMonsterKill, recordHarvest, recordLoot, recordMonsterSighting, recordCombatHit, recordSafeLocation, recordExploredCell, recordQuestEndNpc, recordQuestCompleted, getKnownStationTypes, getAllKnownSellingOffers, getKnownLootItems, getKnownQuestRewardItems, ASSUMED_SIGHT_RANGE } from "./src/memory";
+import { openMemoryDb, getEntity, recordResourceSighting, recordMerchantTrades, recordNpcSighting, recordQuestSighting, recordMonsterKill, recordHarvest, recordLoot, recordMonsterSighting, recordCombatHit, recordMonsterMaxHp, recordSafeLocation, recordExploredCell, recordQuestEndNpc, recordQuestCompleted, getKnownStationTypes, getAllKnownSellingOffers, getKnownLootItems, getKnownQuestRewardItems, ASSUMED_SIGHT_RANGE } from "./src/memory";
 
 config({
   path: ".env",
@@ -642,15 +642,21 @@ disconnectFromGame = connect({
           const attackerUnit = lastUnits[evt.attacker];
           const attackerMonsterId = attackerUnit?.type === UNIT_TYPE.monster ? (attackerUnit as ClientSideMonster).monsterId : undefined;
           if (attackerMonsterId) {
-            const monsterHp = typeof attackerUnit?.hp === "number" ? attackerUnit.hp : 0;
-            recordCombatHit(memoryDb, attackerMonsterId, monsterHp, evt.damage ?? 0, Date.now());
+            const monsterMaxHp = typeof attackerUnit?.stats?.maxHp === "number" ? attackerUnit.stats.maxHp : 0;
+            recordCombatHit(memoryDb, attackerMonsterId, monsterMaxHp, evt.damage ?? 0, Date.now());
           }
         }
-        if (evt.attacker === myUnitId && evt.hp <= 0) {
-          const killedUnit = lastUnits[evt.attacked];
-          const monsterId = killedUnit?.type === UNIT_TYPE.monster ? (killedUnit as ClientSideMonster).monsterId : undefined;
+        if (evt.attacker === myUnitId) {
+          // Resolved from the last known unit snapshot before a kill despawns it.
+          const attackedUnit = lastUnits[evt.attacked];
+          const monsterId = attackedUnit?.type === UNIT_TYPE.monster ? (attackedUnit as ClientSideMonster).monsterId : undefined;
           if (monsterId) {
-            recordMonsterKill(memoryDb, monsterId, Date.now());
+            // Captured on every hit we land, not just kills — a monster we
+            // kill before it ever hits us (very possible) would otherwise
+            // never get its maxHp recorded at all.
+            const monsterMaxHp = typeof attackedUnit?.stats?.maxHp === "number" ? attackedUnit.stats.maxHp : 0;
+            if (monsterMaxHp > 0) recordMonsterMaxHp(memoryDb, monsterId, monsterMaxHp, Date.now());
+            if (evt.hp <= 0) recordMonsterKill(memoryDb, monsterId, Date.now());
           }
         }
       }
@@ -686,18 +692,25 @@ disconnectFromGame = connect({
         const attackerUnit = lastUnits[evt.attacker];
         const attackerMonsterId = attackerUnit?.type === UNIT_TYPE.monster ? (attackerUnit as ClientSideMonster).monsterId : undefined;
         if (attackerMonsterId) {
-          const monsterHp = typeof attackerUnit?.hp === "number" ? attackerUnit.hp : 0;
-          recordCombatHit(memoryDb, attackerMonsterId, monsterHp, evt.damage ?? 0, Date.now());
+          const monsterMaxHp = typeof attackerUnit?.stats?.maxHp === "number" ? attackerUnit.stats.maxHp : 0;
+          recordCombatHit(memoryDb, attackerMonsterId, monsterMaxHp, evt.damage ?? 0, Date.now());
         }
       }
-      if (evt.attacker === myUnitId && evt.hp <= 0) {
-        // A kill — resolved from the last known unit snapshot before it despawns.
-        const killedUnit = lastUnits[evt.attacked];
-        const monsterId = killedUnit?.type === UNIT_TYPE.monster ? (killedUnit as ClientSideMonster).monsterId : undefined;
+      if (evt.attacker === myUnitId) {
+        // Resolved from the last known unit snapshot before a kill despawns it.
+        const attackedUnit = lastUnits[evt.attacked];
+        const monsterId = attackedUnit?.type === UNIT_TYPE.monster ? (attackedUnit as ClientSideMonster).monsterId : undefined;
         if (monsterId) {
-          const now = Date.now();
-          recordMonsterKill(memoryDb, monsterId, now);
-          recentKill = { monsterId, at: now };
+          // Captured on every hit we land, not just kills — a monster we
+          // kill before it ever hits us (very possible) would otherwise
+          // never get its maxHp recorded at all.
+          const monsterMaxHp = typeof attackedUnit?.stats?.maxHp === "number" ? attackedUnit.stats.maxHp : 0;
+          if (monsterMaxHp > 0) recordMonsterMaxHp(memoryDb, monsterId, monsterMaxHp, Date.now());
+          if (evt.hp <= 0) {
+            const now = Date.now();
+            recordMonsterKill(memoryDb, monsterId, now);
+            recentKill = { monsterId, at: now };
+          }
         }
       }
     } else if (eventName === 'loot' && myUnitId && evt.unitId === myUnitId) {
