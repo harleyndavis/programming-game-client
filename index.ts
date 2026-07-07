@@ -245,10 +245,6 @@ const ON_TICK_MIN_INTERVAL_MS = 1000;
 // object's treeType/oreType, before it disappears from the next heartbeat.
 let lastUnits: Record<string, ClientSideUnit> = {};
 let lastGameObjects: Record<string, GameObject> = {};
-// completedQuest's event carries only questId/questName, not the start npc
-// memory needs to mark a quests row completed — resolved from this snapshot,
-// same reason lastUnits/lastGameObjects exist.
-let lastActiveQuests: Record<string, ActiveQuest> = {};
 
 // The SDK's `loot` event carries no source reference (just who received the
 // items) — there is no correlation id anywhere linking it back to a kill or
@@ -357,11 +353,13 @@ const decide = (opts: {
 
   // Shared home chores: runs for recoveringAtHome, idlingAtHome, and
   // finishingHomeChores. Returns a decision if there's a chore to do, or null
-  // when nothing is left. 'recover' mode skips chores until close to home.
-  const homeChores = (mode: 'recover' | 'idle' | 'chores'): Decision | null => {
-    if (mode === 'recover' && distanceBetween(playerPosition, HOME_POSITION) >= HOME_CHORES_CLEAR_RADIUS) {
-      return null;
-    }
+  // when nothing is left. Not gated by distance to home — each branch below
+  // is already gated by the proximity it actually needs (nearbyBanker for
+  // withdraw, a visible NPC for quest turn-in/accept, a visible merchant for
+  // buy/sell), or needs none at all (equip, quest abandon/dismiss). Craft
+  // execution is gated by safety (see recipeToCraft/toolToCraft's own
+  // computation) rather than location.
+  const homeChores = (): Decision | null => {
     if (gearToEquip) return { type: "equip", item: gearToEquip.item, slot: gearToEquip.slot };
     if (activeCraft?.recipe && nearbyBanker) {
       const toWithdraw = computeRecipeWithdraw(activeCraft.recipe, playerInventory, storageRecord);
@@ -397,7 +395,7 @@ const decide = (opts: {
   };
 
   if (recoveringAtHome) {
-    const chore = homeChores('recover');
+    const chore = homeChores();
     if (chore) return chore;
     return { type: "return-home-recover" };
   }
@@ -428,13 +426,13 @@ const decide = (opts: {
     return { type: "attack", targetId: attackingMonster.unit.id, distance: attackingMonster.distance };
 
   if (idlingAtHome) {
-    const chore = homeChores('idle');
+    const chore = homeChores();
     if (chore) return chore;
     return { type: "return-home-idle" };
   }
 
   if (finishingHomeChores) {
-    const chore = homeChores('chores');
+    const chore = homeChores();
     if (chore) return chore;
   }
   // Attack nearby monsters when not busy.
@@ -716,8 +714,7 @@ disconnectFromGame = connect({
     } else if (eventName === 'completedQuest') {
       delete questRewards[evt.questId];
       logger.addExtra('completedQuest', { questId: evt.questId, questName: evt.questName });
-      const startNpc = lastActiveQuests[evt.questId]?.start_npc;
-      if (startNpc) recordQuestCompleted(memoryDb, startNpc, evt.questId, Date.now());
+      recordQuestCompleted(memoryDb, evt.questId, Date.now());
     } else if (eventName === 'abandonedQuest') {
       delete questRewards[evt.questId];
       logger.addExtra('abandonedQuest', { questId: evt.questId, questName: evt.questName });
@@ -920,7 +917,6 @@ disconnectFromGame = connect({
     // onEvent has no heartbeat access of its own (see recentKill/recentHarvest above).
     lastUnits = heartbeat.units;
     lastGameObjects = heartbeat.gameObjects ?? {};
-    lastActiveQuests = (player.quests ?? {}) as Record<string, ActiveQuest>;
 
     // Scan for nearby harvestable objects (trees, mining nodes) given equipped weapon.
     const harvestTarget = getHarvestableTarget(
@@ -1264,8 +1260,10 @@ disconnectFromGame = connect({
     const atHome = recoveringAtHome || idlingAtHome || finishingHomeChores;
 
     // The upgrade target we'd craft next from combined (storage + pocket) inventory.
-    // Drives deposit exclusion and the withdraw-for-craft override below.
-    const activeCraft = atHome ? findCraftableTarget(upgradeTargets, combinedInventory, recipesArray, availableStationTypes) : null;
+    // Drives deposit exclusion and the withdraw-for-craft override below — not
+    // location-gated, since withdrawing just needs a nearby banker (checked
+    // downstream in homeChores), not being at home.
+    const activeCraft = findCraftableTarget(upgradeTargets, combinedInventory, recipesArray, availableStationTypes);
     // Display-only — no inventory or withdraw impact (risk of death loss).
     const nextCraftTarget = activeCraft ?? findNextCraftTarget(upgradeTargets);
 
@@ -1337,8 +1335,10 @@ disconnectFromGame = connect({
     }
 
     // toolToCraftFromStorage: what we'd craft next if all storage items were in pocket.
-    // Used for deposit exclusion and storage withdrawal — keeps ingredients safe.
-    const toolToCraftFromStorage = atHome && allToolCraftTargets.length > 0
+    // Used for deposit exclusion and storage withdrawal — keeps ingredients
+    // safe. Not location-gated; withdrawal only needs a nearby banker
+    // (checked downstream in homeChores).
+    const toolToCraftFromStorage = allToolCraftTargets.length > 0
       ? findCraftableFromList(allToolCraftTargets, combinedInventory, recipesArray, availableStationTypes)
       : null;
 
@@ -1410,9 +1410,10 @@ disconnectFromGame = connect({
       }, 0);
     const storageWeight = storageItemsWeight + storageCoins;
     const feePerCharge = Math.ceil(storageWeight * 0.0025);
-    // Cap the fee buffer at half the coins on hand: with heavy storage the raw
-    // 100× buffer can exceed total wealth, which would lock every coin forever
-    // (availableWithdrawal 0 → effectiveCoins 0 → no purchase can ever happen).
+    // Uncapped: scales purely with storage weight. A prior half-coins cap was
+    // removed — it masked bankruptcy risk from hoarding rather than preventing
+    // it; hoarding itself is bounded elsewhere via chainKeepNeeds-driven
+    // surplus selling, not by artificially capping this buffer.
     const minStorageCoins = feePerCharge * STORAGE_FEE_BUFFER;
     const availableStorageWithdrawal = Math.max(0, storageCoins - minStorageCoins);
 
@@ -1517,19 +1518,24 @@ disconnectFromGame = connect({
       if (val === undefined || val <= 0) delete toDeposit[key as keyof typeof toDeposit];
     }
 
-    const gearToEquip = atHome
-      ? findGearToEquip({
-        inventory: player.inventory ?? {},
-        equipment: (player.equipment ?? {}) as Record<string, string | null | undefined>,
-        items: heartbeat.items as unknown as ItemMap,
-      })
-      : null;
+    // Not location-gated — may need to switch weapons/gear whenever mining or
+    // fighting something, not just at home.
+    const gearToEquip = findGearToEquip({
+      inventory: player.inventory ?? {},
+      equipment: (player.equipment ?? {}) as Record<string, string | null | undefined>,
+      items: heartbeat.items as unknown as ItemMap,
+    });
 
-    const recipeToCraft = atHome
+    // Craft execution is gated by safety, not location: station proximity is
+    // already required internally (via availableStationTypes/isRecipeAvailable),
+    // so the only additional gate needed is "not mid-combat" — if we can
+    // finish crafting, do it and wear/use it now.
+    const safeToCraft = !nearbyThreat && !attackingMonster;
+    const recipeToCraft = safeToCraft
       ? findCraftableTarget(upgradeTargets, player.inventory ?? {}, recipesArray, availableStationTypes)
       : null;
 
-    const toolToCraft = atHome && allToolCraftTargets.length > 0
+    const toolToCraft = safeToCraft && allToolCraftTargets.length > 0
       ? findCraftableFromList(allToolCraftTargets, player.inventory ?? {}, recipesArray, availableStationTypes)
       : null;
 
@@ -1714,12 +1720,18 @@ disconnectFromGame = connect({
     // Must be before withdrawal overrides so sell-withdrawal doesn't fire
     // while the quest NPC is visible, moving the bot away before re-accept.
     const activeQuests = rawQuestsForProtection;
-    // ActiveQuest carries both start_npc and end_npc directly — no correlation
-    // needed. Update-only (see recordQuestEndNpc), so unconditional every tick
-    // is safe: a no-op for any quest never seen as an AvailableQuest sighting.
+    // quest.start_npc/end_npc are raw SDK unit ids, not display names.
+    // recordQuestEndNpc resolves start_npc_id from the existing quests row
+    // (written correctly, by name, at sighting time) rather than re-deriving
+    // identity from the id. end_npc has no prior row to fall back on, so its
+    // name is resolved here via findTurnInNpc against this tick's visible
+    // NPCs; null (left untouched) when the turn-in NPC isn't currently
+    // visible. Update-only (see recordQuestEndNpc), so unconditional every
+    // tick is safe: a no-op for any quest never seen as an AvailableQuest sighting.
     const activeQuestScanNow = Date.now();
     for (const quest of Object.values(activeQuests)) {
-      recordQuestEndNpc(memoryDb, quest.start_npc, quest, activeQuestScanNow);
+      const endNpcName = findTurnInNpc(quest, visibleNpcs)?.name ?? null;
+      recordQuestEndNpc(memoryDb, quest, endNpcName, activeQuestScanNow);
     }
     const completableQuestResult = findCompletableQuest(activeQuests, player.inventory ?? {});
     const completableQuest: { quest: ActiveQuest; npc: ClientSideNPC } | null =
@@ -1813,8 +1825,10 @@ disconnectFromGame = connect({
       upgradesPlan.length === 0 &&
       toolToCraft === null &&
       toolToCraftFromStorage === null;
+    // Not location-gated — go to the quest NPC to turn in/re-accept wherever
+    // it is, not just when already at home.
     const questNpcTarget: { x: number; y: number } | null =
-      lastQuestNpcPosition !== null && (atHome || finishingHomeChores) &&
+      lastQuestNpcPosition !== null &&
         (completableQuestResult !== null || needQuestForHarvestTools)
         ? lastQuestNpcPosition
         : null;
@@ -1906,7 +1920,8 @@ disconnectFromGame = connect({
 
     // ── Post-decision: sell surplus from storage ─────────────────────────────
     // Only when at home with nothing better to do and not in a quest cycle.
-    if (atHome && nearbyBanker && decision.type !== "withdraw"
+    // !depositOverride: don't clobber a pending manual dashboard deposit.
+    if (atHome && nearbyBanker && !depositOverride && decision.type !== "withdraw"
       && completableQuest === null && questToAccept === null) {
       const toWithdrawFromStorage: Partial<Record<string, number>> = {};
       let capacityLeft = Math.max(0, maxCarryWeight - inventoryWeight);
@@ -1945,7 +1960,12 @@ disconnectFromGame = connect({
     }
 
     // ── Post-decision: auto-deposit surplus ──────────────────────────────────
-    if (atHome && nearbyBanker && decision.type === "explore" && Object.keys(toDeposit).length > 0) {
+    // "explore"/"return-home-idle"/"return-home-recover" are decide()'s
+    // "nothing left to do" outputs — deposit as the last thing once chores
+    // are truly finished, not narrower than that.
+    if (atHome && nearbyBanker
+      && (decision.type === "explore" || decision.type === "return-home-idle" || decision.type === "return-home-recover")
+      && Object.keys(toDeposit).length > 0) {
       decision = { type: "deposit", items: toDeposit, banker: nearbyBanker };
       tickExtras.autoDeposit = { items: toDeposit, banker: nearbyBanker.id };
     }

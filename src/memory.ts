@@ -183,45 +183,50 @@ const CURRENT_SCHEMA_VERSION = 2;
  * the risk of a subtly-wrong hand-rolled SQL floor-div).
  */
 const migrateV1ToV2_bucketHeatMapByCell = (db: Database.Database): void => {
-  db.exec('ALTER TABLE heat_map RENAME TO heat_map_v1');
-  db.exec(`
-    CREATE TABLE heat_map (
-      entity_id          INTEGER NOT NULL REFERENCES entities(id),
-      cell_x             INTEGER NOT NULL,
-      cell_y             INTEGER NOT NULL,
-      sight_range        REAL    NOT NULL,
-      observation_count  INTEGER NOT NULL DEFAULT 1,
-      last_seen_at       INTEGER NOT NULL,
-      PRIMARY KEY (entity_id, cell_x, cell_y)
-    )
-  `);
-  const oldRows = db.prepare(
-    'SELECT entity_id, x, y, observation_count, last_seen_at FROM heat_map_v1',
-  ).all() as { entity_id: number; x: number; y: number; observation_count: number; last_seen_at: number }[];
-
   type Bucket = { entityId: number; cellX: number; cellY: number; observationCount: number; lastSeenAt: number };
-  const buckets = new Map<string, Bucket>();
-  for (const row of oldRows) {
-    const { cellX, cellY } = cellCoordsFor({ x: row.x, y: row.y }, ASSUMED_SIGHT_RANGE);
-    const key = `${row.entity_id}:${cellX}:${cellY}`;
-    const existing = buckets.get(key);
-    if (existing) {
-      existing.observationCount += row.observation_count;
-      existing.lastSeenAt = Math.max(existing.lastSeenAt, row.last_seen_at);
-    } else {
-      buckets.set(key, { entityId: row.entity_id, cellX, cellY, observationCount: row.observation_count, lastSeenAt: row.last_seen_at });
+
+  // Wrapped as a single transaction so a crash mid-migration (e.g. between the
+  // rename and the drop) can't leave the DB in a broken intermediate state —
+  // SQLite fully supports transactional DDL, so ALTER/CREATE/DROP TABLE here
+  // all commit or roll back together with the row migration.
+  db.transaction(() => {
+    db.exec('ALTER TABLE heat_map RENAME TO heat_map_v1');
+    db.exec(`
+      CREATE TABLE heat_map (
+        entity_id          INTEGER NOT NULL REFERENCES entities(id),
+        cell_x             INTEGER NOT NULL,
+        cell_y             INTEGER NOT NULL,
+        sight_range        REAL    NOT NULL,
+        observation_count  INTEGER NOT NULL DEFAULT 1,
+        last_seen_at       INTEGER NOT NULL,
+        PRIMARY KEY (entity_id, cell_x, cell_y)
+      )
+    `);
+    const oldRows = db.prepare(
+      'SELECT entity_id, x, y, observation_count, last_seen_at FROM heat_map_v1',
+    ).all() as { entity_id: number; x: number; y: number; observation_count: number; last_seen_at: number }[];
+
+    const buckets = new Map<string, Bucket>();
+    for (const row of oldRows) {
+      const { cellX, cellY } = cellCoordsFor({ x: row.x, y: row.y }, ASSUMED_SIGHT_RANGE);
+      const key = `${row.entity_id}:${cellX}:${cellY}`;
+      const existing = buckets.get(key);
+      if (existing) {
+        existing.observationCount += row.observation_count;
+        existing.lastSeenAt = Math.max(existing.lastSeenAt, row.last_seen_at);
+      } else {
+        buckets.set(key, { entityId: row.entity_id, cellX, cellY, observationCount: row.observation_count, lastSeenAt: row.last_seen_at });
+      }
     }
-  }
 
-  const insert = db.prepare(`
-    INSERT INTO heat_map (entity_id, cell_x, cell_y, sight_range, observation_count, last_seen_at)
-    VALUES (@entityId, @cellX, @cellY, @sightRange, @observationCount, @lastSeenAt)
-  `);
-  db.transaction((rows: Bucket[]) => {
-    for (const r of rows) insert.run({ ...r, sightRange: ASSUMED_SIGHT_RANGE });
-  })(Array.from(buckets.values()));
+    const insert = db.prepare(`
+      INSERT INTO heat_map (entity_id, cell_x, cell_y, sight_range, observation_count, last_seen_at)
+      VALUES (@entityId, @cellX, @cellY, @sightRange, @observationCount, @lastSeenAt)
+    `);
+    for (const r of Array.from(buckets.values())) insert.run({ ...r, sightRange: ASSUMED_SIGHT_RANGE });
 
-  db.exec('DROP TABLE heat_map_v1');
+    db.exec('DROP TABLE heat_map_v1');
+  })();
 };
 
 const migrate = (db: Database.Database): void => {
@@ -293,7 +298,9 @@ const getOrCreateEntity = (db: Database.Database, entityType: EntityType, entity
   return inserted.id;
 };
 
-const toEntity = (row: any): Entity => ({
+type EntityRow = { id: number; entity_type: EntityType; entity_name: string };
+
+const toEntity = (row: EntityRow): Entity => ({
   id: row.id,
   entityType: row.entity_type,
   entityName: row.entity_name,
@@ -302,16 +309,16 @@ const toEntity = (row: any): Entity => ({
 export const getEntity = (db: Database.Database, entityType: EntityType, entityName: string): Entity | null => {
   const row = db
     .prepare('SELECT * FROM entities WHERE entity_type = ? AND entity_name = ?')
-    .get(entityType, entityName);
+    .get(entityType, entityName) as EntityRow | undefined;
   return row ? toEntity(row) : null;
 };
 
 /** Lists every entity type/name the bot has ever seen, optionally filtered to one entityType. */
 export const getKnownEntities = (db: Database.Database, filter: { entityType?: EntityType } = {}): Entity[] => {
   const where = filter.entityType ? 'WHERE entity_type = @entityType' : '';
-  return db
+  return (db
     .prepare(`SELECT * FROM entities ${where}`)
-    .all(filter.entityType ? { entityType: filter.entityType } : {})
+    .all(filter.entityType ? { entityType: filter.entityType } : {}) as EntityRow[])
     .map(toEntity);
 };
 
@@ -321,11 +328,11 @@ export const getKnownStationTypes = (db: Database.Database): string[] =>
 
 /** Every distinct item ever recorded as loot — a monster drop or a harvest yield — world-wide. */
 export const getKnownLootItems = (db: Database.Database): string[] =>
-  db.prepare('SELECT DISTINCT item FROM loot_counts').all().map((row: any) => row.item);
+  (db.prepare('SELECT DISTINCT item FROM loot_counts').all() as { item: string }[]).map((row) => row.item);
 
 /** Every distinct item ever seen as a quest reward, world-wide — regardless of whether that quest was ever accepted. */
 export const getKnownQuestRewardItems = (db: Database.Database): string[] =>
-  db.prepare('SELECT DISTINCT item FROM quest_reward_items').all().map((row: any) => row.item);
+  (db.prepare('SELECT DISTINCT item FROM quest_reward_items').all() as { item: string }[]).map((row) => row.item);
 
 // ── Safe locations ───────────────────────────────────────────────────────
 
@@ -356,7 +363,9 @@ export const recordSafeLocation = (
   ).run({ name, type, x: position.x, y: position.y, now });
 };
 
-const toSafeLocation = (row: any): SafeLocation => ({
+type SafeLocationRow = { name: string; type: SafeLocationType; x: number; y: number; first_seen_at: number; last_seen_at: number };
+
+const toSafeLocation = (row: SafeLocationRow): SafeLocation => ({
   name: row.name,
   type: row.type,
   position: { x: row.x, y: row.y },
@@ -365,7 +374,7 @@ const toSafeLocation = (row: any): SafeLocation => ({
 });
 
 export const getSafeLocations = (db: Database.Database): SafeLocation[] =>
-  db.prepare('SELECT * FROM safe_locations').all().map(toSafeLocation);
+  (db.prepare('SELECT * FROM safe_locations').all() as SafeLocationRow[]).map(toSafeLocation);
 
 export const findNearestSafeLocation = (
   db: Database.Database,
@@ -440,10 +449,10 @@ export const isCellExplored = (db: Database.Database, position: Position, cellSi
 };
 
 export const getExploredCells = (db: Database.Database): ExploredCell[] =>
-  db
+  (db
     .prepare('SELECT * FROM explored_cells')
-    .all()
-    .map((row: any) => ({
+    .all() as { cell_x: number; cell_y: number; sight_range: number; last_seen_at: number }[])
+    .map((row) => ({
       cellX: row.cell_x,
       cellY: row.cell_y,
       sightRange: row.sight_range,
@@ -547,15 +556,25 @@ export const getHeatMapSightings = (
     params.entityName = filter.entityName;
   }
   const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
-  return db
+  type HeatMapRow = {
+    entity_id: number;
+    cell_x: number;
+    cell_y: number;
+    sight_range: number;
+    observation_count: number;
+    last_seen_at: number;
+    entity_type: EntityType;
+    entity_name: string;
+  };
+  return (db
     .prepare(
       `SELECT h.*, e.entity_type, e.entity_name
        FROM heat_map h
        JOIN entities e ON e.id = h.entity_id
        ${where}`,
     )
-    .all(params)
-    .map((row: any) => ({
+    .all(params) as HeatMapRow[])
+    .map((row) => ({
       entityId: row.entity_id,
       entityType: row.entity_type,
       entityName: row.entity_name,
@@ -629,41 +648,50 @@ export const recordMerchantTrades = (db: Database.Database, npc: ClientSideNPC, 
   }
 };
 
+type MerchantTradeRowRaw = {
+  entity_id: number;
+  buying_price: number | null;
+  buying_qty: number | null;
+  selling_price: number | null;
+  selling_qty: number | null;
+  entity_name: string;
+};
+
 export const getMerchantTrades = (db: Database.Database, item: Items): MerchantTradeOffer[] =>
-  db
+  (db
     .prepare(
       `SELECT mt.entity_id, mt.buying_price, mt.buying_qty, mt.selling_price, mt.selling_qty, e.entity_name
        FROM merchant_trades mt
        JOIN entities e ON e.id = mt.entity_id
        WHERE mt.item = ?`,
     )
-    .all(item)
-    .map((row: any) => ({
+    .all(item) as MerchantTradeRowRaw[])
+    .map((row) => ({
       entityId: row.entity_id,
       merchantName: row.entity_name,
       position: getLastKnownPosition(db, row.entity_id),
-      buying: row.buying_price != null ? { price: row.buying_price, quantity: row.buying_qty } : undefined,
-      selling: row.selling_price != null ? { price: row.selling_price, quantity: row.selling_qty } : undefined,
+      buying: row.buying_price != null ? { price: row.buying_price, quantity: row.buying_qty! } : undefined,
+      selling: row.selling_price != null ? { price: row.selling_price, quantity: row.selling_qty! } : undefined,
     }));
 
 export type MerchantTradeRow = MerchantTradeOffer & { item: Items };
 
 /** Every known merchant trade offer, unfiltered by item — the "list everything" counterpart to getMerchantTrades. */
 export const getAllMerchantTrades = (db: Database.Database): MerchantTradeRow[] =>
-  db
+  (db
     .prepare(
       `SELECT mt.entity_id, mt.item, mt.buying_price, mt.buying_qty, mt.selling_price, mt.selling_qty, e.entity_name
        FROM merchant_trades mt
        JOIN entities e ON e.id = mt.entity_id`,
     )
-    .all()
-    .map((row: any) => ({
+    .all() as (MerchantTradeRowRaw & { item: Items })[])
+    .map((row) => ({
       entityId: row.entity_id,
       merchantName: row.entity_name,
       item: row.item,
       position: getLastKnownPosition(db, row.entity_id),
-      buying: row.buying_price != null ? { price: row.buying_price, quantity: row.buying_qty } : undefined,
-      selling: row.selling_price != null ? { price: row.selling_price, quantity: row.selling_qty } : undefined,
+      buying: row.buying_price != null ? { price: row.buying_price, quantity: row.buying_qty! } : undefined,
+      selling: row.selling_price != null ? { price: row.selling_price, quantity: row.selling_qty! } : undefined,
     }));
 
 /**
@@ -773,7 +801,16 @@ export const getCombatHistory = (db: Database.Database, monsterId: Monsters): Co
        WHERE e.entity_type = 'monster' AND e.entity_name = ?
          AND (ch.entity_id IS NOT NULL OR ac.entity_id IS NOT NULL)`,
     )
-    .get(monsterId) as any;
+    .get(monsterId) as {
+      entity_name: Monsters;
+      monster_hp: number;
+      hits_received: number;
+      total_damage_received: number;
+      min_damage_per_hit: number | null;
+      max_damage_per_hit: number | null;
+      kill_count: number;
+      last_updated_at: number;
+    } | undefined;
   if (!row) return null;
   return {
     monsterId: row.entity_name,
@@ -841,12 +878,12 @@ export const getLootRates = (db: Database.Database, entityType: EntityType, enti
     .prepare('SELECT total_count FROM action_counts WHERE entity_id = ?')
     .get(entity.id) as { total_count: number } | undefined;
   if (!actions || actions.total_count <= 0) return [];
-  return db
+  return (db
     .prepare(
       'SELECT item, total_quantity, loot_events, min_quantity, max_quantity FROM loot_counts WHERE entity_id = ? ORDER BY item',
     )
-    .all(entity.id)
-    .map((row: any) => ({
+    .all(entity.id) as { item: Items; total_quantity: number; loot_events: number; min_quantity: number | null; max_quantity: number | null }[])
+    .map((row) => ({
       item: row.item,
       totalQuantity: row.total_quantity,
       lootEvents: row.loot_events,
@@ -1029,30 +1066,50 @@ export const recordQuestSighting = (
  * rather than fabricating a placeholder quest record just to hang an
  * end_npc_id on.
  */
-export const recordQuestEndNpc = (db: Database.Database, npcName: string, quest: ActiveQuest, now: number): void => {
-  const startNpcId = getOrCreateEntity(db, 'npc', npcName);
-  const endNpcId = getOrCreateEntity(db, 'npc', quest.end_npc);
+export const recordQuestEndNpc = (
+  db: Database.Database,
+  quest: ActiveQuest,
+  endNpcName: string | null,
+  now: number,
+): void => {
+  const existing = db
+    .prepare('SELECT start_npc_id FROM quests WHERE quest_id = ?')
+    .get(quest.id) as { start_npc_id: number } | undefined;
+  if (!existing) return;
+  const endNpcId = endNpcName ? getOrCreateEntity(db, 'npc', endNpcName) : null;
   db.prepare(
-    `UPDATE quests SET end_npc_id = @endNpcId, last_seen_at = @now
+    `UPDATE quests SET end_npc_id = COALESCE(@endNpcId, end_npc_id), last_seen_at = @now
      WHERE start_npc_id = @startNpcId AND quest_id = @questId`,
-  ).run({ startNpcId, endNpcId, questId: quest.id, now });
+  ).run({ startNpcId: existing.start_npc_id, endNpcId, questId: quest.id, now });
 };
 
 /** Marks a quest completed. Neither ActiveQuest nor AvailableQuest carries a "done" flag themselves — the caller must call this explicitly when a turn-in succeeds. */
 export const recordQuestCompleted = (
   db: Database.Database,
-  npcName: string,
   questId: string,
   now: number,
 ): void => {
-  const startNpcId = getOrCreateEntity(db, 'npc', npcName);
+  const existing = db
+    .prepare('SELECT start_npc_id FROM quests WHERE quest_id = ?')
+    .get(questId) as { start_npc_id: number } | undefined;
+  if (!existing) return;
   db.prepare(
     `UPDATE quests SET status = 'completed', last_seen_at = @now
      WHERE start_npc_id = @startNpcId AND quest_id = @questId`,
-  ).run({ startNpcId, questId, now });
+  ).run({ startNpcId: existing.start_npc_id, questId, now });
 };
 
-const buildQuestRecord = (db: Database.Database, row: any): QuestRecord => {
+type QuestRow = {
+  start_npc_id: number;
+  quest_id: string;
+  end_npc_id: number | null;
+  name: string;
+  repeatable: number;
+  status: QuestSightingStatus;
+  last_seen_at: number;
+};
+
+const buildQuestRecord = (db: Database.Database, row: QuestRow): QuestRecord => {
   const rewardItems: Partial<Record<Items, number>> = {};
   for (const r of db
     .prepare('SELECT item, quantity FROM quest_reward_items WHERE start_npc_id = ? AND quest_id = ?')
@@ -1095,15 +1152,15 @@ export const getQuestSighting = (
   if (!entity) return null;
   const row = db
     .prepare('SELECT * FROM quests WHERE start_npc_id = ? AND quest_id = ?')
-    .get(entity.id, questId);
+    .get(entity.id, questId) as QuestRow | undefined;
   return row ? buildQuestRecord(db, row) : null;
 };
 
 export const getKnownQuestsForNpc = (db: Database.Database, npcName: string): QuestRecord[] => {
   const entity = getEntity(db, 'npc', npcName);
   if (!entity) return [];
-  return db
+  return (db
     .prepare('SELECT * FROM quests WHERE start_npc_id = ?')
-    .all(entity.id)
-    .map((row: any) => buildQuestRecord(db, row));
+    .all(entity.id) as QuestRow[])
+    .map((row) => buildQuestRecord(db, row));
 };

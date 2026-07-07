@@ -907,7 +907,7 @@ describe('quests memory', () => {
   it('recordQuestEndNpc records the turn-in NPC on an existing quest row without touching status, repeatable, or child tables', () => {
     const db = openMemoryDb(':memory:');
     recordQuestSighting(db, 'Elder', availableQuest, 1000);
-    recordQuestEndNpc(db, 'Elder', activeQuest, 2000);
+    recordQuestEndNpc(db, activeQuest, 'Elder', 2000);
     const record = getQuestSighting(db, 'Elder', 'q1');
     const elder = getEntity(db, 'npc', 'Elder');
     expect(record?.endNpcId).toBe(elder?.id);
@@ -920,15 +920,28 @@ describe('quests memory', () => {
 
   it('recordQuestEndNpc is a no-op when the quest was never recorded via an available sighting', () => {
     const db = openMemoryDb(':memory:');
-    recordQuestEndNpc(db, 'Elder', activeQuest, 1000);
+    recordQuestEndNpc(db, activeQuest, 'Elder', 1000);
     expect(getQuestSighting(db, 'Elder', 'q1')).toBeNull();
+    db.close();
+  });
+
+  it('recordQuestEndNpc resolves the turn-in NPC via the caller-supplied name, not quest.end_npc\'s raw unit id', () => {
+    const db = openMemoryDb(':memory:');
+    recordQuestSighting(db, 'Elder', availableQuest, 1000);
+    // quest.end_npc holds a raw SDK unit id here, not a display name — the
+    // caller-supplied endNpcName ('Elder') must be what actually gets used.
+    recordQuestEndNpc(db, { ...activeQuest, end_npc: 'npc_unit_42' }, 'Elder', 2000);
+    const record = getQuestSighting(db, 'Elder', 'q1');
+    const elder = getEntity(db, 'npc', 'Elder');
+    expect(record?.endNpcId).toBe(elder?.id);
+    expect(getEntity(db, 'npc', 'npc_unit_42')).toBeNull();
     db.close();
   });
 
   it('recordQuestCompleted marks a quest completed without touching its reward/requirement rows', () => {
     const db = openMemoryDb(':memory:');
     recordQuestSighting(db, 'Elder', availableQuest, 1000);
-    recordQuestCompleted(db, 'Elder', 'q1', 2000);
+    recordQuestCompleted(db, 'q1', 2000);
     const record = getQuestSighting(db, 'Elder', 'q1');
     expect(record?.status).toBe('completed');
     expect(record?.lastSeenAt).toBe(2000);

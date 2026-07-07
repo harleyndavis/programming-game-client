@@ -264,6 +264,22 @@ describe('computeDifficultyTier', () => {
     expect(tier).toBe(5);
   });
 
+  it('returns tier 5 (not 4) when the chain can produce only 1 unit of an ingredient but the recipe needs more', () => {
+    const stationRecipes: RecipeList = [
+      makeRecipe({ id: 'ingot', output: { ironIngot: 1 }, input: { ironOre: 2 } }),
+    ];
+    const tier = computeDifficultyTier({
+      itemId: 'ironSword',
+      recipe: { id: 'r1', input: { ironIngot: 3 }, required: [] },
+      allMerchantSelling: {},
+      // Enough ironOre for exactly 1 ironIngot, not the 3 the recipe needs.
+      inventory: { ironOre: 2 },
+      playerCoins: 0,
+      recipes: stationRecipes,
+    });
+    expect(tier).toBe(5);
+  });
+
   it('returns tier 4 (not 5) for a no-recipe item that is a known loot drop', () => {
     const tier = computeDifficultyTier({
       itemId: 'pinewoodLog',

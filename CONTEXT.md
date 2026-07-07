@@ -183,14 +183,17 @@ chains need, but only when a currently visible merchant actually buys that
 item; otherwise the item would bounce between pocket and storage every tick
 with nowhere to sell it. Runs only when no other banking override is active.
 
-**Fee buffer:** `minStorageCoins = min(ceil(total_storage_weight_g × 0.0025) ×
-100, floor(storageCoins / 2))`. Only coins above this buffer are available for
-withdrawal. The `/ 2` cap exists because the raw 100× buffer scales with
-hoarded storage weight — with enough low-value bulk items (e.g. thousands of
-rat pelts) it can exceed total wealth and permanently lock every coin
-(`availableWithdrawal` stays 0 forever, so no purchase can ever be afforded).
-Capping at half of on-hand coins guarantees some coins are always spendable.
-(Uncapped formula source: `docs/game-reference.md` → *Storage fees*.)
+**Fee buffer:** `minStorageCoins = ceil(total_storage_weight_g × 0.0025) × 100`
+— uncapped. Only coins above this buffer are available for withdrawal. A
+prior `min(..., floor(storageCoins / 2))` cap was removed: it was meant to
+guarantee some coins stayed spendable, but in practice it just swapped one
+failure mode (locked coins) for another (bankruptcy from over-permissive
+withdrawal against a hoard the bot couldn't actually afford). Storage hoarding
+itself is bounded independently — via `chainKeepNeeds`-bounded surplus selling
+(`src/plan.ts`'s `computeChainNeeds`, applied in the non-protected+surplus
+withdraw block above) — so removing the cap here is safe: the fee buffer no
+longer needs to double as a hoarding safety valve.
+(Formula source: `docs/game-reference.md` → *Storage fees*.)
 
 **Upgrade-aware inventory (cycle prevention):** `computeUpgradeTargets` receives
 a merged view of `player.inventory + player.storage` so that craftable

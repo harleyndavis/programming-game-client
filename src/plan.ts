@@ -226,7 +226,7 @@ export const computeDifficultyTier = (opts: {
       craftTier = 2;
     } else {
       const allObtainable =
-        Object.entries(recipe.input).every(([id]) => canObtainChain(id, inventory, allMerchantSelling, recipes, new Set(), 1, knownStationTypes, knownLootItems, knownQuestRewardItems)) &&
+        Object.entries(recipe.input).every(([id, qty]) => canObtainChain(id, inventory, allMerchantSelling, recipes, new Set(), qty ?? 0, knownStationTypes, knownLootItems, knownQuestRewardItems)) &&
         recipe.required.every(id => canObtainChain(id as string, inventory, allMerchantSelling, recipes, new Set(), 1, knownStationTypes, knownLootItems, knownQuestRewardItems));
       craftTier = allObtainable ? 4 : 5;
     }
