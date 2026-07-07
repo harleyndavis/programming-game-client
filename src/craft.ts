@@ -129,6 +129,13 @@ export function findCraftableFromList(
  * persisted knownStationTypes (a station-gated recipe is worth shopping toward
  * even if the bot isn't standing at the station right now). Does not spend
  * more than playerCoins.
+ *
+ * knownHarvestItems (e.g. src/harvest.ts's KNOWN_HARVESTABLE_ITEMS, merged
+ * with any empirically-confirmed harvest yields) is skipped even when a
+ * merchant sells it — harvesting is free besides tool wear, so for now we
+ * promote it over spending coins. The shortfall is simply left unaddressed
+ * here; the needs-aware harvest targeting (getHarvestableTarget) is
+ * responsible for actually acquiring it.
  */
 export function computeCraftIngredientsToBuyFromMerchant(
   targetItemIds: string[],
@@ -137,6 +144,7 @@ export function computeCraftIngredientsToBuyFromMerchant(
   merchantSelling: Record<string, { price: number; quantity: number } | undefined>,
   playerCoins: number,
   knownStationTypes: ReadonlySet<string> = new Set(),
+  knownHarvestItems: ReadonlySet<string> = new Set(),
 ): Partial<Record<string, number>> {
   const basket: Partial<Record<string, number>> = {};
   let coinsLeft = playerCoins;
@@ -146,6 +154,7 @@ export function computeCraftIngredientsToBuyFromMerchant(
     const have = (inventory[itemId] ?? 0) + (basket[itemId] ?? 0);
     const shortfall = Math.max(0, qty - have);
     if (shortfall <= 0) return;
+    if (knownHarvestItems.has(itemId)) return;
 
     const offer = merchantSelling[itemId];
     if (offer && offer.quantity > 0 && offer.price > 0) {

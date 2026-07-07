@@ -14,6 +14,44 @@ export function isHarvestWeaponType(type: string): boolean {
   return HARVEST_WEAPON_TYPES.has(type);
 }
 
+/**
+ * A-priori knowledge of what a resource node yields, keyed by its
+ * `treeType`/`oreType` — the "kickstart" so the bot can go mine copper ore
+ * the first time it needs copperIngot, without first having to stumble onto
+ * a copper node and loot it once. Confirmed empirically thereafter via
+ * `getLootRates`/`getKnownLootItems` (src/memory.ts), which record the SDK's
+ * own `loot` event for a harvest the same way as a monster kill — this table
+ * is only the cold-start guess, not a replacement for that.
+ */
+export const TREE_TYPE_LOG_ITEM: Record<string, string> = {
+  pine: 'pinewoodLog',
+  oak: 'oakLog',
+  mesquite: 'mesquiteLog',
+  hemlock: 'hemlockLog',
+  cypress: 'cypressLog',
+  bloodwood: 'bloodwoodLog',
+  rosewood: 'rosewoodLog',
+  ebony: 'ebonyLog',
+};
+
+export const ORE_TYPE_ITEM: Record<string, string> = {
+  copper: 'copperOre',
+  tin: 'tinOre',
+  iron: 'ironOre',
+  cobalt: 'cobaltOre',
+  titanium: 'titaniumOre',
+  coal: 'coalChunk',
+  mythril: 'mythrilOre',
+  adamantite: 'adamantiteOre',
+  gold: 'goldOre',
+};
+
+/** Every item obtainable by harvesting some tree or mining node, per the guess table above. */
+export const KNOWN_HARVESTABLE_ITEMS: ReadonlySet<string> = new Set([
+  ...Object.values(TREE_TYPE_LOG_ITEM),
+  ...Object.values(ORE_TYPE_ITEM),
+]);
+
 export function collectHarvestToolItemIds(
   items: Record<string, { type?: string }>,
 ): Set<string> {
@@ -24,14 +62,38 @@ export function collectHarvestToolItemIds(
   return ids;
 }
 
+/** What a tree/mining node is expected to yield, per the guess table (see KNOWN_HARVESTABLE_ITEMS). */
+const guessedYield = (obj: Tree | MiningNode): string | undefined =>
+  obj.type === 'tree' ? TREE_TYPE_LOG_ITEM[obj.treeType] : ORE_TYPE_ITEM[obj.oreType];
+
+/**
+ * Nearest harvestable tree/mining node the equipped tool can work, optionally
+ * biased toward `neededItems` — item IDs the current craft chain is actually
+ * short on (see neededHarvestItems in index.ts, which already nets off
+ * combinedInventory — an item drops out the moment we have enough, so this
+ * isn't "we needed one an hour ago," it's recomputed fresh every tick).
+ *
+ * When neededItems is non-empty, ONLY a node guessed to yield one of them is
+ * returned — never a nearer node yielding something unneeded. Without this,
+ * once nothing matched a need the old fallback ("nearest of any type") would
+ * still send the bot to chop/mine whatever's closest regardless of whether
+ * it's wanted, which is how you end up encumbered with logs nobody asked
+ * for, dropping them, and going right back to cut more.
+ *
+ * The opportunistic "nearest of any type" behavior only applies when
+ * neededItems is empty (nothing is currently needed at all) — the previous,
+ * need-agnostic default, preserved for idle/no-active-chain gathering.
+ */
 export function getHarvestableTarget(
   gameObjects: Record<string, GameObject>,
   equipment: Record<string, string | null | undefined>,
   items: Record<string, { type?: string }>,
   playerPosition: Position,
+  neededItems: ReadonlySet<string> = new Set(),
 ): { target: Tree | MiningNode; distance: number } | null {
   const weaponType = equipment.weapon ? items[equipment.weapon]?.type : undefined;
   let closest: { target: Tree | MiningNode; distance: number } | null = null;
+  let closestNeeded: { target: Tree | MiningNode; distance: number } | null = null;
 
   for (const obj of Object.values(gameObjects)) {
     if (obj.type !== 'tree' && obj.type !== 'miningNode') continue;
@@ -39,11 +101,16 @@ export function getHarvestableTarget(
     const requiredType = HARVEST_WEAPON_TYPE[obj.type];
     if (!requiredType || weaponType !== requiredType) continue;
     const dist = distanceBetween(playerPosition, obj.position!);
-    if (!closest || dist < closest.distance) {
-      closest = { target: obj as Tree | MiningNode, distance: dist };
+    const candidate = { target: obj as Tree | MiningNode, distance: dist };
+    if (!closest || dist < closest.distance) closest = candidate;
+    if (neededItems.size > 0) {
+      const yields = guessedYield(candidate.target);
+      if (yields && neededItems.has(yields) && (!closestNeeded || dist < closestNeeded.distance)) {
+        closestNeeded = candidate;
+      }
     }
   }
-  return closest;
+  return neededItems.size > 0 ? closestNeeded : closest;
 }
 
 export const HARVEST_TOOL_TIER_ORDER: Record<string, number> = {
@@ -52,6 +119,57 @@ export const HARVEST_TOOL_TIER_ORDER: Record<string, number> = {
   copperFellingAxe: 2,
   copperPickaxe: 2,
 };
+
+/** Harvest tool `type` (fellingAxe/pickaxe) that would let the bot obtain a given raw resource item. */
+const HARVEST_ITEM_TOOL_TYPE: Record<string, string> = (() => {
+  const map: Record<string, string> = {};
+  for (const item of Object.values(TREE_TYPE_LOG_ITEM)) map[item] = 'fellingAxe';
+  for (const item of Object.values(ORE_TYPE_ITEM)) map[item] = 'pickaxe';
+  return map;
+})();
+
+/**
+ * The harvest tool to switch into the weapon slot, if the currently equipped
+ * weapon doesn't already match what `neededItems` requires (see
+ * neededHarvestItems in index.ts) and a suitable one is owned. Prefers the
+ * highest-tier owned tool of the needed type (HARVEST_TOOL_TIER_ORDER).
+ *
+ * When items of both tool types are needed at once (e.g. a log and an ore
+ * are both short), picks whichever type appears first in `neededItems` — an
+ * arbitrary but deterministic tie-break, since only one tool fits the weapon
+ * slot; the other need just waits its turn.
+ *
+ * Returns null when nothing needs a tool switch (nothing needed, the
+ * equipped weapon already matches, or no matching tool is owned — in which
+ * case the shopping/crafting paths for that tool are the ones responsible
+ * for getting one, not this function).
+ */
+export function findHarvestToolToEquip(
+  neededItems: ReadonlySet<string>,
+  inventory: Partial<Record<string, number>>,
+  equipment: Record<string, string | null | undefined>,
+  items: Record<string, { type?: string }>,
+): { item: string; slot: string } | null {
+  const equippedType = equipment.weapon ? items[equipment.weapon]?.type : undefined;
+  const neededToolTypes = new Set<string>();
+  for (const itemId of Array.from(neededItems)) {
+    const toolType = HARVEST_ITEM_TOOL_TYPE[itemId];
+    if (toolType) neededToolTypes.add(toolType);
+  }
+  if (neededToolTypes.size === 0 || (equippedType && neededToolTypes.has(equippedType))) return null;
+
+  const toolType = Array.from(neededToolTypes)[0];
+  let best: string | null = null;
+  let bestTier = -1;
+  for (const [itemId, qty] of Object.entries(inventory)) {
+    if (typeof qty !== 'number' || qty <= 0) continue;
+    if (items[itemId]?.type !== toolType) continue;
+    const tier = HARVEST_TOOL_TIER_ORDER[itemId] ?? 0;
+    if (tier > bestTier) { best = itemId; bestTier = tier; }
+  }
+  if (!best || equipment.weapon === best) return null;
+  return { item: best, slot: 'weapon' };
+}
 
 /**
  * Walks the recipe chain (available per knownStationTypes) for each missing

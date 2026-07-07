@@ -311,6 +311,17 @@ describe('computeCraftIngredientsToBuyFromMerchant', () => {
     );
     expect(withKnowledge).toEqual({ ironIngot: 2 });
   });
+
+  it('skips buying a known-harvestable ingredient even when a merchant sells it', () => {
+    const recipes: RecipeList = [
+      { id: 'axe', input: { pinewoodLog: 2 }, output: { stoneFellingAxe: 1 }, required: [], station: null },
+    ];
+    const basket = computeCraftIngredientsToBuyFromMerchant(
+      ['stoneFellingAxe'], {}, recipes, { pinewoodLog: { price: 5, quantity: 10 } }, 100,
+      new Set(), new Set(['pinewoodLog']),
+    );
+    expect(basket).toEqual({});
+  });
 });
 
 describe('isFullyAchievableFromInventory', () => {
