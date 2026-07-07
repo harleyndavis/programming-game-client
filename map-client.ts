@@ -34,7 +34,7 @@ const RESOURCE_COLORS: Record<string, string> = {
 
 const ICON_DEFS = [
   { url: '/images/npc.svg', label: 'NPCs', test: function (t: string, _n: string) { return t === 'npc'; } },
-  { url: '/images/anvil.svg', label: 'Stations', getIconUrl: function (n: string) { return n === 'campfire' ? '/images/campfire.svg' : '/images/anvil.svg'; }, test: function (t: string, _n: string) { return t === 'station'; } },
+  { url: '/images/anvil.svg', label: 'Stations', getIconUrl: function (n: string) { if (n === 'cooking') return '/images/campfire.svg'; if (n === 'alchemy') return '/images/round-potion.svg'; return '/images/anvil.svg'; }, test: function (t: string, _n: string) { return t === 'station'; } },
   { url: '/images/tree.svg', label: 'Trees', test: function (t: string, n: string) { return t === 'resource' && TREE_NAMES.has(n); } },
   { url: '/images/ore.svg', label: 'Ore', test: function (t: string, n: string) { return t === 'resource' && ORE_NAMES.has(n); } },
   { url: '/images/monster.svg', label: 'Monsters', test: function (t: string, _n: string) { return t === 'monster'; } },
@@ -174,6 +174,8 @@ var getProcessedIconUrl = function (url: string): string {
   return processedIconUrls[url];
 };
 
+var STATION_TYPES = ['cooking', 'smithing', 'smelting', 'alchemy', 'gemCutting'];
+
 var initIcons = function (): Promise<void> {
   if (iconsReady) return iconsReady;
   var promises: Array<Promise<void>> = [];
@@ -181,8 +183,8 @@ var initIcons = function (): Promise<void> {
   ICON_DEFS.forEach(function (def) {
     var urls = [def.url];
     if (def.getIconUrl) {
-      // stations have dynamic icon selection, collect all possible URLs
-      urls.push(def.getIconUrl('campfire'));
+      // Preload all possible station icon variants
+      STATION_TYPES.forEach(function (st) { urls.push(def.getIconUrl!(st)); });
     }
     urls.forEach(function (url) {
       if (!seen.has(url)) {
@@ -481,7 +483,7 @@ var render = function (data: MapResponse) {
   legendItems.push('<span class="legend-item"><span class="legend-square" style="background:rgba(34,211,238,0.15);border:1px solid rgba(34,211,238,0.4)"></span><span class="legend-label">Explored</span></span>');
   legendItems.push('<span class="legend-item"><span class="legend-square" style="background:#0b1220;border:1px solid rgba(75,85,99,0.5)"></span><span class="legend-label">Unexplored</span></span>');
 
-  var legendOrder = ["monster", "npc", "station", "resource"];
+  var legendOrder = ["monster", "npc", "resource"];
   legendOrder.forEach(function (t) {
     if (!legendTypes.has(t) && t !== "resource") return;
     if (t === "resource" && !resourceNames) return;
@@ -507,6 +509,21 @@ var render = function (data: MapResponse) {
       }
     }
   });
+
+  // Station legend: individual types with their specific icons
+  if (legendTypes.has("station")) {
+    var stationNames = new Set<string>();
+    data.heatMap.forEach(function (h) { if (h.entityType === "station") stationNames.add(h.entityName); });
+    legendItems.push('<span class="legend-item"><span class="legend-label">Stations:</span></span>');
+    var STATION_LEGEND_ORDER = ['smithing', 'cooking', 'alchemy', 'smelting', 'gemCutting'];
+    STATION_LEGEND_ORDER.forEach(function (name) {
+      if (!stationNames.has(name)) return;
+      var stationDef = ICON_DEFS[1]; // stations def
+      var iconUrl = stationDef.getIconUrl!(name);
+      var label = name.charAt(0).toUpperCase() + name.slice(1);
+      legendItems.push('<span class="legend-item"><span class="legend-icon-sm" style="background-image:url(' + getProcessedIconUrl(iconUrl) + ')"></span><span class="legend-label">' + label + '</span></span>');
+    });
+  }
 
   legendEl.innerHTML = legendItems.join(" ");
 };
