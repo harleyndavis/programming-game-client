@@ -402,6 +402,15 @@ const decide = (opts: {
     return null;
   };
 
+  // gearToEquip (src/equipment.ts) already picks whichever owned weapon has
+  // the best stats, harvest tools included — a pickaxe with better dps than
+  // whatever's equipped is a perfectly fine weapon. Narrowed to the weapon
+  // slot here and only consulted right before an attack fires (below), not
+  // generally: while there's no monster to fight, harvestToolToEquip is what
+  // should be picking the weapon slot (it needs the *correct tool type* for
+  // the resource being harvested, not the highest-dps one).
+  const reclaimWeapon = gearToEquip?.slot === 'weapon' ? gearToEquip : null;
+
   if (recoveringAtHome) {
     const chore = homeChores();
     if (chore) return chore;
@@ -426,12 +435,17 @@ const decide = (opts: {
   // Hunt for food — only engage target animals, flee from everything else.
   if (isHunting) {
     if (nearbyThreat) return { type: "explore", to: HOME_POSITION };
-    if (nearbyHuntTarget) return { type: "attack", targetId: nearbyHuntTarget.unit.id, distance: nearbyHuntTarget.distance };
+    if (nearbyHuntTarget) {
+      if (reclaimWeapon) return { type: "equip", item: reclaimWeapon.item, slot: reclaimWeapon.slot };
+      return { type: "attack", targetId: nearbyHuntTarget.unit.id, distance: nearbyHuntTarget.distance };
+    }
     return { type: "explore", to: huntPatrolTo(playerPosition, huntRadius) };
   }
   // Self-defense when not recovering: fight back if attacked while doing chores.
-  if (attackingMonster)
+  if (attackingMonster) {
+    if (reclaimWeapon) return { type: "equip", item: reclaimWeapon.item, slot: reclaimWeapon.slot };
     return { type: "attack", targetId: attackingMonster.unit.id, distance: attackingMonster.distance };
+  }
 
   if (idlingAtHome) {
     const chore = homeChores();
@@ -444,8 +458,10 @@ const decide = (opts: {
     if (chore) return chore;
   }
   // Attack nearby monsters when not busy.
-  if (nearbyMonster)
+  if (nearbyMonster) {
+    if (reclaimWeapon) return { type: "equip", item: reclaimWeapon.item, slot: reclaimWeapon.slot };
     return { type: "attack", targetId: nearbyMonster.unit.id, distance: nearbyMonster.distance };
+  }
   // Carry the harvest tool (fellingAxe/pickaxe) the current need calls for —
   // e.g. copperOre short → pickaxe — before chasing a harvest target with
   // whatever happens to already be equipped. Not while a threat is nearby:
@@ -1263,8 +1279,16 @@ disconnectFromGame = connect({
     });
     // Update lastEquipment each tick but never clear on death: this keeps
     // recovery materials protected across the window when equipment is empty.
+    // Skip a harvest tool temporarily occupying the weapon slot (need-based
+    // tool-switching, see findHarvestToolToEquip) — otherwise the real weapon
+    // it displaced (e.g. copperSword) is overwritten here, drops out of
+    // chainKeepNeeds below, and becomes sellable/droppable while it's just
+    // sitting in pocket waiting to be re-equipped.
     for (const [slot, itemId] of Object.entries((player.equipment ?? {}) as Record<string, string | null | undefined>)) {
-      if (itemId) lastEquipment[slot] = itemId;
+      if (!itemId) continue;
+      const itemType = (heartbeat.items as Record<string, { type?: string }>)[itemId]?.type;
+      if (itemType && isHarvestWeaponType(itemType)) continue;
+      lastEquipment[slot] = itemId;
     }
     // Tool IDs are computed once from recipe required arrays + harvesting weapon
     // types. Recipes and the item catalog don't change after the initial heartbeat.
