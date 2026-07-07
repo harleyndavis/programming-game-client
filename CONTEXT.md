@@ -30,7 +30,7 @@ This exists because the SDK calls `onTick` on every single socket event, not jus
 - **`src/harvest.ts`** — harvest target/tool planning (missing tools, their crafting-chain prerequisites, craftable ingredient shortfalls)
 - **`src/trade.ts`** — merchant/banker helpers (best sell price, storage fees)
 - **`src/quests.ts`** — quest helpers (completable quest detection, turn-in NPC lookup, reward evaluation with need/stocked-aware scoring, best-quest-to-accept selection, pending turn-in item tracking, stalled-quest abandonment)
-- **`src/memory.ts`** — SQLite-backed (`better-sqlite3`) dumb store for world facts (safe locations, merchant knowledge, explored cells, world heat map, combat history, drop tables, quests), tracked in #6. No opinions — records what it's told, callers interpret. Not new code extracted from `index.ts`; built directly against ADR-0002's module stack, so it is not yet wired into the tick loop (no `index.ts` changes landed with it — see ADR-0003's "create the file, don't touch `index.ts`" sequencing).
+- **`src/memory.ts`** — SQLite-backed (`better-sqlite3`) dumb store for world facts (safe locations, merchant knowledge, explored cells, world heat map, combat history, loot tables, quests), tracked in #6. No opinions — records what it's told, callers interpret. Not new code extracted from `index.ts`; built directly against ADR-0002's module stack. Wired per ADR-0004's phasing: Phase 1 (write-side — station/merchant sightings, kill/harvest detection, loot attribution) and part of Phase 2 (planner-level reads — `knownStationTypes`/`nearbyStationTypes` and remembered merchant offers stabilize upgrade-plan reachability across the bot's location, in `src/plan.ts`/`src/equipment.ts`/`src/craft.ts`/`src/harvest.ts`) both land in `index.ts` now. Combat/loot variance data (min/max, not just averages) is captured but not yet consumed by any decision logic — that's a further Phase 2 step. `decide()` itself still does not query memory directly (Phase 3, blocked on the ADR-0001 utility-scoring rewrite, issue #7).
 
 The following modules remain in `index.ts` and will be extracted when the architecture supports them (tracked in the linked issues):
 
@@ -292,15 +292,21 @@ rates, combat averages, and heat map proximity lookups. Categories:
   `merchant_name` column anywhere duplicating what `entities.entity_name`
   already holds for that id. Answers "what kinds of monsters/trees/ore — or
   which named NPCs — have we ever seen" as a standalone query, decoupled
-  from the heat map's purely spatial "where/when" concern. Room to extend:
-  if an entity type accumulates detail nothing else needs (e.g. harvest
-  yields for trees/ore, which NPCs never have), that becomes its own table
-  keyed by the catalog's id — merchant trades and quests are already this
-  pattern: per-individual-NPC detail tables (individual identity matters
-  here, since different named merchants can offer different prices, or
-  different named NPCs can each give their own quests) that reference their
-  NPC's own entity and nothing else about it — no position, no name; those
-  live in the entity catalog and the heat map respectively.
+  from the heat map's purely spatial "where/when" concern. Crafting stations
+  follow the same interchangeable-instance pattern as trees/ore: a station is
+  keyed by `stationType` (`'smithing'`, `'smelting'`, ... — what recipes
+  actually require) rather than `stationSubtype` (the visual fixture, e.g.
+  `'anvil'`/`'forge'`), so two smithing stations in different spots are both
+  sightings of one `(station, smithing)` entity, the same way two pine trees
+  are both sightings of one `(resource, pine)` entity — no separate detail
+  table needed for that. If an entity type accumulates detail that genuinely
+  varies *per individual* rather than collapsing by type, that becomes its
+  own table keyed by the catalog's id instead — merchant trades and quests
+  are this pattern: per-individual-NPC detail tables (individual identity
+  matters here, since different named merchants can offer different prices,
+  or different named NPCs can each give their own quests) that reference
+  their NPC's own entity and nothing else about it — no position, no name;
+  those live in the entity catalog and the heat map respectively.
 - **Safe locations** — discovered towns, healers, and player-built structures
   where the bot can recover. Not limited to (0, 0).
 - **Merchant trades** — per-item buy/sell price and quantity for every
@@ -324,23 +330,68 @@ rates, combat averages, and heat map proximity lookups. Categories:
   permanent on first sight. Used to guide exploration, assess route danger,
   and identify target-farming zones.
 - **Combat history** — per monster type: HP (available directly from heartbeat
-  units), average damage dealt per hit to the player (not in client data —
-  inferred from player HP-delta during combat; may vary), and kill count. Used
-  to decide whether to engage a monster or flee, and to estimate fight
-  survivability. Not spatial — kept separate from heat map sightings.
-- **Drop tables** — per monster type: total kills and per-item drop counts,
-  from which drop rates are derived. Enables target-farming for crafting
-  ingredients and helps prioritise gear upgrade paths based on realistic
-  ingredient acquisition cost.
-- **Quests** — accepted/available quests, keyed to the giving NPC rather than
-  a position, with a status (`available`/`active`). The SDK's own quest object
-  (`ActiveQuest`, or an NPC's `availableQuests` entry) is persisted verbatim
-  rather than re-derived into a bespoke requirements/reward schema. Not part
-  of the heat map — quests aren't a geographic fact.
+  units), damage dealt per hit to the player (not in client data — inferred
+  from player HP-delta during combat), and kill count. Tracks min/max damage
+  per hit alongside the average — a monster that mostly hits for 3-7 but once
+  for 20 must not have that outlier hidden by the mean, since survivability
+  estimates need to account for how bad the worst case can get, not just the
+  typical case. Kill count is read via the shared kill/harvest denominator
+  (see Loot tables below) rather than stored redundantly here. Used to decide
+  whether to engage a monster or flee, and to estimate fight survivability.
+  Not spatial — kept separate from heat map sightings.
+- **Loot tables** — per entity (monster kill-drops or resource harvest
+  yields — both are just "loot events" against an entity, the SDK's own
+  `loot` event being the sole source for either): total quantity, number of
+  loot events, and min/max quantity per event, plus a shared kill/harvest
+  count (disambiguated via the entity's own type — a monster entity is only
+  ever killed, a resource entity only ever harvested, so no redundant
+  "which kind of count" column is needed). Separates "how often does this
+  item appear at all" (loot events / kill-or-harvest count) from "how much do
+  you get when it does" (average, plus min/max) — a chicken that mostly drops
+  1-2 feathers but occasionally 5 must not collapse into "always drops
+  quantity 3.5", the same reasoning as combat damage above. Attribution from
+  a `loot` event back to the kill/harvest that produced it is inferred by
+  timing (the SDK gives no correlation id at all) and discarded rather than
+  guessed when ambiguous — see `src/memory.ts`'s `recordLoot`/`getLootRates`
+  and the event-correlation wiring in `index.ts`. Enables target-farming for
+  crafting ingredients and helps prioritise gear upgrade paths based on
+  realistic ingredient acquisition cost.
+- **Quests** — offered/completed quests, keyed to the giving NPC
+  (`start_npc_id`) rather than a position, with a status
+  (`available`/`completed`) and a `repeatable` flag (combined with status,
+  this is what lets a caller avoid re-attempting a non-repeatable quest
+  already done). Unlike every other category here, this one used to be a
+  single JSON blob (`quest_json`) rather than real columns — reconsidered
+  because that made quest data unqueryable in SQL, gave no type safety at the
+  JSON boundary, and was inconsistent with the rest of the schema. Now
+  normalized: reward items and turn-in/kill requirements each get their own
+  child table (`quest_reward_items`, `quest_kill_requirements`,
+  `quest_required_items`), keyed by `(start_npc_id, quest_id)`. Kill
+  requirements reference the monster through the entity catalog
+  (`monster_entity_id`), the same as every other monster reference, so "have
+  we even seen/can we fight this monster" is answerable by joining to
+  `heat_map`/`combat_history` — the entity row exists as soon as a quest
+  names the monster, independent of whether it's ever been sighted.
+  Deliberately **not** persisted: an active quest's live progress, or even
+  its steps at all — only the `AvailableQuest` (pre-acceptance) definition
+  populates the reward/requirement child tables, and re-sighting a quest as
+  available refreshes them completely (stale rows for items/monsters no
+  longer in the current step list are deleted, not left behind). Once a
+  quest is active, the heartbeat is the sole source of truth for its
+  progress; memory only ever backfills one additional fact from an active
+  sighting — the turn-in NPC (`end_npc_id`), since `AvailableQuest` carries
+  no `end_npc`. Memory's job here is answering "can this quest even be
+  completed for its reward" (a feasibility question), not resuming progress
+  (a live-state question the heartbeat already answers). Not part of the
+  heat map — quests aren't a geographic fact. See ADR-0006.
 
-Implemented in `src/memory.ts` (tracked in #6) as a store only — not yet wired
-into the tick loop, so the bot still only *acts* on what's in the current
-heartbeat tick until a follow-up PR adds write/read call sites.
+Implemented in `src/memory.ts` (tracked in #6). Write-side wiring (station and
+merchant sightings, kill/harvest detection, loot attribution) and part of the
+read-side (station/merchant knowledge stabilizing upgrade-plan reachability
+across location) now land in `index.ts` — see ADR-0004's phasing. Combat/loot
+variance data is captured but not yet consulted by any decision logic, and
+`decide()` itself still only acts on the current heartbeat tick, pending the
+utility-scoring rewrite (issue #7).
 
 ### Quest
 A task accepted from an NPC that yields a reward (coins, items) on completion.
@@ -397,7 +448,7 @@ quest NPC that isn't even visible yet.
 
 **Reward visibility — was a structural gap, now fixed upstream (workaround not yet removed):** until SDK `0.10.3`, `ActiveQuest` (the shape of `player.quests`) had no `rewards` field at all, for every quest, always. The reward was only ever visible in `npc.availableQuests[id].rewards.items`, i.e. *before* accepting — once a quest was active, that data was gone from the heartbeat entirely. This is why `questRewards` (in `index.ts`) exists: `execute()`'s `acceptQuest` case captures `availableQuest.rewards.items` at the exact moment of accepting, before it disappears, keyed by quest id.
 
-As of SDK `0.10.3`, `ActiveQuest.rewards.items` is a real, always-populated field (confirmed via diff against `0.10.2` — it was the only substantive change in that release). `questRewards`/`KNOWN_QUEST_REWARDS`/`rewardPatches` below are therefore no longer strictly necessary — `quests.ts` could read `quest.rewards.items` directly — but the workaround hasn't been removed yet; this is a known, flagged simplification, not yet done.
+As of SDK `0.10.3`, `ActiveQuest.rewards.items` is a real, always-populated field (confirmed via diff against `0.10.2` — it was the only substantive change in that release). `questRewards`/`KNOWN_QUEST_REWARDS`/`rewardPatches` were therefore no longer strictly necessary — `quests.ts` could read `quest.rewards.items` directly. `KNOWN_QUEST_REWARDS`/`rewardPatches` (the hand-curated fallback list patching quests the server omitted rewards for) have since been removed as part of the home-chores unification refactor. `questRewards` itself (the accept-time capture in `index.ts`) has not — it's very likely retirable too now that active quests carry their own reward data directly, but that's a separate `index.ts` change and hasn't been done; still a known, flagged simplification.
 
 **Reward evaluation (`evaluateQuest`):** base score is the sum of reward item
 quantities, but a quest whose reward includes an item the bot's craft chains

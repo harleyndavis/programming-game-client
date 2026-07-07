@@ -237,6 +237,20 @@ describe('collectHarvestCraftingChainToolIds', () => {
     const result = collectHarvestCraftingChainToolIds(['stoneFellingAxe', 'stonePickaxe'], recipes);
     expect(result.filter(id => id === 'stoneCarvingKnife')).toHaveLength(1);
   });
+
+  it('ignores a station-gated tool recipe by default, but walks it once that station type is known', () => {
+    const recipes: RecipeList = [
+      { id: 'axe', input: {}, output: { stoneFellingAxe: 1 }, required: ['ironCarvingKnife'], station: null },
+      { id: 'knife', input: { stone: 1 }, output: { ironCarvingKnife: 1 }, required: ['ironCutterTools'], station: 'smithing' },
+    ];
+    const without = collectHarvestCraftingChainToolIds(['stoneFellingAxe'], recipes);
+    expect(without).toEqual(['ironCarvingKnife']);
+    expect(without).not.toContain('ironCutterTools');
+
+    const withKnowledge = collectHarvestCraftingChainToolIds(['stoneFellingAxe'], recipes, new Set(['smithing']));
+    expect(withKnowledge).toContain('ironCarvingKnife');
+    expect(withKnowledge).toContain('ironCutterTools');
+  });
 });
 
 describe('collectCraftableInputIngredients', () => {
@@ -291,5 +305,14 @@ describe('collectCraftableInputIngredients', () => {
     ];
     const result = collectCraftableInputIngredients(['stoneFellingAxe', 'stonePickaxe'], {}, recipes);
     expect(result).toEqual(['pinewoodAxeHandle']);
+  });
+
+  it('excludes a station-gated ingredient by default, but includes it once that station type is known', () => {
+    const recipes: RecipeList = [
+      { id: 'sword', input: { ironIngot: 1 }, output: { ironSword: 1 }, required: [], station: null },
+      { id: 'ingotR', input: { ironOre: 2 }, output: { ironIngot: 1 }, required: [], station: 'smelting' },
+    ];
+    expect(collectCraftableInputIngredients(['ironSword'], {}, recipes)).toEqual([]);
+    expect(collectCraftableInputIngredients(['ironSword'], {}, recipes, new Set(['smelting']))).toEqual(['ironIngot']);
   });
 });

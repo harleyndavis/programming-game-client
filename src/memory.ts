@@ -44,13 +44,20 @@ CREATE TABLE IF NOT EXISTS explored_cells (
   PRIMARY KEY (cell_x, cell_y)
 );
 
+-- Keyed by cell, not exact tile position — linked to the same sight-range-sized
+-- grid as explored_cells (same cellCoordsFor helper computes both), not a
+-- separate concept. Many exact sightings of the same entity type collapse into
+-- one cell row instead of exploding one row per tile ever stood near — the
+-- server itself takes over final approach once a target is visible/in range,
+-- so cell-level precision is all any consumer of this table actually needs.
 CREATE TABLE IF NOT EXISTS heat_map (
   entity_id          INTEGER NOT NULL REFERENCES entities(id),
-  x                  INTEGER NOT NULL,
-  y                  INTEGER NOT NULL,
+  cell_x             INTEGER NOT NULL,
+  cell_y             INTEGER NOT NULL,
+  sight_range        REAL    NOT NULL,
   observation_count  INTEGER NOT NULL DEFAULT 1,
   last_seen_at       INTEGER NOT NULL,
-  PRIMARY KEY (entity_id, x, y)
+  PRIMARY KEY (entity_id, cell_x, cell_y)
 );
 
 -- buying_price/qty: what the merchant pays the PLAYER (player earns this selling to them).
@@ -72,41 +79,170 @@ CREATE TABLE IF NOT EXISTS merchant_trades (
 CREATE TABLE IF NOT EXISTS combat_history (
   entity_id              INTEGER PRIMARY KEY REFERENCES entities(id),
   monster_hp             INTEGER NOT NULL DEFAULT 0,
-  kill_count             INTEGER NOT NULL DEFAULT 0,
   hits_received          INTEGER NOT NULL DEFAULT 0,
   total_damage_received  INTEGER NOT NULL DEFAULT 0,
+  min_damage_per_hit     INTEGER,
+  max_damage_per_hit     INTEGER,
   last_updated_at        INTEGER NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS monster_kills (
+-- Generalized "how many times has this entity been finished off" counter, shared by
+-- monster kills and resource harvests — an entity is either a monster or a resource,
+-- never both, so entities.entity_type already disambiguates which one a row means
+-- without a redundant type column here (a monster entity is only ever killed, a
+-- resource entity only ever harvested).
+CREATE TABLE IF NOT EXISTS action_counts (
   entity_id        INTEGER PRIMARY KEY REFERENCES entities(id),
-  total_kills      INTEGER NOT NULL DEFAULT 0,
+  total_count      INTEGER NOT NULL DEFAULT 0,
   last_updated_at  INTEGER NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS drop_counts (
-  entity_id      INTEGER NOT NULL REFERENCES entities(id),
-  item           TEXT    NOT NULL,
-  count          INTEGER NOT NULL DEFAULT 0,
-  last_seen_at   INTEGER NOT NULL,
+-- Named after the SDK's own 'loot' event, which is the sole source for both monster-kill
+-- drops and harvest yields. total_quantity is the cumulative sum across every loot event;
+-- loot_events counts the events themselves (distinct from total_quantity) so a per-event
+-- average/min/max can be recovered instead of only a running total — a monster that drops
+-- 5 feathers once and 3 the next time must not collapse into "always drops quantity 8".
+CREATE TABLE IF NOT EXISTS loot_counts (
+  entity_id       INTEGER NOT NULL REFERENCES entities(id),
+  item            TEXT    NOT NULL,
+  total_quantity  INTEGER NOT NULL DEFAULT 0,
+  loot_events     INTEGER NOT NULL DEFAULT 0,
+  min_quantity    INTEGER,
+  max_quantity    INTEGER,
+  last_seen_at    INTEGER NOT NULL,
   PRIMARY KEY (entity_id, item)
 );
 
+-- start_npc_id: the NPC the quest was sighted from (an available offer, or an
+-- active quest's start_npc). end_npc_id: the turn-in NPC, only known once the
+-- quest has been seen active (AvailableQuest carries no end_npc). Both are
+-- entity references, never raw name strings, same as every other NPC
+-- reference in this schema. repeatable is only known once the quest has been
+-- seen as an AvailableQuest (ActiveQuest doesn't carry it), so both
+-- end_npc_id and repeatable are nullable and preserved via COALESCE upsert
+-- rather than clobbered by a sighting that doesn't have that field.
 CREATE TABLE IF NOT EXISTS quests (
-  entity_id     INTEGER NOT NULL REFERENCES entities(id),
-  quest_id      TEXT    NOT NULL,
-  status        TEXT    NOT NULL,
-  quest_json    TEXT    NOT NULL,
-  last_seen_at  INTEGER NOT NULL,
-  PRIMARY KEY (entity_id, quest_id)
+  start_npc_id   INTEGER NOT NULL REFERENCES entities(id),
+  quest_id       TEXT    NOT NULL,
+  end_npc_id     INTEGER REFERENCES entities(id),
+  name           TEXT    NOT NULL,
+  repeatable     INTEGER,
+  status         TEXT    NOT NULL,
+  last_seen_at   INTEGER NOT NULL,
+  PRIMARY KEY (start_npc_id, quest_id)
+);
+
+-- Fixed once a quest is defined; variable-width (a quest can reward any
+-- number of items), which is why this is a child table rather than a column.
+CREATE TABLE IF NOT EXISTS quest_reward_items (
+  start_npc_id   INTEGER NOT NULL,
+  quest_id       TEXT    NOT NULL,
+  item           TEXT    NOT NULL,
+  quantity       INTEGER NOT NULL,
+  PRIMARY KEY (start_npc_id, quest_id, item),
+  FOREIGN KEY (start_npc_id, quest_id) REFERENCES quests(start_npc_id, quest_id)
+);
+
+-- Only the fixed requirement (required kill count per monster), never the
+-- mutable killed-so-far progress -- that only matters while a quest is
+-- active and the live heartbeat already has it. monster_entity_id lets
+-- feasibility checks join against heat_map/combat_history to answer "have we
+-- even seen/can we fight this monster" without memory tracking progress
+-- itself.
+CREATE TABLE IF NOT EXISTS quest_kill_requirements (
+  start_npc_id       INTEGER NOT NULL,
+  quest_id           TEXT    NOT NULL,
+  monster_entity_id  INTEGER NOT NULL REFERENCES entities(id),
+  required           INTEGER NOT NULL,
+  PRIMARY KEY (start_npc_id, quest_id, monster_entity_id),
+  FOREIGN KEY (start_npc_id, quest_id) REFERENCES quests(start_npc_id, quest_id)
+);
+
+-- Turn-in requirements (from a turn_in step's requiredItems), for the same
+-- "can this quest actually be completed" feasibility question.
+CREATE TABLE IF NOT EXISTS quest_required_items (
+  start_npc_id   INTEGER NOT NULL,
+  quest_id       TEXT    NOT NULL,
+  item           TEXT    NOT NULL,
+  quantity       INTEGER NOT NULL,
+  PRIMARY KEY (start_npc_id, quest_id, item),
+  FOREIGN KEY (start_npc_id, quest_id) REFERENCES quests(start_npc_id, quest_id)
 );
 `;
 
+const CURRENT_SCHEMA_VERSION = 2;
+
+/**
+ * v1 -> v2: heat_map was keyed by exact (x, y); re-key by cell to match
+ * explored_cells' grid. Old rows carry no sight_range, so every row is
+ * bucketed using ASSUMED_SIGHT_RANGE — the same value live recording uses
+ * going forward, so migrated and newly-recorded cells align. Aggregated in
+ * JS, not SQL, to reuse the exact same cellCoordsFor the rest of the module
+ * uses (SQLite integer division truncates toward zero, not floor, which
+ * silently disagrees with Math.floor for negative coordinates — not worth
+ * the risk of a subtly-wrong hand-rolled SQL floor-div).
+ */
+const migrateV1ToV2_bucketHeatMapByCell = (db: Database.Database): void => {
+  db.exec('ALTER TABLE heat_map RENAME TO heat_map_v1');
+  db.exec(`
+    CREATE TABLE heat_map (
+      entity_id          INTEGER NOT NULL REFERENCES entities(id),
+      cell_x             INTEGER NOT NULL,
+      cell_y             INTEGER NOT NULL,
+      sight_range        REAL    NOT NULL,
+      observation_count  INTEGER NOT NULL DEFAULT 1,
+      last_seen_at       INTEGER NOT NULL,
+      PRIMARY KEY (entity_id, cell_x, cell_y)
+    )
+  `);
+  const oldRows = db.prepare(
+    'SELECT entity_id, x, y, observation_count, last_seen_at FROM heat_map_v1',
+  ).all() as { entity_id: number; x: number; y: number; observation_count: number; last_seen_at: number }[];
+
+  type Bucket = { entityId: number; cellX: number; cellY: number; observationCount: number; lastSeenAt: number };
+  const buckets = new Map<string, Bucket>();
+  for (const row of oldRows) {
+    const { cellX, cellY } = cellCoordsFor({ x: row.x, y: row.y }, ASSUMED_SIGHT_RANGE);
+    const key = `${row.entity_id}:${cellX}:${cellY}`;
+    const existing = buckets.get(key);
+    if (existing) {
+      existing.observationCount += row.observation_count;
+      existing.lastSeenAt = Math.max(existing.lastSeenAt, row.last_seen_at);
+    } else {
+      buckets.set(key, { entityId: row.entity_id, cellX, cellY, observationCount: row.observation_count, lastSeenAt: row.last_seen_at });
+    }
+  }
+
+  const insert = db.prepare(`
+    INSERT INTO heat_map (entity_id, cell_x, cell_y, sight_range, observation_count, last_seen_at)
+    VALUES (@entityId, @cellX, @cellY, @sightRange, @observationCount, @lastSeenAt)
+  `);
+  db.transaction((rows: Bucket[]) => {
+    for (const r of rows) insert.run({ ...r, sightRange: ASSUMED_SIGHT_RANGE });
+  })(Array.from(buckets.values()));
+
+  db.exec('DROP TABLE heat_map_v1');
+};
+
 const migrate = (db: Database.Database): void => {
+  // Creates any missing tables at the current shape; a no-op for tables that
+  // already exist, regardless of whether their actual shape matches — schema
+  // upgrades for existing tables are handled explicitly below, by version.
   db.exec(SCHEMA_SQL);
-  const row = db.prepare('SELECT version FROM schema_version').get();
+  const row = db.prepare('SELECT version FROM schema_version').get() as { version: number } | undefined;
   if (!row) {
-    db.prepare('INSERT INTO schema_version (version) VALUES (1)').run();
+    // Genuinely fresh database — SCHEMA_SQL just created everything at the
+    // latest shape directly, so there's nothing to migrate.
+    db.prepare('INSERT INTO schema_version (version) VALUES (?)').run(CURRENT_SCHEMA_VERSION);
+    return;
+  }
+  let version = row.version;
+  if (version < 2) {
+    migrateV1ToV2_bucketHeatMapByCell(db);
+    version = 2;
+  }
+  if (version !== row.version) {
+    db.prepare('UPDATE schema_version SET version = ?').run(version);
   }
 };
 
@@ -179,6 +315,18 @@ export const getKnownEntities = (db: Database.Database, filter: { entityType?: E
     .map(toEntity);
 };
 
+/** Every distinct station type (e.g. 'smithing', 'smelting') ever sighted, world-wide. */
+export const getKnownStationTypes = (db: Database.Database): string[] =>
+  getKnownEntities(db, { entityType: 'station' }).map((e) => e.entityName);
+
+/** Every distinct item ever recorded as loot — a monster drop or a harvest yield — world-wide. */
+export const getKnownLootItems = (db: Database.Database): string[] =>
+  db.prepare('SELECT DISTINCT item FROM loot_counts').all().map((row: any) => row.item);
+
+/** Every distinct item ever seen as a quest reward, world-wide — regardless of whether that quest was ever accepted. */
+export const getKnownQuestRewardItems = (db: Database.Database): string[] =>
+  db.prepare('SELECT DISTINCT item FROM quest_reward_items').all().map((row: any) => row.item);
+
 // ── Safe locations ───────────────────────────────────────────────────────
 
 export type SafeLocationType = 'healer' | 'banker' | 'town' | 'player_structure';
@@ -248,9 +396,22 @@ export type ExploredCell = {
   lastSeenAt: number;
 };
 
+// No real sight-range constant exists anywhere in the heartbeat or SDK
+// constants today (checked both) — this is a stand-in, shared by
+// explored-cell sizing and heat-map cell bucketing so the two stay on the
+// same grid (that's the whole point of linking them), and by the v1->v2
+// heat_map migration so migrated cells align with newly-recorded ones.
+export const ASSUMED_SIGHT_RANGE = 20;
+
 const cellCoordsFor = (position: Position, cellSize: number): { cellX: number; cellY: number } => ({
   cellX: Math.floor(position.x / cellSize),
   cellY: Math.floor(position.y / cellSize),
+});
+
+/** The center of a cell — a reasonable "walk here" point when all that's known is which cell, not the exact tile. */
+const positionForCell = (cellX: number, cellY: number, sightRange: number): Position => ({
+  x: (cellX + 0.5) * sightRange,
+  y: (cellY + 0.5) * sightRange,
 });
 
 /** Marks the grid cell containing `position` as explored, sized by the sight range observed at the time. */
@@ -305,39 +466,47 @@ export type HeatMapSighting = {
   lastSeenAt: number;
 };
 
-/** Records a sighting and returns the entity's id, so callers can reuse it without a second lookup. */
+/**
+ * Records a sighting and returns the entity's id, so callers can reuse it without a
+ * second lookup. Bucketed into the same sight-range-sized grid as explored_cells
+ * (same cellCoordsFor helper) — every entity type, NPCs included, since the server
+ * takes over final approach once a target is visible/in range, so cell-level
+ * precision is all a "where was this last seen" fact needs to support.
+ */
 const recordSighting = (
   db: Database.Database,
   entityType: EntityType,
   entityName: string,
   position: Position,
+  sightRange: number,
   now: number,
 ): number => {
   const entityId = getOrCreateEntity(db, entityType, entityName);
-  const x = Math.floor(position.x);
-  const y = Math.floor(position.y);
+  const { cellX, cellY } = cellCoordsFor(position, sightRange);
   db.prepare(
-    `INSERT INTO heat_map (entity_id, x, y, observation_count, last_seen_at)
-     VALUES (@entityId, @x, @y, 1, @now)
-     ON CONFLICT(entity_id, x, y) DO UPDATE SET
+    `INSERT INTO heat_map (entity_id, cell_x, cell_y, sight_range, observation_count, last_seen_at)
+     VALUES (@entityId, @cellX, @cellY, @sightRange, 1, @now)
+     ON CONFLICT(entity_id, cell_x, cell_y) DO UPDATE SET
+       sight_range = excluded.sight_range,
        observation_count = observation_count + 1,
        last_seen_at = excluded.last_seen_at`,
-  ).run({ entityId, x, y, now });
+  ).run({ entityId, cellX, cellY, sightRange, now });
   return entityId;
 };
 
 /** Records a monster sighting, keyed by the SDK's `monsterId` — never a bot-invented label. */
-export const recordMonsterSighting = (db: Database.Database, monster: ClientSideMonster, now: number): number =>
-  recordSighting(db, 'monster', monster.monsterId, monster.position, now);
+export const recordMonsterSighting = (db: Database.Database, monster: ClientSideMonster, sightRange: number, now: number): number =>
+  recordSighting(db, 'monster', monster.monsterId, monster.position, sightRange, now);
 
 /**
  * Records an NPC sighting, keyed by its proper name (e.g. "Aigor the Merchant") — NPCs
  * are individually named, persistent characters, not interchangeable instances of a
  * type the way monsters are, so each one gets its own entity rather than sharing a
- * `npcType` bucket with every other NPC of the same role.
+ * `npcType` bucket with every other NPC of the same role. Still cell-bucketed like
+ * every other entity type — see recordSighting.
  */
-export const recordNpcSighting = (db: Database.Database, npc: ClientSideNPC, now: number): number =>
-  recordSighting(db, 'npc', npc.name, npc.position, now);
+export const recordNpcSighting = (db: Database.Database, npc: ClientSideNPC, sightRange: number, now: number): number =>
+  recordSighting(db, 'npc', npc.name, npc.position, sightRange, now);
 
 const resourceSightingParts = (object: GameObject): { entityType: EntityType; entityName: string } => {
   switch (object.type) {
@@ -346,16 +515,21 @@ const resourceSightingParts = (object: GameObject): { entityType: EntityType; en
     case 'miningNode':
       return { entityType: 'resource', entityName: object.oreType };
     case 'station':
-      return { entityType: 'station', entityName: object.stationSubtype };
+      // Keyed by stationType (what recipes actually require — 'smithing', 'smelting', ...),
+      // not stationSubtype (the visual fixture — 'anvil', 'forge', ...). A station is just
+      // another interchangeable-instance entity like a tree or ore node: two smithing
+      // stations in different spots are both sightings of the same (station, smithing)
+      // entity, the same way two pine trees are both sightings of (resource, pine).
+      return { entityType: 'station', entityName: object.stationType };
     default:
       return { entityType: 'resource', entityName: object.type };
   }
 };
 
 /** Records a resource/station sighting from a raw `GameObject` — tree, mining node, or crafting station. */
-export const recordResourceSighting = (db: Database.Database, object: GameObject, now: number): number => {
+export const recordResourceSighting = (db: Database.Database, object: GameObject, sightRange: number, now: number): number => {
   const { entityType, entityName } = resourceSightingParts(object);
-  return recordSighting(db, entityType, entityName, object.position, now);
+  return recordSighting(db, entityType, entityName, object.position, sightRange, now);
 };
 
 export const getHeatMapSightings = (
@@ -385,7 +559,7 @@ export const getHeatMapSightings = (
       entityId: row.entity_id,
       entityType: row.entity_type,
       entityName: row.entity_name,
-      position: { x: row.x, y: row.y },
+      position: positionForCell(row.cell_x, row.cell_y, row.sight_range),
       observationCount: row.observation_count,
       lastSeenAt: row.last_seen_at,
     }));
@@ -394,16 +568,17 @@ export const getHeatMapSightings = (
 /** The freshest known cell position for an entity, or null if it's never been sighted. */
 export const getLastKnownPosition = (db: Database.Database, entityId: number): Position | null => {
   const row = db
-    .prepare('SELECT x, y FROM heat_map WHERE entity_id = ? ORDER BY last_seen_at DESC LIMIT 1')
-    .get(entityId) as { x: number; y: number } | undefined;
-  return row ? { x: row.x, y: row.y } : null;
+    .prepare('SELECT cell_x, cell_y, sight_range FROM heat_map WHERE entity_id = ? ORDER BY last_seen_at DESC LIMIT 1')
+    .get(entityId) as { cell_x: number; cell_y: number; sight_range: number } | undefined;
+  return row ? positionForCell(row.cell_x, row.cell_y, row.sight_range) : null;
 };
 
 // ── Merchant knowledge ───────────────────────────────────────────────────
-// No standalone "merchants" table — position is heat_map's job (recordMerchant
-// records a sighting too, so a merchant's prices are never captured without
-// also capturing where it was seen), and identity is the entity catalog's job.
-// This table holds only what's specific to being a merchant: per-item trades.
+// No standalone "merchants" table — position is heat_map's job, recorded via
+// the same recordNpcSighting every other NPC gets (there's no merchant-specific
+// sighting call; a merchant is an NPC that additionally has trade data, not a
+// different kind of thing). This table holds only what's specific to being a
+// merchant: per-item trades, written by recordMerchantTrades.
 
 export type MerchantTradeOffer = {
   entityId: number;
@@ -415,9 +590,14 @@ export type MerchantTradeOffer = {
   selling: { price: number; quantity: number } | undefined;
 };
 
-/** Records a merchant sighting and every item it's currently seen buying/selling. */
-export const recordMerchant = (db: Database.Database, npc: ClientSideNPC, now: number): void => {
-  const entityId = recordNpcSighting(db, npc, now);
+/**
+ * Records every item a merchant is currently seen buying/selling. Deliberately
+ * doesn't record the NPC's sighting/position itself — call recordNpcSighting
+ * separately, the same call every NPC gets regardless of role. This only adds
+ * the merchant-specific trade data on top of that shared sighting.
+ */
+export const recordMerchantTrades = (db: Database.Database, npc: ClientSideNPC, now: number): void => {
+  const entityId = getOrCreateEntity(db, 'npc', npc.name);
 
   const buying = npc.trades?.buying ?? {};
   const selling = npc.trades?.selling ?? {};
@@ -466,6 +646,50 @@ export const getMerchantTrades = (db: Database.Database, item: Items): MerchantT
       selling: row.selling_price != null ? { price: row.selling_price, quantity: row.selling_qty } : undefined,
     }));
 
+export type MerchantTradeRow = MerchantTradeOffer & { item: Items };
+
+/** Every known merchant trade offer, unfiltered by item — the "list everything" counterpart to getMerchantTrades. */
+export const getAllMerchantTrades = (db: Database.Database): MerchantTradeRow[] =>
+  db
+    .prepare(
+      `SELECT mt.entity_id, mt.item, mt.buying_price, mt.buying_qty, mt.selling_price, mt.selling_qty, e.entity_name
+       FROM merchant_trades mt
+       JOIN entities e ON e.id = mt.entity_id`,
+    )
+    .all()
+    .map((row: any) => ({
+      entityId: row.entity_id,
+      merchantName: row.entity_name,
+      item: row.item,
+      position: getLastKnownPosition(db, row.entity_id),
+      buying: row.buying_price != null ? { price: row.buying_price, quantity: row.buying_qty } : undefined,
+      selling: row.selling_price != null ? { price: row.selling_price, quantity: row.selling_qty } : undefined,
+    }));
+
+/**
+ * The cheapest known selling offer per item across every merchant ever seen, ignoring
+ * current visibility — the persisted counterpart to a single tick's visible-merchant-only
+ * selling map. Used to keep upgrade-plan reachability stable across the bot's location.
+ */
+export const getAllKnownSellingOffers = (
+  db: Database.Database,
+): Record<string, { price: number; quantity: number }> => {
+  const rows = db
+    .prepare(
+      `SELECT item, selling_price, selling_qty FROM merchant_trades
+       WHERE selling_price IS NOT NULL AND selling_qty > 0`,
+    )
+    .all() as Array<{ item: string; selling_price: number; selling_qty: number }>;
+  const result: Record<string, { price: number; quantity: number }> = {};
+  for (const row of rows) {
+    const existing = result[row.item];
+    if (!existing || row.selling_price < existing.price) {
+      result[row.item] = { price: row.selling_price, quantity: row.selling_qty };
+    }
+  }
+  return result;
+};
+
 // ── Combat history ───────────────────────────────────────────────────────
 
 export type CombatStats = {
@@ -476,6 +700,9 @@ export type CombatStats = {
   totalDamageReceived: number;
   /** Computed at query time, not stored — see issue #6. */
   avgDamagePerHit: number;
+  /** Smallest/largest single hit ever observed — an average alone can hide a dangerous outlier. */
+  minDamagePerHit: number | null;
+  maxDamagePerHit: number | null;
   lastUpdatedAt: number;
 };
 
@@ -489,44 +716,62 @@ export const recordCombatHit = (
 ): void => {
   const entityId = getOrCreateEntity(db, 'monster', monsterId);
   db.prepare(
-    `INSERT INTO combat_history (entity_id, monster_hp, kill_count, hits_received, total_damage_received, last_updated_at)
-     VALUES (@entityId, @monsterHp, 0, 1, @damageToPlayer, @now)
+    `INSERT INTO combat_history (entity_id, monster_hp, hits_received, total_damage_received, min_damage_per_hit, max_damage_per_hit, last_updated_at)
+     VALUES (@entityId, @monsterHp, 1, @damageToPlayer, @damageToPlayer, @damageToPlayer, @now)
      ON CONFLICT(entity_id) DO UPDATE SET
        monster_hp = excluded.monster_hp,
        hits_received = hits_received + 1,
        total_damage_received = total_damage_received + excluded.total_damage_received,
+       min_damage_per_hit = MIN(min_damage_per_hit, excluded.min_damage_per_hit),
+       max_damage_per_hit = MAX(max_damage_per_hit, excluded.max_damage_per_hit),
        last_updated_at = excluded.last_updated_at`,
   ).run({ entityId, monsterHp, damageToPlayer, now });
 };
 
-/** Records a kill, bumping both survivability tracking (combat_history) and the drop-rate denominator (monster_kills). */
+/** Records a kill, bumping the shared kill/harvest denominator (action_counts). */
 export const recordMonsterKill = (db: Database.Database, monsterId: Monsters, now: number): void => {
   const entityId = getOrCreateEntity(db, 'monster', monsterId);
-
   db.prepare(
-    `INSERT INTO combat_history (entity_id, monster_hp, kill_count, hits_received, total_damage_received, last_updated_at)
-     VALUES (@entityId, 0, 1, 0, 0, @now)
-     ON CONFLICT(entity_id) DO UPDATE SET
-       kill_count = kill_count + 1,
-       last_updated_at = excluded.last_updated_at`,
-  ).run({ entityId, now });
-
-  db.prepare(
-    `INSERT INTO monster_kills (entity_id, total_kills, last_updated_at)
+    `INSERT INTO action_counts (entity_id, total_count, last_updated_at)
      VALUES (@entityId, 1, @now)
      ON CONFLICT(entity_id) DO UPDATE SET
-       total_kills = total_kills + 1,
+       total_count = total_count + 1,
+       last_updated_at = excluded.last_updated_at`,
+  ).run({ entityId, now });
+};
+
+/** Records a harvest, bumping the shared kill/harvest denominator (action_counts) for a resource entity. */
+export const recordHarvest = (db: Database.Database, resourceName: string, now: number): void => {
+  const entityId = getOrCreateEntity(db, 'resource', resourceName);
+  db.prepare(
+    `INSERT INTO action_counts (entity_id, total_count, last_updated_at)
+     VALUES (@entityId, 1, @now)
+     ON CONFLICT(entity_id) DO UPDATE SET
+       total_count = total_count + 1,
        last_updated_at = excluded.last_updated_at`,
   ).run({ entityId, now });
 };
 
 export const getCombatHistory = (db: Database.Database, monsterId: Monsters): CombatStats | null => {
+  // Driven from entities (not combat_history) so a monster killed without ever landing a
+  // hit on the player (action_counts only, no combat_history row) still returns a result —
+  // but only when at least one of the two tables actually has data, so a monster merely
+  // referenced by a quest (entity exists, never fought) still correctly returns null.
   const row = db
     .prepare(
-      `SELECT ch.*, e.entity_name
-       FROM combat_history ch
-       JOIN entities e ON e.id = ch.entity_id
-       WHERE e.entity_type = 'monster' AND e.entity_name = ?`,
+      `SELECT e.entity_name,
+              COALESCE(ch.monster_hp, 0) AS monster_hp,
+              COALESCE(ch.hits_received, 0) AS hits_received,
+              COALESCE(ch.total_damage_received, 0) AS total_damage_received,
+              ch.min_damage_per_hit,
+              ch.max_damage_per_hit,
+              COALESCE(ac.total_count, 0) AS kill_count,
+              COALESCE(ch.last_updated_at, ac.last_updated_at) AS last_updated_at
+       FROM entities e
+       LEFT JOIN combat_history ch ON ch.entity_id = e.id
+       LEFT JOIN action_counts ac ON ac.entity_id = e.id
+       WHERE e.entity_type = 'monster' AND e.entity_name = ?
+         AND (ch.entity_id IS NOT NULL OR ac.entity_id IS NOT NULL)`,
     )
     .get(monsterId) as any;
   if (!row) return null;
@@ -537,121 +782,328 @@ export const getCombatHistory = (db: Database.Database, monsterId: Monsters): Co
     hitsReceived: row.hits_received,
     totalDamageReceived: row.total_damage_received,
     avgDamagePerHit: row.hits_received > 0 ? row.total_damage_received / row.hits_received : 0,
+    minDamagePerHit: row.min_damage_per_hit,
+    maxDamagePerHit: row.max_damage_per_hit,
     lastUpdatedAt: row.last_updated_at,
   };
 };
 
-// ── Drop tables ──────────────────────────────────────────────────────────
+// ── Loot tables ──────────────────────────────────────────────────────────
+// Shared by monster-kill drops and harvest yields — both are just "loot events"
+// against an entity (monster or resource), the SDK's own 'loot' event being the
+// sole source for either. See action_counts above for the denominator.
 
-export type DropRate = {
+export type LootRate = {
   item: Items;
-  count: number;
-  dropRate: number;
+  totalQuantity: number;
+  lootEvents: number;
+  minQuantity: number | null;
+  maxQuantity: number | null;
+  /** Fraction of kills/harvests that yielded this item at all (lootEvents / actionCount). */
+  dropChance: number;
+  /** Average quantity received on the events that did yield this item (totalQuantity / lootEvents). */
+  avgQuantityPerEvent: number;
 };
 
-/** Records loot drops from a kill — `items` is the SDK's own `loot` event shape. */
-export const recordDrop = (
+/**
+ * Records a loot event against an already-resolved entity (the monster killed or the
+ * resource harvested) — `items` is the SDK's own `loot` event shape. Takes a resolved
+ * entity id rather than a typed name since the caller may be attributing this to either
+ * a monster or a resource entity.
+ */
+export const recordLoot = (
   db: Database.Database,
-  monsterId: Monsters,
+  entityId: number,
   items: Partial<Record<Items, number>>,
   now: number,
 ): void => {
-  const entityId = getOrCreateEntity(db, 'monster', monsterId);
   const upsert = db.prepare(
-    `INSERT INTO drop_counts (entity_id, item, count, last_seen_at)
-     VALUES (@entityId, @item, @count, @now)
+    `INSERT INTO loot_counts (entity_id, item, total_quantity, loot_events, min_quantity, max_quantity, last_seen_at)
+     VALUES (@entityId, @item, @quantity, 1, @quantity, @quantity, @now)
      ON CONFLICT(entity_id, item) DO UPDATE SET
-       count = count + excluded.count,
+       total_quantity = total_quantity + excluded.total_quantity,
+       loot_events = loot_events + 1,
+       min_quantity = MIN(min_quantity, excluded.min_quantity),
+       max_quantity = MAX(max_quantity, excluded.max_quantity),
        last_seen_at = excluded.last_seen_at`,
   );
-  for (const [item, count] of Object.entries(items)) {
-    if (typeof count !== 'number' || count <= 0) continue;
-    upsert.run({ entityId, item, count, now });
+  for (const [item, quantity] of Object.entries(items)) {
+    if (typeof quantity !== 'number' || quantity <= 0) continue;
+    upsert.run({ entityId, item, quantity, now });
   }
 };
 
-/** Drop rate per item = accumulated count / total kills, computed at query time — see issue #6. */
-export const getDropRates = (db: Database.Database, monsterId: Monsters): DropRate[] => {
-  const entity = getEntity(db, 'monster', monsterId);
+/** Loot rates for a given entity (monster or resource), computed at query time — see issue #6. */
+export const getLootRates = (db: Database.Database, entityType: EntityType, entityName: string): LootRate[] => {
+  const entity = getEntity(db, entityType, entityName);
   if (!entity) return [];
-  const kills = db
-    .prepare('SELECT total_kills FROM monster_kills WHERE entity_id = ?')
-    .get(entity.id) as { total_kills: number } | undefined;
-  if (!kills || kills.total_kills <= 0) return [];
+  const actions = db
+    .prepare('SELECT total_count FROM action_counts WHERE entity_id = ?')
+    .get(entity.id) as { total_count: number } | undefined;
+  if (!actions || actions.total_count <= 0) return [];
   return db
-    .prepare('SELECT item, count FROM drop_counts WHERE entity_id = ? ORDER BY item')
+    .prepare(
+      'SELECT item, total_quantity, loot_events, min_quantity, max_quantity FROM loot_counts WHERE entity_id = ? ORDER BY item',
+    )
     .all(entity.id)
     .map((row: any) => ({
       item: row.item,
-      count: row.count,
-      dropRate: row.count / kills.total_kills,
+      totalQuantity: row.total_quantity,
+      lootEvents: row.loot_events,
+      minQuantity: row.min_quantity,
+      maxQuantity: row.max_quantity,
+      dropChance: row.loot_events / actions.total_count,
+      avgQuantityPerEvent: row.loot_events > 0 ? row.total_quantity / row.loot_events : 0,
     }));
 };
 
 // ── Quests ───────────────────────────────────────────────────────────────
 // Keyed by giving NPC entity rather than a position — quests aren't a
-// geographic fact. The SDK quest object is persisted verbatim (as JSON)
-// and rehydrated on read, rather than re-derived into a bespoke
-// requirements/reward schema.
+// geographic fact. Normalized into columns/child tables rather than a JSON
+// blob (queryability, type safety, and consistency with every other table
+// here), but only the fixed requirements are persisted — never the mutable
+// per-step progress (killed/completed counters).
+//
+// Only `AvailableQuest` sightings feed the requirement/reward child tables.
+// `ActiveQuest` is deliberately not recorded here at all: the live heartbeat
+// already carries the currently-active quest's steps in real time, so
+// mirroring it into memory would just be a second, laggier copy of the same
+// data — and, worse, `ActiveQuest`'s step list can legitimately shrink as
+// steps complete, so treating it as authoritative would let a satisfied
+// step silently erase a real, still-true requirement fact (e.g. wiping a
+// kill requirement from memory the moment its progress counter is
+// complete). `AvailableQuest`'s steps are the quest's fixed pre-acceptance
+// definition, not a progress view, so they don't have this problem — a
+// requirement missing from a fresh AvailableQuest snapshot really is gone
+// (see `recordQuestSighting` below). If the quest is abandoned, whatever the
+// heartbeat knew about its progress becomes moot anyway; memory's job is
+// only "can this quest even be completed for its reward" (a feasibility
+// question), not resuming progress (a live-state question the heartbeat
+// already answers). See ADR-0006.
+//
+// The one useful fact only `ActiveQuest` carries — `end_npc`, the turn-in
+// NPC — is captured separately by `recordQuestEndNpc`, without touching
+// anything else about the quest.
 
 export type AvailableQuest = ClientSideNPC['availableQuests'][string];
 
-export type QuestSightingStatus = 'available' | 'active';
+export type QuestSightingStatus = 'available' | 'completed';
 
-export type QuestSighting = {
-  npcName: string;
+export type QuestRecord = {
   questId: string;
+  name: string;
+  startNpcId: number;
+  /** Null until an ActiveQuest sighting supplies it via recordQuestEndNpc — AvailableQuest carries no end_npc. */
+  endNpcId: number | null;
+  repeatable: boolean;
   status: QuestSightingStatus;
-  entityId: number;
-  quest: ActiveQuest | AvailableQuest;
+  rewardItems: Partial<Record<Items, number>>;
+  killRequirements: { monsterEntityId: number; required: number }[];
+  requiredItems: Partial<Record<Items, number>>;
   lastSeenAt: number;
 };
 
+/**
+ * Deletes rows for (startNpcId, questId) in `table` whose `keyColumn` value
+ * isn't in `currentKeys`, keeping a quest's child rows in sync with the
+ * latest known AvailableQuest definition. An empty `currentKeys` deletes
+ * every existing row for that quest in that table — a fresh AvailableQuest
+ * snapshot naming zero items/monsters for this table is itself the fact
+ * (e.g. a quest with no kill step really has no kill requirements), not an
+ * incomplete read, so there's nothing to preserve.
+ */
+const deleteStaleQuestRows = (
+  db: Database.Database,
+  table: 'quest_reward_items' | 'quest_kill_requirements' | 'quest_required_items',
+  keyColumn: 'item' | 'monster_entity_id',
+  startNpcId: number,
+  questId: string,
+  currentKeys: (string | number)[],
+): void => {
+  const notIn = currentKeys.length > 0 ? `AND ${keyColumn} NOT IN (${currentKeys.map(() => '?').join(',')})` : '';
+  db.prepare(`DELETE FROM ${table} WHERE start_npc_id = ? AND quest_id = ? ${notIn}`).run(
+    startNpcId,
+    questId,
+    ...currentKeys,
+  );
+};
+
+/** Records an AvailableQuest sighting — the quest's fixed, pre-acceptance definition. Always sets status to 'available' (a repeatable quest reappearing after completion legitimately flips back). */
 export const recordQuestSighting = (
   db: Database.Database,
   npcName: string,
-  quest: ActiveQuest | AvailableQuest,
-  status: QuestSightingStatus,
+  quest: AvailableQuest,
   now: number,
 ): void => {
-  const entityId = getOrCreateEntity(db, 'npc', npcName);
+  const startNpcId = getOrCreateEntity(db, 'npc', npcName);
+  const repeatable = quest.repeatable ? 1 : 0;
+
   db.prepare(
-    `INSERT INTO quests (entity_id, quest_id, status, quest_json, last_seen_at)
-     VALUES (@entityId, @questId, @status, @questJson, @now)
-     ON CONFLICT(entity_id, quest_id) DO UPDATE SET
-       status = excluded.status,
-       quest_json = excluded.quest_json,
+    `INSERT INTO quests (start_npc_id, quest_id, end_npc_id, name, repeatable, status, last_seen_at)
+     VALUES (@startNpcId, @questId, NULL, @name, @repeatable, 'available', @now)
+     ON CONFLICT(start_npc_id, quest_id) DO UPDATE SET
+       name = excluded.name,
+       repeatable = excluded.repeatable,
+       status = 'available',
        last_seen_at = excluded.last_seen_at`,
-  ).run({ entityId, questId: quest.id, status, questJson: JSON.stringify(quest), now });
+  ).run({ startNpcId, questId: quest.id, name: quest.name, repeatable, now });
+
+  const rewardItems = Object.entries(quest.rewards.items).filter(
+    (entry): entry is [string, number] => typeof entry[1] === 'number',
+  );
+  deleteStaleQuestRows(
+    db,
+    'quest_reward_items',
+    'item',
+    startNpcId,
+    quest.id,
+    rewardItems.map(([item]) => item),
+  );
+  const upsertReward = db.prepare(
+    `INSERT INTO quest_reward_items (start_npc_id, quest_id, item, quantity)
+     VALUES (@startNpcId, @questId, @item, @quantity)
+     ON CONFLICT(start_npc_id, quest_id, item) DO UPDATE SET quantity = excluded.quantity`,
+  );
+  for (const [item, quantity] of rewardItems) {
+    upsertReward.run({ startNpcId, questId: quest.id, item, quantity });
+  }
+
+  const killRequirements = new Map<number, number>();
+  const requiredItems = new Map<string, number>();
+  for (const step of quest.steps) {
+    if (step.type === 'kill') {
+      for (const [monsterId, required] of Object.entries(step.targets)) {
+        if (typeof required !== 'number') continue;
+        killRequirements.set(getOrCreateEntity(db, 'monster', monsterId), required);
+      }
+    } else if (step.type === 'turn_in') {
+      for (const [item, quantity] of Object.entries(step.requiredItems ?? {})) {
+        if (typeof quantity === 'number') requiredItems.set(item, quantity);
+      }
+    } else if (step.type === 'gather') {
+      for (const [item, quantity] of Object.entries(step.targets)) {
+        if (typeof quantity === 'number') requiredItems.set(item, quantity);
+      }
+    }
+  }
+
+  deleteStaleQuestRows(
+    db,
+    'quest_kill_requirements',
+    'monster_entity_id',
+    startNpcId,
+    quest.id,
+    Array.from(killRequirements.keys()),
+  );
+  const upsertKillRequirement = db.prepare(
+    `INSERT INTO quest_kill_requirements (start_npc_id, quest_id, monster_entity_id, required)
+     VALUES (@startNpcId, @questId, @monsterEntityId, @required)
+     ON CONFLICT(start_npc_id, quest_id, monster_entity_id) DO UPDATE SET required = excluded.required`,
+  );
+  for (const [monsterEntityId, required] of Array.from(killRequirements)) {
+    upsertKillRequirement.run({ startNpcId, questId: quest.id, monsterEntityId, required });
+  }
+
+  deleteStaleQuestRows(
+    db,
+    'quest_required_items',
+    'item',
+    startNpcId,
+    quest.id,
+    Array.from(requiredItems.keys()),
+  );
+  const upsertRequiredItem = db.prepare(
+    `INSERT INTO quest_required_items (start_npc_id, quest_id, item, quantity)
+     VALUES (@startNpcId, @questId, @item, @quantity)
+     ON CONFLICT(start_npc_id, quest_id, item) DO UPDATE SET quantity = excluded.quantity`,
+  );
+  for (const [item, quantity] of Array.from(requiredItems)) {
+    upsertRequiredItem.run({ startNpcId, questId: quest.id, item, quantity });
+  }
 };
 
-const toQuestSighting = (npcName: string, row: any): QuestSighting => ({
-  npcName,
-  questId: row.quest_id,
-  status: row.status,
-  entityId: row.entity_id,
-  quest: JSON.parse(row.quest_json),
-  lastSeenAt: row.last_seen_at,
-});
+/**
+ * Records the turn-in NPC from an ActiveQuest sighting — the one fact only
+ * ActiveQuest carries that AvailableQuest can't. Update-only: if the quest
+ * has no existing row (never seen as an AvailableQuest), this is a no-op
+ * rather than fabricating a placeholder quest record just to hang an
+ * end_npc_id on.
+ */
+export const recordQuestEndNpc = (db: Database.Database, npcName: string, quest: ActiveQuest, now: number): void => {
+  const startNpcId = getOrCreateEntity(db, 'npc', npcName);
+  const endNpcId = getOrCreateEntity(db, 'npc', quest.end_npc);
+  db.prepare(
+    `UPDATE quests SET end_npc_id = @endNpcId, last_seen_at = @now
+     WHERE start_npc_id = @startNpcId AND quest_id = @questId`,
+  ).run({ startNpcId, endNpcId, questId: quest.id, now });
+};
+
+/** Marks a quest completed. Neither ActiveQuest nor AvailableQuest carries a "done" flag themselves — the caller must call this explicitly when a turn-in succeeds. */
+export const recordQuestCompleted = (
+  db: Database.Database,
+  npcName: string,
+  questId: string,
+  now: number,
+): void => {
+  const startNpcId = getOrCreateEntity(db, 'npc', npcName);
+  db.prepare(
+    `UPDATE quests SET status = 'completed', last_seen_at = @now
+     WHERE start_npc_id = @startNpcId AND quest_id = @questId`,
+  ).run({ startNpcId, questId, now });
+};
+
+const buildQuestRecord = (db: Database.Database, row: any): QuestRecord => {
+  const rewardItems: Partial<Record<Items, number>> = {};
+  for (const r of db
+    .prepare('SELECT item, quantity FROM quest_reward_items WHERE start_npc_id = ? AND quest_id = ?')
+    .all(row.start_npc_id, row.quest_id) as { item: Items; quantity: number }[]) {
+    rewardItems[r.item] = r.quantity;
+  }
+
+  const killRequirements = (db
+    .prepare('SELECT monster_entity_id, required FROM quest_kill_requirements WHERE start_npc_id = ? AND quest_id = ?')
+    .all(row.start_npc_id, row.quest_id) as { monster_entity_id: number; required: number }[])
+    .map((r) => ({ monsterEntityId: r.monster_entity_id, required: r.required }));
+
+  const requiredItems: Partial<Record<Items, number>> = {};
+  for (const r of db
+    .prepare('SELECT item, quantity FROM quest_required_items WHERE start_npc_id = ? AND quest_id = ?')
+    .all(row.start_npc_id, row.quest_id) as { item: Items; quantity: number }[]) {
+    requiredItems[r.item] = r.quantity;
+  }
+
+  return {
+    questId: row.quest_id,
+    name: row.name,
+    startNpcId: row.start_npc_id,
+    endNpcId: row.end_npc_id,
+    repeatable: Boolean(row.repeatable),
+    status: row.status,
+    rewardItems,
+    killRequirements,
+    requiredItems,
+    lastSeenAt: row.last_seen_at,
+  };
+};
 
 export const getQuestSighting = (
   db: Database.Database,
   npcName: string,
   questId: string,
-): QuestSighting | null => {
+): QuestRecord | null => {
   const entity = getEntity(db, 'npc', npcName);
   if (!entity) return null;
   const row = db
-    .prepare('SELECT * FROM quests WHERE entity_id = ? AND quest_id = ?')
+    .prepare('SELECT * FROM quests WHERE start_npc_id = ? AND quest_id = ?')
     .get(entity.id, questId);
-  return row ? toQuestSighting(npcName, row) : null;
+  return row ? buildQuestRecord(db, row) : null;
 };
 
-export const getKnownQuestsForNpc = (db: Database.Database, npcName: string): QuestSighting[] => {
+export const getKnownQuestsForNpc = (db: Database.Database, npcName: string): QuestRecord[] => {
   const entity = getEntity(db, 'npc', npcName);
   if (!entity) return [];
   return db
-    .prepare('SELECT * FROM quests WHERE entity_id = ?')
+    .prepare('SELECT * FROM quests WHERE start_npc_id = ?')
     .all(entity.id)
-    .map((row) => toQuestSighting(npcName, row));
+    .map((row: any) => buildQuestRecord(db, row));
 };
