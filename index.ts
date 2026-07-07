@@ -1350,6 +1350,15 @@ disconnectFromGame = connect({
     const activeCraftParent = activeCraft?.tier === 0
       ? upgradeTargets.find(t => t.recipe && t.slot === activeCraft.slot) ?? null
       : null;
+    // Display-only: when activeCraft is a sub-step (e.g. lightLeather), the
+    // dashboard should keep highlighting the ultimate goal (e.g.
+    // lightLeatherHelm) as "next", with the sub-step itself surfaced
+    // separately — otherwise the NEXT badge disappears from the real target
+    // for however many ticks it takes to work through its ingredient chain.
+    const nextCraftTargetId = activeCraft?.tier === 0
+      ? activeCraftParent?.itemId ?? null
+      : nextCraftTarget?.itemId ?? null;
+    const craftingStepItemId = activeCraft?.tier === 0 ? activeCraft.itemId : null;
     const activeCraftItems: Set<string> = new Set([
       ...(activeCraft?.recipe ? [
         ...Object.keys(activeCraft.recipe.input),
@@ -1584,7 +1593,8 @@ disconnectFromGame = connect({
         requirements,
         recipeId: (target.recipe?.id ?? null) as any,
         canBuy: target.itemId in allMerchantSelling && !!allMerchantSelling[target.itemId],
-        isNextCraft: nextCraftTarget?.itemId === target.itemId,
+        isNextCraft: nextCraftTargetId === target.itemId,
+        craftingStep: (craftingStepItemId && nextCraftTargetId === target.itemId) ? craftingStepItemId : undefined,
         tier: target.tier,
         blocked: !target.reachable,
         blockedBy: !target.reachable ? findBlockingItems(target.itemId, planningInventory, allMerchantSelling, recipesArray, knownStationTypes, knownLootItems, knownQuestRewardItems) : undefined,

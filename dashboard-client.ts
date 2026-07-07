@@ -495,12 +495,15 @@ const renderPlanItemHtml = (plan: Record<string, unknown>) => {
     }
   }
 
+  const craftingStep = typeof plan.craftingStep === 'string' ? plan.craftingStep : null;
   const extraClasses = (plan.completed ? " completed" : "") + (plan.isNextCraft ? " next-craft" : "");
   return (
     '<div class="upgrade-entry' + extraClasses + '">' +
     '<div class="upgrade-header">' +
     '<span class="upgrade-priority">#' + escapeHtml(String(plan.priority)) + '</span>' +
-    (plan.isNextCraft ? '<span class="next-craft-badge">NEXT</span>' : '') +
+    (plan.isNextCraft
+      ? '<span class="next-craft-badge">' + (craftingStep ? "CRAFTING " + escapeHtml(lookupItemName(craftingStep)) : "NEXT") + '</span>'
+      : '') +
     '<span class="upgrade-name">' + escapeHtml(plan.name || lookupItemName(plan.targetItem)) + '</span>' +
     '<span class="upgrade-badge">' + escapeHtml(plan.slot || "") + '</span>' +
     '<span class="upgrade-status ' + statusClass + '">' + statusLabel + '</span>' +
