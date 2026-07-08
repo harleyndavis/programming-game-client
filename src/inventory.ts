@@ -23,13 +23,24 @@ export const getInventoryWeight = (
   return total;
 };
 
+/**
+ * Heaviest droppable item — the emergency "shed weight right now" panic
+ * button for isEncumbered-while-threatened (see index.ts). `keepItems`
+ * mirrors what computeItemsToSell already excludes (chainKeepNeeds' keys,
+ * quest turn-in items): a chain-protected item like an equipped weapon
+ * temporarily displaced by need-based tool-switching must not be thrown away
+ * just because it's heavy — that's a permanent loss, unlike selling or
+ * depositing.
+ */
 export const findHeaviestInventoryItem = (
   inventory: Partial<Record<string, number>>,
   items: Record<string, { weight?: number }>,
+  keepItems: ReadonlySet<string> = new Set(),
 ): { item: string; amount: number } | null => {
   let heaviest: { item: string; amount: number; totalWeight: number } | null = null;
   for (const [itemId, qty] of Object.entries(inventory)) {
     if (typeof qty !== "number" || qty <= 0) continue;
+    if (keepItems.has(itemId)) continue;
     const totalWeight = (items[itemId]?.weight ?? 0) * qty;
     if (!heaviest || totalWeight > heaviest.totalWeight) {
       heaviest = { item: itemId, amount: qty, totalWeight };

@@ -6,8 +6,24 @@ import {
   getMissingHarvestToolIds,
   collectHarvestCraftingChainToolIds,
   collectCraftableInputIngredients,
+  findHarvestToolToEquip,
+  findHarvestToolToWithdraw,
+  TREE_TYPE_LOG_ITEM,
+  ORE_TYPE_ITEM,
+  KNOWN_HARVESTABLE_ITEMS,
 } from '../harvest';
 import type { RecipeList } from '../../bot-types';
+
+describe('KNOWN_HARVESTABLE_ITEMS', () => {
+  it('covers every tree/ore type guess', () => {
+    expect(TREE_TYPE_LOG_ITEM.pine).toBe('pinewoodLog');
+    expect(ORE_TYPE_ITEM.copper).toBe('copperOre');
+    expect(ORE_TYPE_ITEM.coal).toBe('coalChunk');
+    expect(KNOWN_HARVESTABLE_ITEMS.has('copperOre')).toBe(true);
+    expect(KNOWN_HARVESTABLE_ITEMS.has('pinewoodLog')).toBe(true);
+    expect(KNOWN_HARVESTABLE_ITEMS.has('ratPelt')).toBe(false);
+  });
+});
 
 describe('isHarvestWeaponType', () => {
   it('returns true for fellingAxe', () => {
@@ -141,6 +157,40 @@ describe('getHarvestableTarget', () => {
     };
     const equipment = { weapon: 'stoneFellingAxe' };
     expect(getHarvestableTarget(objects as any, equipment, items, pos)).toBeNull();
+  });
+
+  it('prefers a farther node yielding a needed item over a nearer node that yields nothing needed', () => {
+    const objects = {
+      node1: { id: 'node1', type: 'miningNode', oreType: 'iron', position: { x: 3, y: 0 }, label: 'iron', radius: 1 },
+      node2: { id: 'node2', type: 'miningNode', oreType: 'copper', position: { x: 10, y: 0 }, label: 'copper', radius: 1 },
+    };
+    const equipment = { weapon: 'stonePickaxe' };
+    const result = getHarvestableTarget(objects as any, equipment, items, pos, new Set(['copperOre']));
+    expect(result!.target.id).toBe('node2');
+  });
+
+  it('returns null (not the nearest irrelevant node) when there is an active need but nothing visible yields it', () => {
+    // Regression: previously fell back to "nearest of any type," which meant
+    // the bot would harvest resources it doesn't need just because they're
+    // closer than the one it does — e.g. keep chopping unneeded logs while
+    // actually short on ore, running itself encumbered on the wrong item.
+    const objects = {
+      node1: { id: 'node1', type: 'miningNode', oreType: 'iron', position: { x: 3, y: 0 }, label: 'iron', radius: 1 },
+      node2: { id: 'node2', type: 'miningNode', oreType: 'tin', position: { x: 10, y: 0 }, label: 'tin', radius: 1 },
+    };
+    const equipment = { weapon: 'stonePickaxe' };
+    const result = getHarvestableTarget(objects as any, equipment, items, pos, new Set(['copperOre']));
+    expect(result).toBeNull();
+  });
+
+  it('behaves exactly as before when neededItems is omitted', () => {
+    const objects = {
+      tree1: { id: 'tree1', type: 'tree', treeType: 'pine', position: { x: 5, y: 0 }, label: 'pine', radius: 1 },
+      node1: { id: 'node1', type: 'miningNode', oreType: 'copper', position: { x: 10, y: 0 }, label: 'copper', radius: 1 },
+    };
+    const equipment = { weapon: 'stoneFellingAxe' };
+    const result = getHarvestableTarget(objects as any, equipment, items, pos);
+    expect(result!.target.id).toBe('tree1');
   });
 });
 
@@ -314,5 +364,99 @@ describe('collectCraftableInputIngredients', () => {
     ];
     expect(collectCraftableInputIngredients(['ironSword'], {}, recipes)).toEqual([]);
     expect(collectCraftableInputIngredients(['ironSword'], {}, recipes, new Set(['smelting']))).toEqual(['ironIngot']);
+  });
+});
+
+describe('findHarvestToolToEquip', () => {
+  const items = {
+    stoneFellingAxe: { type: 'fellingAxe' },
+    copperFellingAxe: { type: 'fellingAxe' },
+    stonePickaxe: { type: 'pickaxe' },
+    copperSword: { type: 'oneHandedSword' },
+  };
+
+  it('returns null when nothing is needed', () => {
+    expect(findHarvestToolToEquip(new Set(), { stonePickaxe: 1 }, {}, items)).toBeNull();
+  });
+
+  it('returns the owned pickaxe when ore is needed', () => {
+    const result = findHarvestToolToEquip(new Set(['copperOre']), { stonePickaxe: 1 }, {}, items);
+    expect(result).toEqual({ item: 'stonePickaxe', slot: 'weapon' });
+  });
+
+  it('returns the owned fellingAxe when a log is needed', () => {
+    const result = findHarvestToolToEquip(new Set(['pinewoodLog']), { stoneFellingAxe: 1 }, {}, items);
+    expect(result).toEqual({ item: 'stoneFellingAxe', slot: 'weapon' });
+  });
+
+  it('returns null when the equipped weapon already matches the need', () => {
+    const equipment = { weapon: 'stonePickaxe' };
+    const result = findHarvestToolToEquip(new Set(['copperOre']), { stonePickaxe: 1 }, equipment, items);
+    expect(result).toBeNull();
+  });
+
+  it('returns null when no matching tool is owned', () => {
+    const result = findHarvestToolToEquip(new Set(['copperOre']), {}, {}, items);
+    expect(result).toBeNull();
+  });
+
+  it('prefers the higher-tier owned tool of the needed type', () => {
+    const result = findHarvestToolToEquip(
+      new Set(['pinewoodLog']), { stoneFellingAxe: 1, copperFellingAxe: 1 }, {}, items,
+    );
+    expect(result).toEqual({ item: 'copperFellingAxe', slot: 'weapon' });
+  });
+
+  it('does not switch away from a combat weapon when nothing is needed', () => {
+    const equipment = { weapon: 'copperSword' };
+    expect(findHarvestToolToEquip(new Set(), { stonePickaxe: 1 }, equipment, items)).toBeNull();
+  });
+});
+
+describe('findHarvestToolToWithdraw', () => {
+  const items = {
+    stoneFellingAxe: { type: 'fellingAxe' },
+    copperFellingAxe: { type: 'fellingAxe' },
+    stonePickaxe: { type: 'pickaxe' },
+    copperPickaxe: { type: 'pickaxe' },
+    copperSword: { type: 'oneHandedSword' },
+  };
+
+  it('returns null when nothing is needed', () => {
+    expect(findHarvestToolToWithdraw(new Set(), { stonePickaxe: 1 }, {}, {}, items)).toBeNull();
+  });
+
+  it('returns the pickaxe sitting in storage when ore is needed and none is owned in pocket', () => {
+    const result = findHarvestToolToWithdraw(new Set(['copperOre']), { stonePickaxe: 1 }, {}, {}, items);
+    expect(result).toEqual({ item: 'stonePickaxe' });
+  });
+
+  it('returns null when a matching tool is already owned in pocket (equip handles it, not withdraw)', () => {
+    const result = findHarvestToolToWithdraw(
+      new Set(['copperOre']), { stonePickaxe: 1 }, { stonePickaxe: 1 }, {}, items,
+    );
+    expect(result).toBeNull();
+  });
+
+  it('returns null when the equipped weapon already matches the need', () => {
+    const equipment = { weapon: 'stonePickaxe' };
+    const result = findHarvestToolToWithdraw(new Set(['copperOre']), { stonePickaxe: 1 }, {}, equipment, items);
+    expect(result).toBeNull();
+  });
+
+  it('returns null when nothing matching is owned anywhere', () => {
+    expect(findHarvestToolToWithdraw(new Set(['copperOre']), {}, {}, {}, items)).toBeNull();
+  });
+
+  it('prefers the higher-tier tool in storage', () => {
+    const result = findHarvestToolToWithdraw(
+      new Set(['pinewoodLog']), { stoneFellingAxe: 1, copperFellingAxe: 1 }, {}, {}, items,
+    );
+    expect(result).toEqual({ item: 'copperFellingAxe' });
+  });
+
+  it('does not fire for a combat weapon when nothing is needed', () => {
+    const equipment = { weapon: 'copperSword' };
+    expect(findHarvestToolToWithdraw(new Set(), { stonePickaxe: 1 }, {}, equipment, items)).toBeNull();
   });
 });

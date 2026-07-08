@@ -70,6 +70,12 @@ export type UpgradePlanItem = {
     canBuy: boolean;
     /** True when this is the next craft target the bot is actively working toward. */
     isNextCraft: boolean;
+    /**
+     * Set when isNextCraft is true but the bot is currently crafting an
+     * intermediate ingredient (e.g. "lightLeather") toward this item rather
+     * than the item itself.
+     */
+    craftingStep?: string;
     /** Acquisition difficulty tier (1=buy now, 2=craft now, 3=can't afford, 4=obtainable, 5=blocked). */
     tier: number;
     /** True when no known acquisition path exists (tier === 5). */

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { computeChainNeeds, getChainedIngredients, canObtainChain, computeDifficultyTier, findBlockingItems } from '../plan';
+import { computeChainNeeds, getChainedIngredients, canObtainChain, computeDifficultyTier, findBlockingItems, filterDisabledRecipes } from '../plan';
 import type { RecipeList } from '../../bot-types';
 
 const makeRecipe = (overrides: Partial<RecipeList[number]> = {}): RecipeList[number] => ({
@@ -526,5 +526,24 @@ describe('computeChainNeeds', () => {
     expect(needs.pinewoodLog).toBeUndefined();
     // Only 2 stone for the axe body — no stone for the knife since it's already owned
     expect(needs.stone).toBe(2);
+  });
+});
+
+describe('filterDisabledRecipes', () => {
+  it('strips the disabled coin-melt chain (chunkOfCopper and its consumer copperIngot)', () => {
+    const recipes: RecipeList = [
+      makeRecipe({ id: 'chunkOfCopper', input: { copperCoin: 10 }, output: { chunkOfCopper: 1 } }),
+      makeRecipe({ id: 'copperIngot', input: { chunkOfCopper: 3 }, output: { copperIngot: 1 } }),
+      makeRecipe({ id: 'copperIngot2', input: { copperOre: 9 }, output: { copperIngot: 1 } }),
+    ];
+    const result = filterDisabledRecipes(recipes);
+    expect(result.map(r => r.id)).toEqual(['copperIngot2']);
+  });
+
+  it('leaves unrelated recipes untouched', () => {
+    const recipes: RecipeList = [
+      makeRecipe({ id: 'axe', input: { pinewoodLog: 2 }, output: { stoneFellingAxe: 1 } }),
+    ];
+    expect(filterDisabledRecipes(recipes)).toEqual(recipes);
   });
 });
