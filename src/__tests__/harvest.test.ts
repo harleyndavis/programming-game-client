@@ -6,7 +6,7 @@ import {
   getMissingHarvestToolIds,
   collectHarvestCraftingChainToolIds,
   collectCraftableInputIngredients,
-  findHarvestToolToEquip,
+  resolveHarvestToolForTarget,
   findHarvestToolToWithdraw,
   TREE_TYPE_LOG_ITEM,
   ORE_TYPE_ITEM,
@@ -192,6 +192,30 @@ describe('getHarvestableTarget', () => {
     const result = getHarvestableTarget(objects as any, equipment, items, pos);
     expect(result!.target.id).toBe('tree1');
   });
+
+  it('finds a needed node even when the currently equipped weapon does not match its tool type', () => {
+    // Regression: the needed-item search used to require weaponType to
+    // already match, so a needed node was invisible until the tool swap had
+    // already landed — forcing index.ts to swap tools purely off the
+    // abstract chain need, with no target in sight yet (e.g. at home). The
+    // needed-item search must find the node regardless of what's equipped;
+    // index.ts equips the right tool only once it decides to act on it.
+    const objects = {
+      node1: { id: 'node1', type: 'miningNode', oreType: 'copper', position: { x: 10, y: 0 }, label: 'copper', radius: 1 },
+    };
+    const equipment = { weapon: 'copperSword' };
+    const result = getHarvestableTarget(objects as any, equipment, items, pos, new Set(['copperOre']));
+    expect(result!.target.id).toBe('node1');
+  });
+
+  it('opportunistic (no neededItems) search still requires the equipped tool to match', () => {
+    const objects = {
+      node1: { id: 'node1', type: 'miningNode', oreType: 'copper', position: { x: 10, y: 0 }, label: 'copper', radius: 1 },
+    };
+    const equipment = { weapon: 'copperSword' };
+    const result = getHarvestableTarget(objects as any, equipment, items, pos);
+    expect(result).toBeNull();
+  });
 });
 
 describe('getMissingHarvestToolIds', () => {
@@ -367,7 +391,7 @@ describe('collectCraftableInputIngredients', () => {
   });
 });
 
-describe('findHarvestToolToEquip', () => {
+describe('resolveHarvestToolForTarget', () => {
   const items = {
     stoneFellingAxe: { type: 'fellingAxe' },
     copperFellingAxe: { type: 'fellingAxe' },
@@ -375,41 +399,41 @@ describe('findHarvestToolToEquip', () => {
     copperSword: { type: 'oneHandedSword' },
   };
 
-  it('returns null when nothing is needed', () => {
-    expect(findHarvestToolToEquip(new Set(), { stonePickaxe: 1 }, {}, items)).toBeNull();
-  });
-
-  it('returns the owned pickaxe when ore is needed', () => {
-    const result = findHarvestToolToEquip(new Set(['copperOre']), { stonePickaxe: 1 }, {}, items);
-    expect(result).toEqual({ item: 'stonePickaxe', slot: 'weapon' });
-  });
-
-  it('returns the owned fellingAxe when a log is needed', () => {
-    const result = findHarvestToolToEquip(new Set(['pinewoodLog']), { stoneFellingAxe: 1 }, {}, items);
-    expect(result).toEqual({ item: 'stoneFellingAxe', slot: 'weapon' });
-  });
-
-  it('returns null when the equipped weapon already matches the need', () => {
+  it('is ready when the equipped weapon already matches the target type', () => {
     const equipment = { weapon: 'stonePickaxe' };
-    const result = findHarvestToolToEquip(new Set(['copperOre']), { stonePickaxe: 1 }, equipment, items);
-    expect(result).toBeNull();
+    const result = resolveHarvestToolForTarget('miningNode', { stonePickaxe: 1 }, equipment, items);
+    expect(result).toEqual({ ready: true, toEquip: null });
   });
 
-  it('returns null when no matching tool is owned', () => {
-    const result = findHarvestToolToEquip(new Set(['copperOre']), {}, {}, items);
-    expect(result).toBeNull();
-  });
-
-  it('prefers the higher-tier owned tool of the needed type', () => {
-    const result = findHarvestToolToEquip(
-      new Set(['pinewoodLog']), { stoneFellingAxe: 1, copperFellingAxe: 1 }, {}, items,
-    );
-    expect(result).toEqual({ item: 'copperFellingAxe', slot: 'weapon' });
-  });
-
-  it('does not switch away from a combat weapon when nothing is needed', () => {
+  it('returns the owned pickaxe to equip for a mining node when a sword is equipped', () => {
     const equipment = { weapon: 'copperSword' };
-    expect(findHarvestToolToEquip(new Set(), { stonePickaxe: 1 }, equipment, items)).toBeNull();
+    const result = resolveHarvestToolForTarget('miningNode', { stonePickaxe: 1 }, equipment, items);
+    expect(result).toEqual({ ready: false, toEquip: { item: 'stonePickaxe', slot: 'weapon' } });
+  });
+
+  it('returns the owned fellingAxe to equip for a tree', () => {
+    const result = resolveHarvestToolForTarget('tree', { stoneFellingAxe: 1 }, {}, items);
+    expect(result).toEqual({ ready: false, toEquip: { item: 'stoneFellingAxe', slot: 'weapon' } });
+  });
+
+  it('is not ready and has nothing to equip when no matching tool is owned', () => {
+    const result = resolveHarvestToolForTarget('miningNode', {}, {}, items);
+    expect(result).toEqual({ ready: false, toEquip: null });
+  });
+
+  it('prefers the higher-tier owned tool of the required type', () => {
+    const result = resolveHarvestToolForTarget(
+      'tree', { stoneFellingAxe: 1, copperFellingAxe: 1 }, {}, items,
+    );
+    expect(result).toEqual({ ready: false, toEquip: { item: 'copperFellingAxe', slot: 'weapon' } });
+  });
+
+  it('does not confuse a fellingAxe in pocket with what a mining node needs', () => {
+    // Regression: a needed-items-wide tie-break could name the wrong tool
+    // type entirely when both a log and an ore are short at once. Scoping to
+    // the specific target's own type avoids that mismatch by construction.
+    const result = resolveHarvestToolForTarget('miningNode', { stoneFellingAxe: 1 }, {}, items);
+    expect(result).toEqual({ ready: false, toEquip: null });
   });
 });
 
