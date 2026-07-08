@@ -72,16 +72,31 @@ const equipmentSlots = [
 ];
 
 const SLOT_SVG: Record<string, string> = {
-  weapon: '/images/relic-blade.svg',
-  offhand: '/images/bordered-shield.svg',
-  helm: '/images/closed-barbute.svg',
-  hands: '/images/gloves.svg',
-  legs: '/images/greaves.svg',
-  feet: '/images/leg-armor.svg',
-  chest: '/images/leather-vest.svg',
-  amulet: '/images/gem-chain.svg',
-  ring1: '/images/big-diamond-ring.svg',
-  ring2: '/images/big-diamond-ring.svg',
+  weapon: '/images/weapons/relic-blade.svg',
+  offhand: '/images/gear/bordered-shield.svg',
+  helm: '/images/gear/closed-barbute.svg',
+  hands: '/images/gear/gloves.svg',
+  legs: '/images/gear/greaves.svg',
+  feet: '/images/gear/leg-armor.svg',
+  chest: '/images/gear/leather-vest.svg',
+  amulet: '/images/gear/gem-chain.svg',
+  ring1: '/images/gear/big-diamond-ring.svg',
+  ring2: '/images/gear/big-diamond-ring.svg',
+};
+
+const WEAPON_TYPE_SVG: Record<string, string> = {
+  dagger: '/images/weapons/dagger.svg',
+  oneHandedAxe: '/images/weapons/oneHandedAxe.svg',
+  oneHandedMace: '/images/weapons/mace.svg',
+  oneHandedSword: '/images/weapons/relic-blade.svg',
+  bow: '/images/weapons/bow-arrow.svg',
+  staff: '/images/weapons/staff.svg',
+  twoHandedAxe: '/images/weapons/twoHandedAxe.svg',
+  twoHandedMace: '/images/weapons/mace.svg',
+  twoHandedSword: '/images/weapons/relic-blade.svg',
+  fellingAxe: '/images/weapons/fellingAxe.svg',
+  pickaxe: '/images/weapons/pickaxe.svg',
+  handToHand: '/images/weapons/relic-blade.svg',
 };
 
 const MATERIAL_COLORS: Record<string, string> = {
@@ -801,22 +816,55 @@ const renderWorld = (world: unknown, upgradePlans: unknown, toolPlans: unknown, 
 
 const compareKeys = (left: string, right: string) => left.localeCompare(right);
 
-const renderEquipment = (equipment: unknown, items: unknown) => {
+type EquipmentItemInfo = {
+  name?: string;
+  type?: string;
+  weight?: number;
+  buyFromVendorPrice?: number;
+  sellToVendorPrice?: number;
+  damage?: number;
+  attacksPerSecond?: number;
+  stats?: Record<string, number>;
+};
+
+const STAT_LABELS: Record<string, string> = {
+  defense: "Defense",
+  attack: "Attack",
+  maxHp: "Max HP",
+  maxMp: "Max MP",
+  maxTp: "Max TP",
+  movementSpeed: "Move Speed",
+  mpRegen: "MP Regen",
+  sightRange: "Sight Range",
+  radius: "Radius",
+};
+
+const renderEquipment = (equipment: unknown, equipmentItems: unknown) => {
   if (!equipmentGridEl) return;
   const eq = (equipment || {}) as Record<string, string | null>;
-  const catalog = (items || {}) as Record<string, Record<string, unknown>>;
+  const catalog = (equipmentItems || {}) as Record<string, EquipmentItemInfo>;
   const slots = ["weapon", "ring1", "helm", "ring2", "offhand", "chest", "amulet", "hands", "legs", "feet"];
   equipmentGridEl.innerHTML = slots.map((key) => {
     const slot = equipmentSlots.find((s) => s.key === key);
     const itemId = eq[key] || null;
-    const itemData = itemId ? (catalog[itemId] || {}) : null;
+    const itemData = itemId ? catalog[itemId] : null;
     const lines = [slot?.label || key];
     if (itemId) {
       lines.push(lookupItemName(itemId));
       if (itemData) {
-        Object.entries(itemData)
-          .filter(([, v]) => typeof v === "number")
-          .forEach(([k, v]) => lines.push(formatItemName(k) + ": " + v));
+        if (typeof itemData.damage === "number" && typeof itemData.attacksPerSecond === "number") {
+          lines.push("Damage: " + itemData.damage);
+          lines.push("Attacks/Sec: " + itemData.attacksPerSecond);
+          lines.push("DPS: " + (itemData.damage * itemData.attacksPerSecond).toFixed(2));
+        }
+        if (itemData.stats) {
+          Object.entries(itemData.stats)
+            .filter(([, v]) => typeof v === "number" && v !== 0)
+            .forEach(([k, v]) => lines.push((STAT_LABELS[k] || formatItemName(k)) + ": " + v));
+        }
+        if (typeof itemData.weight === "number") {
+          lines.push("Weight: " + itemData.weight);
+        }
       }
     } else {
       lines.push("Empty");
@@ -825,7 +873,9 @@ const renderEquipment = (equipment: unknown, items: unknown) => {
 
     let iconHtml = "";
     if (itemId) {
-      const svgUrl = SLOT_SVG[key];
+      const svgUrl = key === "weapon"
+        ? WEAPON_TYPE_SVG[itemData?.type as string] || SLOT_SVG[key]
+        : SLOT_SVG[key];
       if (svgUrl) {
         const material = extractMaterial(itemId);
         const color = MATERIAL_COLORS[material] || '#ffffff';
@@ -1034,7 +1084,7 @@ const render = (payload: any) => {
   }
 
   itemCatalog = (payload.raw?.items || {}) as Record<string, Record<string, unknown>>;
-  renderEquipment(equipment, payload.raw?.items);
+  renderEquipment(equipment, payload.equipmentItems);
   renderCombatSkills(player.combatSkills);
   renderSpellbook(player.spellbook);
   renderRecordList(inventoryListEl, player.inventory, "Inventory empty", (key) =>
