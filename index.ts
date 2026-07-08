@@ -10,7 +10,7 @@ import { ENCUMBRANCE_THRESHOLD, getInventoryWeight, findHeaviestInventoryItem, f
 import { getChainedIngredients, canObtainChain, computeChainNeeds, computeDifficultyTier, findBlockingItems, isRecipeAvailable, filterDisabledRecipes } from "./src/plan";
 import { computeUpgradeTargets, computeTargetsToBuyFromMerchant, findGearToEquip } from "./src/equipment";
 import { findCraftableTarget, findNextCraftTarget, findCraftableFromList, computeCraftIngredientsToBuyFromMerchant, collectVisibleStations, getAvailableStationTypes, findStationForType } from "./src/craft";
-import { getHarvestableTarget, getMissingHarvestToolIds, collectHarvestToolItemIds, collectHarvestCraftingChainToolIds, collectCraftableInputIngredients, findHarvestToolToEquip, findHarvestToolToWithdraw, isHarvestWeaponType, KNOWN_HARVESTABLE_ITEMS } from "./src/harvest";
+import { getHarvestableTarget, getMissingHarvestToolIds, collectHarvestToolItemIds, collectHarvestCraftingChainToolIds, collectCraftableInputIngredients, resolveHarvestToolForTarget, findHarvestToolToWithdraw, isHarvestWeaponType, KNOWN_HARVESTABLE_ITEMS } from "./src/harvest";
 import { findBestSellMerchant } from "./src/trade";
 import { findCompletableQuest, findTurnInNpc, findBestQuestToAccept, findBestAvailableQuest, findQuestGivers, findQuestTurnInRequiredItemIds, findPendingQuestTurnInItems, findStalledQuests, findQuestToAbandon, findQuestToDismiss } from "./src/quests";
 import { openMemoryDb, getEntity, recordResourceSighting, recordMerchantTrades, recordNpcSighting, recordQuestSighting, recordMonsterKill, recordHarvest, recordLoot, recordMonsterSighting, recordCombatHit, recordMonsterMaxHp, recordSafeLocation, recordExploredCell, recordQuestEndNpc, recordQuestCompleted, getKnownStationTypes, getAllKnownSellingOffers, getKnownLootItems, getKnownQuestRewardItems, ASSUMED_SIGHT_RANGE } from "./src/memory";
@@ -324,6 +324,7 @@ const decide = (opts: {
   toolToCraftStationId: string | undefined;
   finishingHomeChores: boolean;
   harvestTarget: { target: Tree | MiningNode; distance: number } | null;
+  harvestToolReady: boolean;
   harvestToolToEquip: { item: string; slot: string } | null;
   harvestToolToWithdraw: { item: string } | null;
   isHarvesting: boolean;
@@ -348,7 +349,7 @@ const decide = (opts: {
   storageRecord: Record<string, number>;
   playerInventory: Record<string, number>;
 }): Decision => {
-  const { playerHp, maxHp, lowHpThreshold, playerPosition, nearbyMonster, isEncumbered, sellOpportunity, heaviestInventoryItem, playerCalories, maxCalories, cheapestFood, isHunting, huntRadius, nearbyHuntTarget, nearbyThreat, upgradesPlan, gearToEquip, recipeToCraft, recipeToCraftStationId, toolToCraft, toolToCraftStationId, finishingHomeChores, harvestTarget, harvestToolToEquip, harvestToolToWithdraw, isHarvesting, attackingMonster, completableQuest, questToAccept, questToAbandon, questToDismiss, questNpcTarget, activeCraft, toolToCraftFromStorage, nearbyBanker, buyCost, availableStorageWithdrawal, pendingQuestTurnInItems, playerCoins, storageRecord, playerInventory } = opts;
+  const { playerHp, maxHp, lowHpThreshold, playerPosition, nearbyMonster, isEncumbered, sellOpportunity, heaviestInventoryItem, playerCalories, maxCalories, cheapestFood, isHunting, huntRadius, nearbyHuntTarget, nearbyThreat, upgradesPlan, gearToEquip, recipeToCraft, recipeToCraftStationId, toolToCraft, toolToCraftStationId, finishingHomeChores, harvestTarget, harvestToolReady, harvestToolToEquip, harvestToolToWithdraw, isHarvesting, attackingMonster, completableQuest, questToAccept, questToAbandon, questToDismiss, questNpcTarget, activeCraft, toolToCraftFromStorage, nearbyBanker, buyCost, availableStorageWithdrawal, pendingQuestTurnInItems, playerCoins, storageRecord, playerInventory } = opts;
 
   if (playerHp <= 0) return { type: "respawn" };
 
@@ -361,10 +362,20 @@ const decide = (opts: {
   // execution is gated by safety (see recipeToCraft/toolToCraft's own
   // computation) rather than location.
   const homeChores = (): Decision | null => {
-    if (gearToEquip) return { type: "equip", item: gearToEquip.item, slot: gearToEquip.slot };
+    // Skip a weapon-slot suggestion here when there's an active harvestTarget
+    // to go interact with — same narrowing as reclaimWeapon below, just
+    // applied to homeChores() too. homeChores() isn't gated by distance (see
+    // above), so it can run mid-transit while harvestTarget is also set
+    // (e.g. finishingHomeChores true while walking home past a node); without
+    // this, gearToEquip's raw "best owned weapon overall" pick (sword beats
+    // pickaxe on dps) would equip right back over the harvest tool the
+    // harvestTarget branch further down just equipped, undoing it every tick.
+    if (gearToEquip && !(gearToEquip.slot === 'weapon' && harvestTarget)) {
+      return { type: "equip", item: gearToEquip.item, slot: gearToEquip.slot };
+    }
     // A needed harvest tool sitting in storage instead of pocket — bring it
-    // out so findHarvestToolToEquip (pocket-only) has something to work with.
-    // See findHarvestToolToWithdraw (src/harvest.ts).
+    // out so resolveHarvestToolForTarget (pocket-only) has something to work
+    // with. See findHarvestToolToWithdraw (src/harvest.ts).
     if (harvestToolToWithdraw && nearbyBanker) {
       return { type: "withdraw", items: { [harvestToolToWithdraw.item]: 1 }, banker: nearbyBanker };
     }
@@ -464,19 +475,34 @@ const decide = (opts: {
     if (reclaimWeapon) return { type: "equip", item: reclaimWeapon.item, slot: reclaimWeapon.slot };
     return { type: "attack", targetId: nearbyMonster.unit.id, distance: nearbyMonster.distance };
   }
-  // Carry the harvest tool (fellingAxe/pickaxe) the current need calls for —
-  // e.g. copperOre short → pickaxe — before chasing a harvest target with
-  // whatever happens to already be equipped. Not while a threat is nearby:
-  // don't give up a combat weapon with something dangerous around.
-  if (harvestToolToEquip && !nearbyThreat) {
-    return { type: "equip", item: harvestToolToEquip.item, slot: harvestToolToEquip.slot };
-  }
-  // Try harvesting nearby trees or mining nodes when not busy.
+  // Try harvesting nearby trees or mining nodes when not busy. The tool swap
+  // (fellingAxe/pickaxe for the current need — e.g. copperOre short →
+  // pickaxe) is folded into this decision rather than a standalone earlier
+  // branch: getHarvestableTarget's needed-item search finds harvestTarget
+  // regardless of what's currently equipped, so this only fires once we've
+  // actually decided to go after a specific node — not just because some
+  // chain need exists in the abstract with nothing harvestable in sight
+  // (e.g. while sitting at home), which used to fight with gearToEquip
+  // wanting the best combat weapon equipped there instead.
   if (harvestTarget) {
-    if (harvestTarget.distance < 1.0) {
+    if (harvestToolToEquip) {
+      return { type: "equip", item: harvestToolToEquip.item, slot: harvestToolToEquip.slot };
+    }
+    // Only actually harvest once the equipped weapon matches what this
+    // specific target requires (harvestToolReady). If it doesn't match and
+    // nothing owned in pocket can fix that either (harvestToolToEquip null),
+    // the required tool simply isn't owned at all — fall through rather than
+    // issuing a harvest intent with the wrong tool equipped, which the server
+    // would just reject.
+    if (harvestToolReady) {
+      // No client-side range gate, same as attack: player.harvest(target) is
+      // a move-to-and-act intent (see get-handlers.ts), so the server
+      // handles closing the distance. Gating on harvestTarget.distance here
+      // just made the bot explore toward the object first and only ever
+      // harvest once already within an arbitrary 1.0, which could undershoot
+      // the object's actual interaction range (radius varies per object).
       return { type: "harvest", targetId: harvestTarget.target.id };
     }
-    return { type: "explore", to: harvestTarget.target.position! };
   }
   if (questToAbandon) return { type: "abandonQuest", questId: questToAbandon.id };
   if (questToDismiss) return { type: "abandonQuest", questId: questToDismiss };
@@ -1098,6 +1124,15 @@ disconnectFromGame = connect({
     }
     const inventoryWeight = getInventoryWeight(player.inventory ?? {}, heartbeat.items, player.equipment);
     const isEncumbered = inventoryWeight >= maxCarryWeight * ENCUMBRANCE_THRESHOLD;
+    // Overload starts a home visit exactly like low HP does (see shouldRecover
+    // above) — without this, atHome (recoveringAtHome/idlingAtHome/finishingHomeChores)
+    // never goes true for a purely-overweight return trip, so the bot can reach
+    // HOME_POSITION and then just idle forever: decide()'s isEncumbered branch
+    // keeps returning "return-home-overloaded" and the auto-deposit override
+    // below is gated on atHome, which was never set.
+    if (isEncumbered && !finishingHomeChores) {
+      finishingHomeChores = true; // start a home visit
+    }
 
     // ── NPC scan (single pass) ───────────────────────────────────────────────
     // One scan over every visible NPC, whatever its role: record its sighting,
@@ -1282,7 +1317,7 @@ disconnectFromGame = connect({
     // Update lastEquipment each tick but never clear on death: this keeps
     // recovery materials protected across the window when equipment is empty.
     // Skip a harvest tool temporarily occupying the weapon slot (need-based
-    // tool-switching, see findHarvestToolToEquip) — otherwise the real weapon
+    // tool-switching, see resolveHarvestToolForTarget) — otherwise the real weapon
     // it displaced (e.g. copperSword) is overwritten here, drops out of
     // chainKeepNeeds below, and becomes sellable/droppable while it's just
     // sitting in pocket waiting to be re-equipped.
@@ -1402,26 +1437,30 @@ disconnectFromGame = connect({
       playerPosition,
       neededHarvestItems,
     );
-    // Swap into the harvest tool (fellingAxe/pickaxe) neededHarvestItems calls
-    // for, if a suitable one is owned and not already equipped — e.g. carry a
-    // pickaxe when copperOre is short, a fellingAxe when a log is short.
-    // getHarvestableTarget above still filters by *currently* equipped tool,
-    // so this only pays off starting next tick once the swap lands; that's
-    // fine, it mirrors every other withdraw-then-act sequence in this file.
-    const harvestToolToEquip = findHarvestToolToEquip(
-      neededHarvestItems,
-      player.inventory ?? {},
-      (player.equipment ?? {}) as Record<string, string | null | undefined>,
-      heartbeat.items ?? {},
-    );
+    // Resolve the tool for the *specific* harvestTarget chosen above — keyed
+    // off that object's own type (tree/miningNode), not the whole
+    // neededHarvestItems set. getHarvestableTarget's needed-item search no
+    // longer requires the currently-equipped weapon to match, so harvestTarget
+    // can legitimately be a node the bot has no matching tool for at all; the
+    // harvestTarget branch in decide() uses harvestToolReady/harvestToolToEquip
+    // to equip the right tool, or refuse to harvest, rather than assuming a
+    // generic neededHarvestItems-wide guess lines up with this exact node.
+    const { ready: harvestToolReady, toEquip: harvestToolToEquip } = harvestTarget
+      ? resolveHarvestToolForTarget(
+        harvestTarget.target.type,
+        player.inventory ?? {},
+        (player.equipment ?? {}) as Record<string, string | null | undefined>,
+        heartbeat.items ?? {},
+      )
+      : { ready: false, toEquip: null };
     // Pocket-level keep bound: quantities already covered by storage don't need
     // to stay in the pocket too.
     const storageRec = (heartbeat.player.storage ?? {}) as Record<string, number>;
     // The needed tool sitting in storage instead of pocket — e.g. previously
     // crafted/bought then auto-deposited home. Without this, a tool stuck in
-    // storage is invisible to findHarvestToolToEquip (pocket-only) and never
-    // comes back out, so the bot never carries it and never harvests what it's
-    // needed for.
+    // storage is invisible to resolveHarvestToolForTarget (pocket-only) and
+    // never comes back out, so the bot never carries it and never harvests
+    // what it's needed for.
     const harvestToolToWithdraw = findHarvestToolToWithdraw(
       neededHarvestItems,
       storageRec,
@@ -1505,8 +1544,8 @@ disconnectFromGame = connect({
       // equipped — chainKeepNeeds only protects them from being sold
       // (TOOL_KEEP_CAP), it isn't a "these belong in storage" signal. Without
       // this, a freshly crafted/bought pickaxe gets banked away on the next
-      // home visit and findHarvestToolToEquip (pocket-only) never sees it
-      // again; findHarvestToolToWithdraw (src/harvest.ts) recovers one already
+      // home visit and resolveHarvestToolForTarget (pocket-only) never sees
+      // it again; findHarvestToolToWithdraw (src/harvest.ts) recovers one already
       // stuck there, but the goal is to not put it there in the first place.
       const toolType = (heartbeat.items as Record<string, { type?: string }>)[itemId]?.type;
       if (toolType && isHarvestWeaponType(toolType)) continue;
@@ -2048,6 +2087,7 @@ disconnectFromGame = connect({
       toolToCraftStationId,
       finishingHomeChores,
       harvestTarget,
+      harvestToolReady,
       harvestToolToEquip,
       harvestToolToWithdraw,
       isHarvesting,
@@ -2113,9 +2153,14 @@ disconnectFromGame = connect({
     // ── Post-decision: auto-deposit surplus ──────────────────────────────────
     // "explore"/"return-home-idle"/"return-home-recover" are decide()'s
     // "nothing left to do" outputs — deposit as the last thing once chores
-    // are truly finished, not narrower than that.
+    // are truly finished, not narrower than that. "return-home-overloaded" is
+    // included too: decide()'s isEncumbered branch (checked before the
+    // finishingHomeChores homeChores() branch) keeps returning that decision
+    // for as long as isEncumbered is true, which stays true until a deposit
+    // actually happens — without it here, an overloaded bot with nothing
+    // sellable would arrive home and idle forever instead of depositing.
     if (atHome && nearbyBanker
-      && (decision.type === "explore" || decision.type === "return-home-idle" || decision.type === "return-home-recover")
+      && (decision.type === "explore" || decision.type === "return-home-idle" || decision.type === "return-home-recover" || decision.type === "return-home-overloaded")
       && Object.keys(toDeposit).length > 0) {
       decision = { type: "deposit", items: toDeposit, banker: nearbyBanker };
       tickExtras.autoDeposit = { items: toDeposit, banker: nearbyBanker.id };

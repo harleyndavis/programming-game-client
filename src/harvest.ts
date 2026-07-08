@@ -82,7 +82,18 @@ const guessedYield = (obj: Tree | MiningNode): string | undefined =>
  *
  * The opportunistic "nearest of any type" behavior only applies when
  * neededItems is empty (nothing is currently needed at all) — the previous,
- * need-agnostic default, preserved for idle/no-active-chain gathering.
+ * need-agnostic default, preserved for idle/no-active-chain gathering. That
+ * pass still requires the currently-equipped tool to match, since there's no
+ * specific need driving it — just harvest along the way with whatever's
+ * already equipped.
+ *
+ * The needed-item pass (closestNeeded), by contrast, does NOT filter by the
+ * currently-equipped tool: it reports the nearest node yielding something
+ * needed regardless of what's in the weapon slot right now. Equipping the
+ * right tool is the caller's job once it decides to act on this target (see
+ * the harvestTarget branch in index.ts) — done that way so the equip only
+ * fires when there's an actual node to walk to, not just because some chain
+ * need exists somewhere in the abstract (e.g. while sitting at home).
  */
 export function getHarvestableTarget(
   gameObjects: Record<string, GameObject>,
@@ -99,10 +110,10 @@ export function getHarvestableTarget(
     if (obj.type !== 'tree' && obj.type !== 'miningNode') continue;
     if (!isFinitePosition(obj.position)) continue;
     const requiredType = HARVEST_WEAPON_TYPE[obj.type];
-    if (!requiredType || weaponType !== requiredType) continue;
+    if (!requiredType) continue;
     const dist = distanceBetween(playerPosition, obj.position!);
     const candidate = { target: obj as Tree | MiningNode, distance: dist };
-    if (!closest || dist < closest.distance) closest = candidate;
+    if (weaponType === requiredType && (!closest || dist < closest.distance)) closest = candidate;
     if (neededItems.size > 0) {
       const yields = guessedYield(candidate.target);
       if (yields && neededItems.has(yields) && (!closestNeeded || dist < closestNeeded.distance)) {
@@ -130,9 +141,11 @@ const HARVEST_ITEM_TOOL_TYPE: Record<string, string> = (() => {
 
 /**
  * Which harvest tool type (if any) `neededItems` calls for that the currently
- * equipped weapon doesn't already satisfy. Shared by findHarvestToolToEquip
- * (owned in pocket) and findHarvestToolToWithdraw (owned in storage) so both
- * pick the same tool type via the same tie-break rule.
+ * equipped weapon doesn't already satisfy. Used by findHarvestToolToWithdraw
+ * (owned in storage) — the pocket-owned equivalent for a specific chosen
+ * target is resolveHarvestToolForTarget, which doesn't need this tie-break
+ * since it's keyed off the target's own object type instead of a whole
+ * needed-items set.
  *
  * When items of both tool types are needed at once (e.g. a log and an ore
  * are both short), picks whichever type appears first in `neededItems` — an
@@ -172,40 +185,51 @@ function bestOwnedTool(
 }
 
 /**
- * The harvest tool to switch into the weapon slot, if the currently equipped
- * weapon doesn't already match what `neededItems` requires (see
- * neededHarvestItems in index.ts) and a suitable one is owned in pocket.
- * Prefers the highest-tier owned tool of the needed type.
+ * Whether the currently equipped weapon already matches — or can be swapped
+ * in pocket to match — the tool a *specific* harvestable object requires,
+ * keyed off the object's own `type` (tree → fellingAxe, miningNode →
+ * pickaxe) via HARVEST_WEAPON_TYPE. Used right before acting on a chosen
+ * harvestTarget (see index.ts) — scoped to that exact target rather than the
+ * whole neededHarvestItems set, since getHarvestableTarget's needed-item
+ * search picks a target regardless of what's currently equipped, and a
+ * pickNeededToolType-style tie-break over the full needed set could name a
+ * different tool type than the specific node actually chosen when both a
+ * log and an ore are needed at once (e.g. suggest a fellingAxe while the
+ * chosen target is a mining node) — that mismatch would either equip the
+ * wrong tool for this target or, worse, fall through to issuing the harvest
+ * intent with the wrong tool equipped.
  *
- * Returns null when nothing needs a tool switch (nothing needed, the
- * equipped weapon already matches, or no matching tool is owned in pocket —
- * either nothing owned at all, in which case the shopping/crafting paths are
- * responsible for getting one, or owned only in storage, in which case
- * findHarvestToolToWithdraw is what surfaces it).
+ * `ready: true` means the equipped weapon already matches — go ahead and
+ * harvest. `toEquip` is set when a matching tool is owned in pocket but not
+ * yet equipped. Both false/null means the required tool isn't equipped and
+ * isn't owned at all — nothing to do for this target until it's acquired
+ * some other way (buy/craft), and the harvest intent must not be issued.
  */
-export function findHarvestToolToEquip(
-  neededItems: ReadonlySet<string>,
+export function resolveHarvestToolForTarget(
+  targetType: string,
   inventory: Partial<Record<string, number>>,
   equipment: Record<string, string | null | undefined>,
   items: Record<string, { type?: string }>,
-): { item: string; slot: string } | null {
-  const toolType = pickNeededToolType(neededItems, equipment, items);
-  if (!toolType) return null;
-  const best = bestOwnedTool(toolType, inventory, items);
-  if (!best || equipment.weapon === best) return null;
-  return { item: best, slot: 'weapon' };
+): { ready: boolean; toEquip: { item: string; slot: string } | null } {
+  const requiredType = HARVEST_WEAPON_TYPE[targetType];
+  if (!requiredType) return { ready: false, toEquip: null };
+  const equippedType = equipment.weapon ? items[equipment.weapon]?.type : undefined;
+  if (equippedType === requiredType) return { ready: true, toEquip: null };
+  const best = bestOwnedTool(requiredType, inventory, items);
+  return { ready: false, toEquip: best ? { item: best, slot: 'weapon' } : null };
 }
 
 /**
  * The harvest tool to withdraw from storage, when `neededItems` calls for a
  * tool type not already equipped, none is owned in pocket, but one is sitting
  * in storage — e.g. previously crafted/bought then auto-deposited home. Without
- * this, findHarvestToolToEquip has nothing to work with (it only ever looks at
- * pocket inventory) and the tool sits in storage forever while the bot never
- * carries it and never harvests the resource it's needed for.
+ * this, the pocket-only resolveHarvestToolForTarget check has nothing to work
+ * with and the tool sits in storage forever while the bot never carries it
+ * and never harvests the resource it's needed for.
  *
  * Returns null once anything matching is already in pocket — that's
- * findHarvestToolToEquip's job from that point on.
+ * resolveHarvestToolForTarget's job (via index.ts's harvestTarget branch)
+ * from that point on.
  */
 export function findHarvestToolToWithdraw(
   neededItems: ReadonlySet<string>,
