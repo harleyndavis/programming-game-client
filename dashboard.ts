@@ -5,6 +5,7 @@ import { join } from "path";
 import { ModuleKind, ScriptTarget, transpileModule } from "typescript";
 import type Database from "better-sqlite3";
 import type { Monsters } from "programming-game/monsters";
+import type { UnitStats } from "programming-game/types";
 import {
     Entity,
     HeatMapSighting,
@@ -28,12 +29,27 @@ export type Position = {
 
 export type RawEvent = { ts: string; name: string; data: unknown };
 
+/** Subdirectories of data/images/ served by the /images/ route — weapons, gear (armor/jewelry), entities (npc/stations/tree/ore). */
+const IMAGE_SUBDIRS = new Set(["weapons", "gear", "entities"]);
+
 export type StorageFeeInfo = {
     coinsInStorage: number;
     perCharge: number;
     buffer: number;
     coverage: number;
     availableWithdrawal: number;
+};
+
+/** Lean per-item stat data for currently equipped items only — not the full item catalog (see snapshot.ts `getEquipmentItems`). */
+export type EquipmentItemInfo = {
+    name?: string;
+    type?: string;
+    weight?: number;
+    buyFromVendorPrice?: number;
+    sellToVendorPrice?: number;
+    damage?: number;
+    attacksPerSecond?: number;
+    stats?: Partial<UnitStats>;
 };
 
 export type DashboardSnapshot = {
@@ -59,7 +75,9 @@ export type DashboardSnapshot = {
     // and is derived client-side instead of being duplicated here.
     weight: number | null;
     maxCarryWeight: number | null;
-    /** The heartbeat as received from the game server, minus `recipes`/`items` (sent once, cached client-side). */
+    /** Stat data (damage/APS/defense/etc.) for currently equipped items only, since the full item catalog is intentionally stripped from `raw`. */
+    equipmentItems?: Record<string, EquipmentItemInfo>;
+    /** The heartbeat as received from the game server, minus `recipes`/`items`. */
     raw: Record<string, unknown>;
     /** Storage fee breakdown — computed by the bot tick. */
     storageFee?: StorageFeeInfo;
@@ -485,12 +503,17 @@ export const createDashboard = (port: number, memoryDb: Database.Database) => {
                 }
 
                 if (url && url.startsWith("/images/")) {
-                    const filename = url.slice("/images/".length);
-                    if (filename.includes("..") || filename.includes("/") || filename.includes("\\")) {
+                    const relPath = url.slice("/images/".length);
+                    const segments = relPath.split("/");
+                    const isSafeSegment = (s: string) => /^[a-zA-Z0-9_-]+\.svg$|^[a-zA-Z0-9_-]+$/.test(s);
+                    const isValid =
+                        (segments.length === 1 && isSafeSegment(segments[0])) ||
+                        (segments.length === 2 && IMAGE_SUBDIRS.has(segments[0]) && isSafeSegment(segments[1]));
+                    if (!isValid) {
                         writeError(res, 400, "Invalid path");
                         return;
                     }
-                    const imagePath = join(__dirname, "data/images", filename);
+                    const imagePath = join(__dirname, "data/images", ...segments);
                     try {
                         const content = readFileSync(imagePath);
                         res.statusCode = 200;

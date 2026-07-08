@@ -33,11 +33,11 @@ const RESOURCE_COLORS: Record<string, string> = {
 };
 
 const ICON_DEFS = [
-  { url: '/images/npc.svg', label: 'NPCs', test: function (t: string, _n: string) { return t === 'npc'; } },
-  { url: '/images/anvil.svg', label: 'Stations', getIconUrl: function (n: string) { if (n === 'cooking') return '/images/campfire.svg'; if (n === 'alchemy') return '/images/round-potion.svg'; return '/images/anvil.svg'; }, test: function (t: string, _n: string) { return t === 'station'; } },
-  { url: '/images/tree.svg', label: 'Trees', test: function (t: string, n: string) { return t === 'resource' && TREE_NAMES.has(n); } },
-  { url: '/images/ore.svg', label: 'Ore', test: function (t: string, n: string) { return t === 'resource' && ORE_NAMES.has(n); } },
-  { url: '/images/monster.svg', label: 'Monsters', test: function (t: string, _n: string) { return t === 'monster'; } },
+  { url: '/images/entities/npc.svg', label: 'NPCs', test: function (t: string, _n: string) { return t === 'npc'; } },
+  { url: '/images/entities/anvil.svg', label: 'Stations', getIconUrl: function (n: string) { if (n === 'cooking') return '/images/entities/campfire.svg'; if (n === 'alchemy') return '/images/entities/round-potion.svg'; return '/images/entities/anvil.svg'; }, test: function (t: string, _n: string) { return t === 'station'; } },
+  { url: '/images/entities/tree.svg', label: 'Trees', test: function (t: string, n: string) { return t === 'resource' && TREE_NAMES.has(n); } },
+  { url: '/images/entities/ore.svg', label: 'Ore', test: function (t: string, n: string) { return t === 'resource' && ORE_NAMES.has(n); } },
+  { url: '/images/entities/monster.svg', label: 'Monsters', test: function (t: string, _n: string) { return t === 'monster'; } },
 ];
 
 const CELL_PX = 67;
@@ -299,7 +299,7 @@ var buildCellMap = function (data: MapResponse): [Map<string, MapCellData>, Set<
     cd.slots.forEach(function (slot) {
       if (!slot || slot.entities.length === 0) return;
       slot.entities.sort(function (a, b) { return b.observationCount - a.observationCount; });
-      if (slot.iconUrl === '/images/tree.svg' || slot.iconUrl === '/images/ore.svg') {
+      if (slot.iconUrl === '/images/entities/tree.svg' || slot.iconUrl === '/images/entities/ore.svg') {
         slot.tintColor = RESOURCE_COLORS[slot.entities[0].entityName] ?? '#ffffff';
       }
     });
@@ -468,10 +468,10 @@ var render = function (data: MapResponse) {
 
   var legendItems: string[] = [];
   var typeIconMap: Record<string, string> = {
-    monster: '/images/monster.svg',
-    npc: '/images/npc.svg',
-    station: '/images/anvil.svg',
-    resource: '/images/tree.svg',
+    monster: '/images/entities/monster.svg',
+    npc: '/images/entities/npc.svg',
+    station: '/images/entities/anvil.svg',
+    resource: '/images/entities/tree.svg',
   };
   var typeLabels: Record<string, string> = {
     monster: 'Monsters', npc: 'NPCs', station: 'Stations', resource: 'Resources',
@@ -495,10 +495,10 @@ var render = function (data: MapResponse) {
         else hasOres = true;
       });
       if (hasTrees) {
-        legendItems.push('<span class="legend-item"><span class="legend-icon-sm" style="background-image:url(' + getProcessedIconUrl('/images/tree.svg') + ')"></span><span class="legend-label">Tree</span></span>');
+        legendItems.push('<span class="legend-item"><span class="legend-icon-sm" style="background-image:url(' + getProcessedIconUrl('/images/entities/tree.svg') + ')"></span><span class="legend-label">Tree</span></span>');
       }
       if (hasOres) {
-        legendItems.push('<span class="legend-item"><span class="legend-icon-sm" style="background-image:url(' + getProcessedIconUrl('/images/ore.svg') + ')"></span><span class="legend-label">Mining Node</span></span>');
+        legendItems.push('<span class="legend-item"><span class="legend-icon-sm" style="background-image:url(' + getProcessedIconUrl('/images/entities/ore.svg') + ')"></span><span class="legend-label">Mining Node</span></span>');
       }
     } else {
       var iconUrl = typeIconMap[t];

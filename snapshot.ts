@@ -1,4 +1,5 @@
-import { DashboardSnapshot } from "./dashboard";
+import type { UnitStats } from "programming-game/types";
+import { DashboardSnapshot, EquipmentItemInfo } from "./dashboard";
 
 type SnapshotEquipment = {
     helm?: string | null;
@@ -18,9 +19,20 @@ type SnapshotPlayer = {
     equipment?: SnapshotEquipment;
 };
 
+type SnapshotItemDefinition = {
+    name?: string;
+    type?: string;
+    weight?: number;
+    buyFromVendorPrice?: number;
+    sellToVendorPrice?: number;
+    damage?: number;
+    attacksPerSecond?: number;
+    stats?: Partial<UnitStats>;
+};
+
 type SnapshotHeartbeat = {
     player: SnapshotPlayer;
-    items: Record<string, { weight?: number }>;
+    items: Record<string, SnapshotItemDefinition>;
     constants?: {
         maxCarryWeight?: number;
     };
@@ -61,6 +73,35 @@ const getItemWeight = (items: SnapshotHeartbeat["items"], itemId: string | null 
     return typeof weight === "number" ? weight : 0;
 };
 
+const getEquipmentItems = (heartbeat: SnapshotHeartbeat): Record<string, EquipmentItemInfo> => {
+    const result: Record<string, EquipmentItemInfo> = {};
+
+    for (const slot of EQUIPMENT_SLOTS) {
+        const itemId = heartbeat.player.equipment?.[slot];
+        if (!itemId || result[itemId]) {
+            continue;
+        }
+
+        const def = heartbeat.items[itemId];
+        if (!def) {
+            continue;
+        }
+
+        result[itemId] = {
+            name: def.name,
+            type: def.type,
+            weight: def.weight,
+            buyFromVendorPrice: def.buyFromVendorPrice,
+            sellToVendorPrice: def.sellToVendorPrice,
+            damage: def.damage,
+            attacksPerSecond: def.attacksPerSecond,
+            stats: def.stats,
+        };
+    }
+
+    return result;
+};
+
 const getCarryWeight = (heartbeat: SnapshotHeartbeat) => {
     let totalWeight = 0;
 
@@ -83,10 +124,11 @@ export const toDashboardSnapshot = (heartbeat: SnapshotHeartbeat, meta: Snapshot
     // `raw` already carries player/units/gameObjects — the dashboard client
     // derives its own player/unit-count/world display data from `raw`
     // instead of us reconstructing (and re-sending) the same data here.
-    // weight/maxCarryWeight are the exception: they depend on `items`
-    // (per-item weight lookups), which is intentionally stripped from `raw`
-    // to avoid sending the full item catalog, so they're computed here while
-    // full `items` is still available and passed through as plain numbers.
+    // weight/maxCarryWeight/equipmentItems are exceptions: they depend on
+    // `items` (the full item catalog), which is intentionally stripped from
+    // `raw` to avoid sending it wholesale every tick, so they're computed
+    // here — while full `items` is still in scope — as plain numbers or, for
+    // equipmentItems, a lean per-equipped-item slice of it.
     const { items: _items, ...rawWithoutItems } = heartbeat as unknown as Record<string, unknown>;
 
     return {
@@ -106,6 +148,7 @@ export const toDashboardSnapshot = (heartbeat: SnapshotHeartbeat, meta: Snapshot
         maxCarryWeight:
             typeof heartbeat.constants?.maxCarryWeight === "number" ? heartbeat.constants.maxCarryWeight : 70_000,
         questRewards: meta.questRewards,
+        equipmentItems: getEquipmentItems(heartbeat),
         raw: rawWithoutItems,
     };
 };
