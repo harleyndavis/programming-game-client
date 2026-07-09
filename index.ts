@@ -11,7 +11,7 @@ import { getChainedIngredients, canObtainChain, computeChainNeeds, computeDiffic
 import { computeUpgradeTargets, computeTargetsToBuyFromMerchant, findGearToEquip } from "./src/equipment";
 import { findCraftableTarget, findNextCraftTarget, findCraftableFromList, computeCraftIngredientsToBuyFromMerchant, collectVisibleStations, getAvailableStationTypes, findStationForType } from "./src/craft";
 import { getHarvestableTarget, getMissingHarvestToolIds, collectHarvestToolItemIds, collectHarvestCraftingChainToolIds, collectCraftableInputIngredients, resolveHarvestToolForTarget, findHarvestToolToWithdraw, isHarvestWeaponType, KNOWN_HARVESTABLE_ITEMS } from "./src/harvest";
-import { findBestSellMerchant } from "./src/trade";
+import { findBestSellMerchant, getStorageFeeInfo } from "./src/trade";
 import { findCompletableQuest, findTurnInNpc, findBestQuestToAccept, findBestAvailableQuest, findQuestGivers, findQuestTurnInRequiredItemIds, findPendingQuestTurnInItems, findStalledQuests, findQuestToAbandon, findQuestToDismiss } from "./src/quests";
 import { openMemoryDb, getEntity, recordResourceSighting, recordMerchantTrades, recordNpcSighting, recordQuestSighting, recordMonsterKill, recordHarvest, recordLoot, recordMonsterSighting, recordCombatHit, recordMonsterMaxHp, recordSafeLocation, recordExploredCell, recordQuestEndNpc, recordQuestCompleted, getKnownStationTypes, getAllKnownSellingOffers, getKnownLootItems, getKnownQuestRewardItems, ASSUMED_SIGHT_RANGE } from "./src/memory";
 
@@ -1521,20 +1521,11 @@ disconnectFromGame = connect({
     // Compute storage fee buffer for withdrawal calculations.
     const storageRecord = heartbeat.player.storage ?? {};
     const storageCoins = typeof storageRecord.copperCoin === 'number' ? storageRecord.copperCoin : 0;
-    const storageItemsWeight = Object.entries(storageRecord)
-      .filter(([id]) => id !== 'copperCoin')
-      .reduce((sum, [id, qty]) => {
-        const defW = (heartbeat.items as Record<string, { weight?: number }> | undefined)?.[id]?.weight ?? 0;
-        return sum + defW * (typeof qty === 'number' ? qty : 1);
-      }, 0);
-    const storageWeight = storageItemsWeight + storageCoins;
-    const feePerCharge = Math.ceil(storageWeight * 0.0025);
-    // Uncapped: scales purely with storage weight. A prior half-coins cap was
-    // removed — it masked bankruptcy risk from hoarding rather than preventing
-    // it; hoarding itself is bounded elsewhere via chainKeepNeeds-driven
-    // surplus selling, not by artificially capping this buffer.
-    const minStorageCoins = feePerCharge * STORAGE_FEE_BUFFER;
-    const availableStorageWithdrawal = Math.max(0, storageCoins - minStorageCoins);
+    const {
+      feePerCharge,
+      minCoins: minStorageCoins,
+      availableWithdrawal: availableStorageWithdrawal,
+    } = getStorageFeeInfo(storageRecord, heartbeat.items as unknown as ItemMap, STORAGE_FEE_BUFFER);
 
     // Build per-merchant buy baskets using effective coins (pocket + storage beyond fee buffer).
     const effectiveCoins = playerCoins + availableStorageWithdrawal;
