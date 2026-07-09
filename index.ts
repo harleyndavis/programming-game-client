@@ -217,14 +217,6 @@ let lastAttackerTicksLeft = 0;
 const LAST_ATTACKER_TICK_TIMEOUT = 15;
 // Captured from the first heartbeat — used for event target comparisons.
 let myUnitId: string | null = null;
-// TEMP: process onTick's full decision logic at most once/sec. The SDK calls
-// onTick on every single socket event, not just periodic heartbeats — a
-// nearby NPC alone has been observed generating 500+ events/sec, which drove
-// full decision recomputation that often, bogging everything down. This is a
-// stopgap: it doesn't address events piling up client-side in the SDK itself.
-let lastOnTickProcessedMs = 0;
-const ON_TICK_MIN_INTERVAL_MS = 1000;
-
 // Snapshots updated every overworld tick, used only to resolve identity for
 // memory-write event correlation in onEvent (which has no heartbeat access of
 // its own) — e.g. looking up a killed unit's monsterId, or a harvested
@@ -793,18 +785,6 @@ disconnectFromGame = connect({
     if (emergencyModeActive && heartbeat.instanceId === 'overworld') {
       return heartbeat.player.move(HOME_POSITION);
     }
-
-    // TEMP: see lastOnTickProcessedMs declaration above. Skip everything below
-    // (arena + overworld decision-making) until at least ON_TICK_MIN_INTERVAL_MS
-    // has passed since the last tick we actually processed.
-    const nowMs = Date.now();
-    if (nowMs - lastOnTickProcessedMs < ON_TICK_MIN_INTERVAL_MS) {
-      // The OnTick type declares a strict Intent return, but the SDK only
-      // calls updateIntent when the return value is truthy (base-client.ts)
-      // — undefined is the documented way to leave the current intent as-is.
-      return undefined as any;
-    }
-    lastOnTickProcessedMs = nowMs;
 
     // The 'arena' event accurately resets the countdown at match start (server
     // patch), so elapsing arenaMatchDuration since then is the authoritative
