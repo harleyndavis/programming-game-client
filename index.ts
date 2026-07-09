@@ -558,7 +558,6 @@ const assertEnv = (key: string): string => {
 // recentTicks includes all the dead-wait ticks and the write happens exactly once.
 type PendingSnapshot = Omit<logger.DeathSnapshot, 'ts' | 'recentTicks'>;
 let pendingOverworldDeath: PendingSnapshot | null = null;
-let pendingArenaDeath: PendingSnapshot | null = null;
 
 // ── Arena match bookkeeping ───────────────────────────────────────────────────
 // Arena heartbeats are a full snapshot every tick, so targeting decisions are
@@ -630,8 +629,6 @@ process.on('SIGTERM', () => activateEmergencyMode('SIGTERM', 'process terminated
 process.on('message', (msg: unknown) => {
   if (msg === 'shutdown') activateEmergencyMode('shutdown', 'PM2 shutdown', 0);
 });
-
-var shortCircuitIdle = false;
 
 const userId = assertEnv("USER_ID");
 disconnectFromGame = connect({
