@@ -74,19 +74,6 @@ const EXPLORE_DIRECTIONS = [
   { x: -1, y: -1 },  // NW
 ];
 
-// TEMP diagnostic: counts onEvent calls by eventName, logs the per-second
-// average every 10s, then resets. Remove once the tick-rate investigation
-// is done.
-const eventCounts: Record<string, number> = {};
-setInterval(() => {
-  const perSecond = Object.fromEntries(
-    Object.entries(eventCounts).map(([name, count]) => [name, Math.round((count / 10) * 10) / 10])
-  );
-  const totalPerSecond = Math.round((Object.values(eventCounts).reduce((sum, n) => sum + n, 0) / 10) * 10) / 10;
-  console.log(`events/sec (avg over last 10s): total=${totalPerSecond}`, perSecond);
-  for (const key in eventCounts) delete eventCounts[key];
-}, 10000);
-
 const questRewards: Record<string, { items: Record<string, number> }> = {};
 
 // Last seen merchant offer per item, across every merchant ever visible.
@@ -653,13 +640,6 @@ disconnectFromGame = connect({
     key: assertEnv("API_KEY"),
   },
   onEvent(_instance, _charId, eventName, evt: any) {
-    if (eventName === 'arena') { return; } // TEMP diagnostic: bypass arena events to isolate raw tick rate from decision-computation cost.
-    const eventCountKey = evt && typeof evt.unitId === 'string'
-      ? `${eventName}:${evt.unitId === myUnitId ? 'self' : evt.unitId}`
-      : eventName;
-    eventCounts[eventCountKey] = (eventCounts[eventCountKey] ?? 0) + 1;
-    const exitEarly = false;
-    if (exitEarly) return; // TEMP diagnostic: bypass all decision-making to isolate raw tick rate from decision-computation cost.
     if (eventName === 'storageCharged' || eventName === 'storageEmptied' || eventName === 'deposited' || eventName === 'withdrew') {
       pushEvent(storageEventBuffer, EVENT_BUFFER_SIZE, eventName, evt);
     } else if (eventName === 'arena') {
