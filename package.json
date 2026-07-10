@@ -19,7 +19,7 @@
     "@types/node": "^20.11.5",
     "better-sqlite3": "^12.11.1",
     "dotenv": "^16.3.2",
-    "programming-game": "latest",
+    "programming-game": "^0.10.4",
     "ts-node": "^10.9.2",
     "typescript": "^5.3.3"
   },

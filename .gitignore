@@ -36,3 +36,6 @@ Thumbs.db
 # Editor
 .vscode/
 .idea/
+
+# Working notes (not part of tracked history)
+docs/scratch/

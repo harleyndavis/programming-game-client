@@ -1,6 +1,6 @@
 import { connect } from "programming-game";
 import { config } from "dotenv";
-import { UNIT_TYPE, NPC_TYPE, ClientSideUnit, ClientSideNPC, ClientSideMonster, GameObject, Station, Tree, MiningNode, ActiveQuest } from "programming-game/types";
+import { UNIT_TYPE, ClientSideUnit, ClientSideNPC, ClientSideMonster, GameObject, Station, Tree, MiningNode, ActiveQuest } from "programming-game/types";
 import { createDashboard } from "./dashboard";
 import { toDashboardSnapshot } from "./snapshot";
 import { UpgradePlanItem, ToolPlanItem, UpgradeRequirement, QuestMap, RecipeList, ItemMap, UpgradeTarget } from "./bot-types";
@@ -11,9 +11,10 @@ import { getChainedIngredients, canObtainChain, computeChainNeeds, computeDiffic
 import { computeUpgradeTargets, computeTargetsToBuyFromMerchant, findGearToEquip } from "./src/equipment";
 import { findCraftableTarget, findNextCraftTarget, findCraftableFromList, computeCraftIngredientsToBuyFromMerchant, collectVisibleStations, getAvailableStationTypes, findStationForType } from "./src/craft";
 import { getHarvestableTarget, getMissingHarvestToolIds, collectHarvestToolItemIds, collectHarvestCraftingChainToolIds, collectCraftableInputIngredients, resolveHarvestToolForTarget, findHarvestToolToWithdraw, isHarvestWeaponType, KNOWN_HARVESTABLE_ITEMS } from "./src/harvest";
-import { findBestSellMerchant } from "./src/trade";
+import { findBestSellMerchant, getStorageFeeInfo } from "./src/trade";
 import { findCompletableQuest, findTurnInNpc, findBestQuestToAccept, findBestAvailableQuest, findQuestGivers, findQuestTurnInRequiredItemIds, findPendingQuestTurnInItems, findStalledQuests, findQuestToAbandon, findQuestToDismiss } from "./src/quests";
-import { openMemoryDb, getEntity, recordResourceSighting, recordMerchantTrades, recordNpcSighting, recordQuestSighting, recordMonsterKill, recordHarvest, recordLoot, recordMonsterSighting, recordCombatHit, recordMonsterMaxHp, recordSafeLocation, recordExploredCell, recordQuestEndNpc, recordQuestCompleted, getKnownStationTypes, getAllKnownSellingOffers, getKnownLootItems, getKnownQuestRewardItems, ASSUMED_SIGHT_RANGE } from "./src/memory";
+import { openMemoryDb, getEntity, recordMonsterKill, recordHarvest, recordLoot, recordCombatHit, recordMonsterMaxHp, recordSafeLocation, recordExploredCell, recordQuestEndNpc, recordQuestCompleted, getAllKnownSellingOffers, ASSUMED_SIGHT_RANGE } from "./src/memory";
+import { scanGameObjects, scanUnits, findNearbyHuntTarget, findNearbyThreat, findNearbyBanker, findNearbyMonster, computeCombinedInventory, computePlanningInventory, getKnownSets } from "./src/knowledge";
 
 config({
   path: ".env",
@@ -42,24 +43,11 @@ const HUNT_RADIUS_INCREMENT = 30;
 const HUNT_TICKS_PER_PASS = 150;
 const HUNT_PASSES_TO_ESCALATE = 2;
 const HUNT_THREAT_RADIUS = 20;
-// Coincidentally the same value as memory.ts's ASSUMED_SIGHT_RANGE (imported
-// below) but a distinct, independent constant — one sizes a memory grid, the
-// other gates real-time hunting-threat proximity; they shouldn't move
-// together just because they happen to match today.
+const PASSIVE_MONSTERS = ['chicken', 'rat'];
 const HOME_CHORES_CLEAR_RADIUS = 2; // must be this close to home before declaring chores done
-// If we've closed to within this distance of a remembered quest NPC position and
-// still can't see/act on them, give up rather than sitting on the spot forever —
-// see "No chase-to-NPC" postmortem in CONTEXT.md for why an unconditional chase
-// with no exit condition is a deadlock, not a tuning problem.
+// Distance to a remembered quest NPC position at which we give up and clear it.
 const QUEST_NPC_ARRIVAL_RADIUS = 2;
-// Floor for how many of a tool-type item (toolItemIds) is "enough" — one,
-// maybe a spare — once the active craft chains no longer need more. Used both
-// to stop a repeatable quest reward from cycling forever (QuestScoringOpts.
-// stockedItems) and, as a fallback in chainKeepNeeds below, to bound tools
-// that fall outside any *currently* active chain (e.g. a harvest-tool
-// prerequisite like stoneCutterTools once its axe/pickaxe is already owned):
-// without a fallback those tools have no chainKeepNeeds entry at all and are
-// protected indefinitely with no sell path, no matter how many pile up.
+// Minimum quantity of a tool-type item to keep on hand.
 const TOOL_KEEP_CAP = 2;
 const COINS_TO_KEEP = 0; // pocket change; rest goes to storage
 const STORAGE_FEE_BUFFER = 100; // keep 100× the per-charge fee in storage at minimum
@@ -74,31 +62,9 @@ const EXPLORE_DIRECTIONS = [
   { x: -1, y: -1 },  // NW
 ];
 
-// TEMP diagnostic: counts onEvent calls by eventName, logs the per-second
-// average every 10s, then resets. Remove once the tick-rate investigation
-// is done.
-const eventCounts: Record<string, number> = {};
-setInterval(() => {
-  const perSecond = Object.fromEntries(
-    Object.entries(eventCounts).map(([name, count]) => [name, Math.round((count / 10) * 10) / 10])
-  );
-  const totalPerSecond = Math.round((Object.values(eventCounts).reduce((sum, n) => sum + n, 0) / 10) * 10) / 10;
-  console.log(`events/sec (avg over last 10s): total=${totalPerSecond}`, perSecond);
-  for (const key in eventCounts) delete eventCounts[key];
-}, 10000);
-
 const questRewards: Record<string, { items: Record<string, number> }> = {};
 
-// Last seen merchant offer per item, across every merchant ever visible.
-// Used to judge whether a quest turn-in item is buyable *somewhere* even when
-// that merchant is currently out of sight (e.g. while standing at the quest
-// giver deciding whether to walk home and buy).
-const rememberedMerchantSelling: Record<string, { price: number; quantity: number }> = {};
-// Last known position of a quest NPC, updated whenever they're actually visible.
-// Used to close the distance when they're out of sight but we have business with
-// them. Cleared once we've arrived and confirmed they're genuinely not there —
-// see QUEST_NPC_ARRIVAL_RADIUS — so a stale or imprecise memory can't strand the
-// bot walking toward the same empty spot forever.
+// Last known position of a quest NPC, updated whenever they're visible.
 let lastQuestNpcPosition: { x: number; y: number } | null = null;
 let toolItemIds: Set<string> | null = null;
 let recoveringAtHome = false;
@@ -123,28 +89,6 @@ const huntPatrolTo = (playerPos: { x: number; y: number }, radius: number): { x:
   };
 };
 
-// ── Home inventory management ─────────────────────────────────────────────────
-
-// ── Upgrade targeting ──────────────────────────────────────────────────────────
-
-// Returns true if itemId has any known acquisition path: in inventory, sold
-// by any known merchant (visible now or remembered from memory), or craftable
-// from ingredients that are themselves obtainable — including station-gated
-// recipes once memory has seen a station of the required type anywhere
-// (knownStationTypes), independent of whether the bot is standing at one
-// right now. See src/plan.ts's isRecipeAvailable and the knownStationTypes vs
-// availableStationTypes split (the latter still correctly gates "craftable this
-// instant" on actually being at a matching station).
-// Acquisition difficulty tier for a single candidate item (lower = easier):
-//   1  immediately buyable  — merchant visible and we can afford it
-//   2  immediately craftable — all ingredients + tools already in inventory
-//   3  buyable but can't afford yet
-//   4  craftable; full ingredient chain is obtainable but not all in hand
-//   5  blocked — one or more ingredients have no known acquisition path
-// For each buyable slot, selects the best upgrade target.
-// Primary sort: difficulty tier (non-blocked preferred; blocked only if every
-// candidate for the slot is blocked). Secondary sort: smallest stat gain
-// (stay incremental within a tier).
 // ── Decision types ────────────────────────────────────────────────────────────
 
 type Decision =
@@ -203,15 +147,14 @@ let decisionStableTicks = 0;
 let unexpectedIdleTicks = 0;
 const UNEXPECTED_IDLE_WARN_AFTER = 3;
 
-// Sticky target: once we lock onto a monster, hold it for a few ticks even if
-// it briefly disappears from heartbeat.units (e.g. during server replication).
+// Holds the current monster target for a few ticks even if it briefly
+// disappears from heartbeat.units.
 let stickyTargetId: string | null = null;
 let stickyTargetLostTicks = 0;
 const STICKY_TARGET_GRACE_TICKS = 3;
 
 let huntTier = 0;
 let huntIdleTicks = 0;
-const lastLoggedMerchants = new Set<string>();
 let exploreDirectionIndex = 0;
 let pendingDepositItem: string | null = null;
 // When disabled, the bot stops accepting new quests and abandons any active ones.
@@ -220,37 +163,19 @@ let lastDepositMessage = '';
 let depositInProgress = false;
 let depositCachedItems: Record<string, number> | null = null;
 let depositCachedBanker: ClientSideUnit | null = null;
-// Last known equipped item per slot — persists across death so recovery
-// materials remain protected even when equipment is temporarily empty.
+// Last known equipped item per slot, persisted across death.
 const lastEquipment: Record<string, string> = {};
 
-// Tracks the last unit that attacked us, for defensive combat.
 let lastAttackerId: string | null = null;
 let lastAttackerTicksLeft = 0;
 const LAST_ATTACKER_TICK_TIMEOUT = 15;
-// Captured from the first heartbeat — used for event target comparisons.
 let myUnitId: string | null = null;
-// TEMP: process onTick's full decision logic at most once/sec. The SDK calls
-// onTick on every single socket event, not just periodic heartbeats — a
-// nearby NPC alone has been observed generating 500+ events/sec, which drove
-// full decision recomputation that often, bogging everything down. This is a
-// stopgap: it doesn't address events piling up client-side in the SDK itself.
-let lastOnTickProcessedMs = 0;
-const ON_TICK_MIN_INTERVAL_MS = 1000;
-
-// Snapshots updated every overworld tick, used only to resolve identity for
-// memory-write event correlation in onEvent (which has no heartbeat access of
-// its own) — e.g. looking up a killed unit's monsterId, or a harvested
-// object's treeType/oreType, before it disappears from the next heartbeat.
+// Snapshot of units/gameObjects, used by onEvent to resolve identity by id.
 let lastUnits: Record<string, ClientSideUnit> = {};
 let lastGameObjects: Record<string, GameObject> = {};
 
-// The SDK's `loot` event carries no source reference (just who received the
-// items) — there is no correlation id anywhere linking it back to a kill or
-// harvest. So a loot event is attributed to whichever of these is freshest
-// within LOOT_ATTRIBUTION_WINDOW_MS; if both are fresh (ambiguous) or neither
-// is, the loot event is discarded rather than risking a wrong attribution —
-// min/max variance tracking is only trustworthy if attribution is trustworthy.
+// Most recent kill/harvest, used to attribute an unattributed loot event
+// within LOOT_ATTRIBUTION_WINDOW_MS.
 let recentKill: { monsterId: string; at: number } | null = null;
 let recentHarvest: { resourceName: string; at: number } | null = null;
 const LOOT_ATTRIBUTION_WINDOW_MS = 2000;
@@ -353,29 +278,13 @@ const decide = (opts: {
 
   if (playerHp <= 0) return { type: "respawn" };
 
-  // Shared home chores: runs for recoveringAtHome, idlingAtHome, and
-  // finishingHomeChores. Returns a decision if there's a chore to do, or null
-  // when nothing is left. Not gated by distance to home — each branch below
-  // is already gated by the proximity it actually needs (nearbyBanker for
-  // withdraw, a visible NPC for quest turn-in/accept, a visible merchant for
-  // buy/sell), or needs none at all (equip, quest abandon/dismiss). Craft
-  // execution is gated by safety (see recipeToCraft/toolToCraft's own
-  // computation) rather than location.
+  // Chore decision for recoveringAtHome, idlingAtHome, and finishingHomeChores;
+  // returns null when there's nothing left to do.
   const homeChores = (): Decision | null => {
-    // Skip a weapon-slot suggestion here when there's an active harvestTarget
-    // to go interact with — same narrowing as reclaimWeapon below, just
-    // applied to homeChores() too. homeChores() isn't gated by distance (see
-    // above), so it can run mid-transit while harvestTarget is also set
-    // (e.g. finishingHomeChores true while walking home past a node); without
-    // this, gearToEquip's raw "best owned weapon overall" pick (sword beats
-    // pickaxe on dps) would equip right back over the harvest tool the
-    // harvestTarget branch further down just equipped, undoing it every tick.
+    // Skip a weapon-slot equip suggestion while there's an active harvestTarget.
     if (gearToEquip && !(gearToEquip.slot === 'weapon' && harvestTarget)) {
       return { type: "equip", item: gearToEquip.item, slot: gearToEquip.slot };
     }
-    // A needed harvest tool sitting in storage instead of pocket — bring it
-    // out so resolveHarvestToolForTarget (pocket-only) has something to work
-    // with. See findHarvestToolToWithdraw (src/harvest.ts).
     if (harvestToolToWithdraw && nearbyBanker) {
       return { type: "withdraw", items: { [harvestToolToWithdraw.item]: 1 }, banker: nearbyBanker };
     }
@@ -412,13 +321,7 @@ const decide = (opts: {
     return null;
   };
 
-  // gearToEquip (src/equipment.ts) already picks whichever owned weapon has
-  // the best stats, harvest tools included — a pickaxe with better dps than
-  // whatever's equipped is a perfectly fine weapon. Narrowed to the weapon
-  // slot here and only consulted right before an attack fires (below), not
-  // generally: while there's no monster to fight, harvestToolToEquip is what
-  // should be picking the weapon slot (it needs the *correct tool type* for
-  // the resource being harvested, not the highest-dps one).
+  // gearToEquip narrowed to the weapon slot.
   const reclaimWeapon = gearToEquip?.slot === 'weapon' ? gearToEquip : null;
 
   if (recoveringAtHome) {
@@ -426,18 +329,13 @@ const decide = (opts: {
     if (chore) return chore;
     return { type: "return-home-recover" };
   }
-  // Survival behaviors — run regardless of idlingAtHome.
-  // Eat if we have food and the deficit is at least as large as its calorie value (no wasted calories).
+  // Eat if the calorie deficit covers the cheapest food's calorie value.
   const calorieDeficit = maxCalories - playerCalories;
   if (cheapestFood !== null && calorieDeficit >= cheapestFood.calories) {
     return { type: "eat", item: cheapestFood.item };
   }
-  // Overweight: the default response is always to head home and sell off the
-  // excess. Dropping is a last resort to regain movement speed while actually
-  // fleeing — only when something is actively attacking us, not just
-  // nearby. A monster merely being close by isn't a flee scenario on its
-  // own; that was dumping real gear (e.g. a displaced weapon) for no reason
-  // whenever an unrelated monster happened to wander within range.
+  // While overweight: drop the heaviest item only while actively being
+  // attacked, otherwise sell or head home.
   if (isEncumbered) {
     if (attackingMonster && heaviestInventoryItem) {
       return { type: "drop", ...heaviestInventoryItem };
@@ -475,32 +373,12 @@ const decide = (opts: {
     if (reclaimWeapon) return { type: "equip", item: reclaimWeapon.item, slot: reclaimWeapon.slot };
     return { type: "attack", targetId: nearbyMonster.unit.id, distance: nearbyMonster.distance };
   }
-  // Try harvesting nearby trees or mining nodes when not busy. The tool swap
-  // (fellingAxe/pickaxe for the current need — e.g. copperOre short →
-  // pickaxe) is folded into this decision rather than a standalone earlier
-  // branch: getHarvestableTarget's needed-item search finds harvestTarget
-  // regardless of what's currently equipped, so this only fires once we've
-  // actually decided to go after a specific node — not just because some
-  // chain need exists in the abstract with nothing harvestable in sight
-  // (e.g. while sitting at home), which used to fight with gearToEquip
-  // wanting the best combat weapon equipped there instead.
+  // Harvest a nearby tree/mining node when not busy, equipping the right tool first.
   if (harvestTarget) {
     if (harvestToolToEquip) {
       return { type: "equip", item: harvestToolToEquip.item, slot: harvestToolToEquip.slot };
     }
-    // Only actually harvest once the equipped weapon matches what this
-    // specific target requires (harvestToolReady). If it doesn't match and
-    // nothing owned in pocket can fix that either (harvestToolToEquip null),
-    // the required tool simply isn't owned at all — fall through rather than
-    // issuing a harvest intent with the wrong tool equipped, which the server
-    // would just reject.
     if (harvestToolReady) {
-      // No client-side range gate, same as attack: player.harvest(target) is
-      // a move-to-and-act intent (see get-handlers.ts), so the server
-      // handles closing the distance. Gating on harvestTarget.distance here
-      // just made the bot explore toward the object first and only ever
-      // harvest once already within an arbitrary 1.0, which could undershoot
-      // the object's actual interaction range (radius varies per object).
       return { type: "harvest", targetId: harvestTarget.target.id };
     }
   }
@@ -567,17 +445,12 @@ const assertEnv = (key: string): string => {
 };
 
 // ── Pending death snapshots ───────────────────────────────────────────────────
-// Captured on the first dead tick; written just before the first alive tick so
-// recentTicks includes all the dead-wait ticks and the write happens exactly once.
+// Captured on the first dead tick; written on the first alive tick.
 type PendingSnapshot = Omit<logger.DeathSnapshot, 'ts' | 'recentTicks'>;
 let pendingOverworldDeath: PendingSnapshot | null = null;
-let pendingArenaDeath: PendingSnapshot | null = null;
 
 // ── Arena match bookkeeping ───────────────────────────────────────────────────
-// Arena heartbeats are a full snapshot every tick, so targeting decisions are
-// made fresh each tick straight from heartbeat.units — nothing about opponents
-// is cached. Only the match transition (start/end) persists across ticks, since
-// there's no explicit match-id field; it's derived from the countdown timer.
+// Only the match transition (start/end) persists across ticks.
 let arenaMatchActive = false;
 let arenaMatchStartMs = 0;
 let arenaMatchDuration = 60000; // updated when arena event fires; default 60s
@@ -587,9 +460,7 @@ let lastArenaCalories = 0;
 let lastArenaPos = { x: 0, y: 0 };
 let lastArenaOpponentAlive = false;
 
-// Closes out whatever match is currently open, if any. Shared by the 'arena'
-// event handler (closing a stale previous match before opening a new one) and
-// the duration-elapsed check in onTick.
+// Shared by the 'arena' event handler and the duration-elapsed check in onTick.
 const closeArenaMatchIfActive = (reason: 'durationElapsed' | 'newMatchEvent'): void => {
   if (!arenaMatchActive) return;
   const selfAlive = lastArenaHp > 0;
@@ -611,9 +482,8 @@ const closeArenaMatchIfActive = (reason: 'durationElapsed' | 'newMatchEvent'): v
 };
 
 // ── Crash recovery ───────────────────────────────────────────────────────────
-// If an uncaught exception fires, set this flag so the next tick returns a
-// move-home intent before the process exits, keeping the character out of
-// the open rather than freezing in place mid-hunt.
+// Set on any fatal signal; the next overworld tick returns a move-home intent
+// before the process exits.
 let emergencyModeActive = false;
 
 let disconnectFromGame: (() => void) | null = null;
@@ -623,12 +493,10 @@ const activateEmergencyMode = (label: string, reason: unknown, exitCode = 1) => 
   emergencyModeActive = true;
   try { logger.tick({ ctx: 'overworld', pos: { x: 0, y: 0 }, hp: 0, maxHp: 0, calories: 0, weight: 0, decision: `${label}: ${String(reason)}`, level: 'warn' }); } catch { /* never block shutdown */ }
   try { dashboard.stop(); } catch { /* never block shutdown */ }
-  // Keep alive briefly so one onTick fires the move-home intent; then exit.
-  // Disconnect from game AFTER the delay so heartbeats keep flowing for the tick.
+  // Wait briefly for one more onTick to fire the move-home intent, then disconnect and exit.
   setTimeout(() => {
     try { disconnectFromGame?.(); } catch { /* never block shutdown */ }
-    // Destroy stdio pipes to release the IPC handle PM2 uses — this is the handle
-    // that can keep a Windows process alive even after process.exit() is called.
+    // Release stdio pipes so PM2's IPC handle doesn't block exit on Windows.
     try { process.stdin.destroy(); } catch { /* never block shutdown */ }
     try { process.stdout.destroy(); } catch { /* never block shutdown */ }
     try { process.stderr.destroy(); } catch { /* never block shutdown */ }
@@ -644,8 +512,6 @@ process.on('message', (msg: unknown) => {
   if (msg === 'shutdown') activateEmergencyMode('shutdown', 'PM2 shutdown', 0);
 });
 
-var shortCircuitIdle = false;
-
 const userId = assertEnv("USER_ID");
 disconnectFromGame = connect({
   credentials: {
@@ -653,22 +519,10 @@ disconnectFromGame = connect({
     key: assertEnv("API_KEY"),
   },
   onEvent(_instance, _charId, eventName, evt: any) {
-    if (eventName === 'arena') { return; } // TEMP diagnostic: bypass arena events to isolate raw tick rate from decision-computation cost.
-    const eventCountKey = evt && typeof evt.unitId === 'string'
-      ? `${eventName}:${evt.unitId === myUnitId ? 'self' : evt.unitId}`
-      : eventName;
-    eventCounts[eventCountKey] = (eventCounts[eventCountKey] ?? 0) + 1;
-    const exitEarly = false;
-    if (exitEarly) return; // TEMP diagnostic: bypass all decision-making to isolate raw tick rate from decision-computation cost.
     if (eventName === 'storageCharged' || eventName === 'storageEmptied' || eventName === 'deposited' || eventName === 'withdrew') {
       pushEvent(storageEventBuffer, EVENT_BUFFER_SIZE, eventName, evt);
     } else if (eventName === 'arena') {
-      // Server patch: this now fires at the START of a match and accurately
-      // resets the countdown (evt.duration, typically 60000ms) — the
-      // authoritative signal for both open and close (close is inferred by
-      // elapsing arenaMatchDuration in onTick below), not unitAppeared/
-      // unitDisappeared. Close out any still-open previous match first in
-      // case back-to-back matches outrun the duration-based close.
+      // Fires at match start; close any still-open previous match first.
       pushEvent(arenaEventBuffer, ARENA_EVENT_BUFFER_SIZE, eventName, evt);
       closeArenaMatchIfActive('newMatchEvent');
       arenaMatchDuration = evt.duration;
@@ -677,17 +531,15 @@ disconnectFromGame = connect({
       arenaMatchStartMs = Date.now();
       logger.openArenaMatch(new Date());
     } else if (_instance === '1v1Arena') {
-      // unitAppeared/unitDisappeared/despawn no longer drive match lifecycle
-      // (see 'arena' handler above) — kept here only for opponent id tracking
-      // and console visibility.
+      // Match lifecycle is driven entirely by the 'arena' handler above; this
+      // branch only tracks opponent id and console visibility.
       if (eventName === 'unitAppeared') {
         if (evt.unit.id !== myUnitId) {
           arenaOpponentId = evt.unit.id;
         }
       }
 
-      // Record combat history and kills in arena, same as overworld — but skip
-      // loot (arena inventories are ephemeral and don't reflect overworld drops).
+      // Same combat/kill recording as overworld; loot is not recorded here.
       if (eventName === 'attacked' && myUnitId) {
         if (evt.attacked === myUnitId) {
           const attackerUnit = lastUnits[evt.attacker];
@@ -702,9 +554,7 @@ disconnectFromGame = connect({
           const attackedUnit = lastUnits[evt.attacked];
           const monsterId = attackedUnit?.type === UNIT_TYPE.monster ? (attackedUnit as ClientSideMonster).monsterId : undefined;
           if (monsterId) {
-            // Captured on every hit we land, not just kills — a monster we
-            // kill before it ever hits us (very possible) would otherwise
-            // never get its maxHp recorded at all.
+            // Captured on every hit landed, not just kills.
             const monsterMaxHp = typeof attackedUnit?.stats?.maxHp === "number" ? attackedUnit.stats.maxHp : 0;
             if (monsterMaxHp > 0) recordMonsterMaxHp(memoryDb, monsterId, monsterMaxHp, Date.now());
             if (evt.hp <= 0) recordMonsterKill(memoryDb, monsterId, Date.now());
@@ -717,8 +567,7 @@ disconnectFromGame = connect({
       pushEvent(harvestEventBuffer, EVENT_BUFFER_SIZE, eventName, evt);
       logger.addExtra(eventName, { objectId: evt.objectId, ...(eventName === 'beganHarvesting' ? { duration: evt.duration, gameTime: evt.gameTime } : {}) });
       if (eventName === 'harvested' && myUnitId && evt.unitId === myUnitId) {
-        // 'harvested' carries no item data — the yield itself arrives via a
-        // later 'loot' event, attributed by timing (see the 'loot' branch below).
+        // The yield arrives separately via a later 'loot' event.
         const harvested = lastGameObjects[evt.objectId] as (Tree | MiningNode | undefined);
         const resourceName = harvested?.type === 'tree' ? harvested.treeType : harvested?.type === 'miningNode' ? harvested.oreType : undefined;
         if (resourceName) {
@@ -752,9 +601,7 @@ disconnectFromGame = connect({
         const attackedUnit = lastUnits[evt.attacked];
         const monsterId = attackedUnit?.type === UNIT_TYPE.monster ? (attackedUnit as ClientSideMonster).monsterId : undefined;
         if (monsterId) {
-          // Captured on every hit we land, not just kills — a monster we
-          // kill before it ever hits us (very possible) would otherwise
-          // never get its maxHp recorded at all.
+          // Captured on every hit landed, not just kills.
           const monsterMaxHp = typeof attackedUnit?.stats?.maxHp === "number" ? attackedUnit.stats.maxHp : 0;
           if (monsterMaxHp > 0) recordMonsterMaxHp(memoryDb, monsterId, monsterMaxHp, Date.now());
           if (evt.hp <= 0) {
@@ -765,10 +612,8 @@ disconnectFromGame = connect({
         }
       }
     } else if (eventName === 'loot' && myUnitId && evt.unitId === myUnitId) {
-      // Neither 'attacked'/'died' nor 'harvested' carries the actual loot — this
-      // is the sole source, and it carries no source reference at all. Attribute
-      // to whichever of a recent kill/harvest is freshest; discard if both are
-      // fresh (ambiguous) or neither is, rather than risk a wrong attribution.
+      // Attribute to whichever of a recent kill/harvest is freshest; discard if
+      // both are fresh or neither is.
       const now = Date.now();
       const killFresh = !!recentKill && now - recentKill.at <= LOOT_ATTRIBUTION_WINDOW_MS;
       const harvestFresh = !!recentHarvest && now - recentHarvest.at <= LOOT_ATTRIBUTION_WINDOW_MS;
@@ -817,31 +662,14 @@ disconnectFromGame = connect({
       return heartbeat.player.move(HOME_POSITION);
     }
 
-    // TEMP: see lastOnTickProcessedMs declaration above. Skip everything below
-    // (arena + overworld decision-making) until at least ON_TICK_MIN_INTERVAL_MS
-    // has passed since the last tick we actually processed.
-    const nowMs = Date.now();
-    if (nowMs - lastOnTickProcessedMs < ON_TICK_MIN_INTERVAL_MS) {
-      // The OnTick type declares a strict Intent return, but the SDK only
-      // calls updateIntent when the return value is truthy (base-client.ts)
-      // — undefined is the documented way to leave the current intent as-is.
-      return undefined as any;
-    }
-    lastOnTickProcessedMs = nowMs;
-
-    // The 'arena' event accurately resets the countdown at match start (server
-    // patch), so elapsing arenaMatchDuration since then is the authoritative
-    // close signal — not anything in the heartbeat itself. Overworld heartbeats
-    // keep arriving interleaved throughout an active match, so arenaTimeRemaining
-    // presence/absence still can't be used here.
+    // If the arena match has been going longer than arenaMatchDuration, close it.
     if (arenaMatchActive && arenaMatchStartMs > 0 && Date.now() - arenaMatchStartMs > arenaMatchDuration) {
       closeArenaMatchIfActive('durationElapsed');
     }
 
     // ── Arena tick ───────────────────────────────────────────────────────────
     if ('arenaTimeRemaining' in heartbeat) {
-      // Snapshot arena units so onEvent can resolve monsterId from attacker/killed
-      // unit IDs (same pattern as the overworld tick below).
+      // Snapshot for onEvent to resolve monsterId by unit id.
       lastUnits = heartbeat.units;
       const arenaTimeRemaining = heartbeat.arenaTimeRemaining;
 
@@ -850,16 +678,13 @@ disconnectFromGame = connect({
 
       const arenaHp = isFiniteNumber(player.hp) ? player.hp : 0;
       const arenaPosition = isFinitePosition(player.position) ? player.position : { x: 0, y: 0 };
-      const arenaMaxCalories = typeof heartbeat.constants?.maxCalories === "number" ? heartbeat.constants.maxCalories : 3_000;
+      const arenaMaxCalories = heartbeat.constants.maxCalories;
       const arenaCalories = isFiniteNumber(player.calories) ? player.calories : arenaMaxCalories;
       const arenaMaxHp =
         typeof player.stats?.maxHp === "number" && player.stats.maxHp > 0
           ? player.stats.maxHp
           : Math.max(100, arenaHp);
-      // Arena is strictly 1v1 — heartbeat.units should contain exactly two units,
-      // self and the opponent. The opponent's unit type varies (player, npc, or
-      // monster depending on the match), so it's identified purely by not being
-      // self, never by type.
+      // Opponent is whichever unit isn't self (type varies by match).
       const opponent = Object.values(heartbeat.units).find((unit) => unit.id !== myUnitId);
 
       lastArenaHp = arenaHp;
@@ -899,11 +724,6 @@ disconnectFromGame = connect({
         isMatchEntry = false;
       }
 
-      // The living opponent — re-evaluated fresh from the heartbeat every tick.
-      // The arena is 1v1, so there's at most one valid target and nothing about
-      // it is worth caching across ticks. Not filtered by type: the opponent can
-      // be a player, npc, or monster unit depending on the match.
-
       if (opponent) {
         logArena('attack', { timeRemaining: arenaTimeRemaining });
         return player.attack(opponent);
@@ -933,24 +753,37 @@ disconnectFromGame = connect({
         : Math.max(100, playerHp);
     const lowHpThreshold = (maxHp * lowHpThresholdPercent) / 100;
     const shouldRecover = playerHp > 0 && playerHp <= lowHpThreshold;
-    let nearbyMonster = Object.values(heartbeat.units)
-      .filter(
-        (unit) =>
-          unit.type === UNIT_TYPE.monster &&
-          isFinitePosition(unit.position) &&
-          // Exclude dead monsters — the server keeps them in units briefly
-          // after death. Attacking a dead target is silently rejected, causing
-          // the bot to stand idle with a stale attack intent.
-          (typeof unit.hp !== "number" || unit.hp > 0),
-      )
-      .map((unit) => ({
-        unit,
-        distance: distanceBetween(playerPosition, unit.position),
-      }))
-      .sort((left, right) => left.distance - right.distance)[0];
 
-    // Sticky target: prefer the monster we were already attacking over
-    // immediately switching to explore when it briefly drops out of units.
+    // Snapshot for onEvent, which has no heartbeat access of its own.
+    lastUnits = heartbeat.units;
+    lastGameObjects = heartbeat.gameObjects ?? {};
+
+    const gameObjectScanNow = Date.now();
+    const gameObjectScan = scanGameObjects(memoryDb, heartbeat.gameObjects ?? {}, gameObjectScanNow);
+    if (gameObjectScan.treesFound.length > 0) tickExtras.treesFound = gameObjectScan.treesFound;
+    if (gameObjectScan.miningNodesFound.length > 0) tickExtras.miningNodesFound = gameObjectScan.miningNodesFound;
+    if (gameObjectScan.stationsFound.length > 0) tickExtras.stationsFound = gameObjectScan.stationsFound;
+    if (gameObjectScan.portalsFound.length > 0) tickExtras.portalsFound = gameObjectScan.portalsFound;
+    if (gameObjectScan.hazardsFound.length > 0) tickExtras.hazardsFound = gameObjectScan.hazardsFound;
+
+    // Marks the ground the bot has actually stood on as explored.
+    recordExploredCell(memoryDb, playerPosition, ASSUMED_SIGHT_RANGE, gameObjectScanNow);
+    recordSafeLocation(memoryDb, 'home', 'town', HOME_POSITION, gameObjectScanNow);
+
+    const npcScanNow = Date.now();
+    const { visibleNpcs, visibleMerchants, visibleBankers, visibleMerchantSelling, monstersFound } = scanUnits(memoryDb, heartbeat.units, npcScanNow);
+    if (visibleBankers.length > 0) {
+      tickExtras.bankersFound = visibleBankers.map(u => ({ id: u.id, pos: u.position }));
+    }
+    // Persisted merchant offers, overridden by this tick's live sightings.
+    const allMerchantSelling: Record<string, { price: number; quantity: number } | undefined> = {
+      ...getAllKnownSellingOffers(memoryDb),
+      ...visibleMerchantSelling,
+    };
+    const nearbyBanker = findNearbyBanker(visibleBankers, playerPosition);
+
+    let nearbyMonster = findNearbyMonster(monstersFound, playerPosition);
+
     if (stickyTargetId) {
       const stickyUnit = heartbeat.units[stickyTargetId];
       const stickyAlive =
@@ -959,10 +792,10 @@ disconnectFromGame = connect({
         (typeof stickyUnit.hp !== "number" || stickyUnit.hp > 0);
       if (stickyAlive) {
         stickyTargetLostTicks = 0;
-        // Keep the sticky unit as the effective target if it's still valid
         if (!nearbyMonster || nearbyMonster.unit.id !== stickyTargetId) {
+          // stickyTargetId is only ever set to a monster's id.
           nearbyMonster = {
-            unit: stickyUnit,
+            unit: stickyUnit as ClientSideMonster,
             distance: distanceBetween(playerPosition, stickyUnit.position),
           };
         }
@@ -974,65 +807,20 @@ disconnectFromGame = connect({
         }
       }
     }
-    // Acquire new sticky target when none is held
     if (nearbyMonster && !stickyTargetId) {
       stickyTargetId = nearbyMonster.unit.id;
       stickyTargetLostTicks = 0;
     }
-    // Release sticky target when recovery, return-home-idle, or finishing chores kicks in
     if (recoveringAtHome || idlingAtHome || finishingHomeChores || playerHp <= 0) {
       stickyTargetId = null;
       stickyTargetLostTicks = 0;
     }
 
-    // Snapshot units/gameObjects for onEvent's memory-write correlation, since
-    // onEvent has no heartbeat access of its own (see recentKill/recentHarvest above).
-    lastUnits = heartbeat.units;
-    lastGameObjects = heartbeat.gameObjects ?? {};
-
-    // harvestTarget (need-aware) is computed further down, once chainKeepNeeds
-    // is available — see there for why.
-    // Single pass over every game object: log it for debugging and record its
-    // sighting into memory. recordResourceSighting already treats trees, mining
-    // nodes, and stations uniformly (it derives entity type/name from the
-    // object itself) — no reason to scan gameObjects three times to give each
-    // type its own special-cased loop.
-    const treesFound: Array<{ id: string; treeType: string; pos: { x: number; y: number } }> = [];
-    const miningNodesFound: Array<{ id: string; oreType: string; pos: { x: number; y: number } }> = [];
-    const stationsFound: Array<{ id: string; stationType: string; stationSubtype: string; pos: { x: number; y: number } }> = [];
-    const gameObjectScanNow = Date.now();
-    for (const obj of Object.values(heartbeat.gameObjects ?? {})) {
-      if (!isFinitePosition(obj.position)) continue;
-      if (obj.type === 'tree') {
-        treesFound.push({ id: obj.id, treeType: obj.treeType, pos: obj.position });
-      } else if (obj.type === 'miningNode') {
-        miningNodesFound.push({ id: obj.id, oreType: obj.oreType, pos: obj.position });
-      } else if (obj.type === 'station') {
-        stationsFound.push({ id: obj.id, stationType: obj.stationType, stationSubtype: obj.stationSubtype, pos: obj.position });
-      }
-      recordResourceSighting(memoryDb, obj, ASSUMED_SIGHT_RANGE, gameObjectScanNow);
-    }
-    if (treesFound.length > 0) tickExtras.treesFound = treesFound;
-    if (miningNodesFound.length > 0) tickExtras.miningNodesFound = miningNodesFound;
-    if (stationsFound.length > 0) tickExtras.stationsFound = stationsFound;
-
-    // Single pass over every visible monster: record its sighting into memory,
-    // same one-scan-per-role idiom as the game-object and NPC scans.
-    for (const unit of Object.values(heartbeat.units)) {
-      if (unit.type !== UNIT_TYPE.monster || !isFinitePosition(unit.position)) continue;
-      recordMonsterSighting(memoryDb, unit as ClientSideMonster, ASSUMED_SIGHT_RANGE, gameObjectScanNow);
-    }
-
-    // Marks the ground the bot has actually stood on as explored.
-    recordExploredCell(memoryDb, playerPosition, ASSUMED_SIGHT_RANGE, gameObjectScanNow);
-    recordSafeLocation(memoryDb, 'home', 'town', HOME_POSITION, gameObjectScanNow);
     const isHarvesting = player.action === 'harvest';
     if (isHarvesting && player.actionStart) {
       tickExtras.isHarvesting = { duration: player.actionDuration, target: player.actionTarget, remaining: (player.actionStart + (player.actionDuration ?? 0)) - (heartbeat.gameTime ?? 0) };
     }
 
-    // Attacker tracking: if something hit us recently, fight back regardless
-    // of harvest or hunting state.
     if (lastAttackerTicksLeft > 0) lastAttackerTicksLeft -= 1;
     if (lastAttackerTicksLeft <= 0) lastAttackerId = null;
     const attackerUnit = lastAttackerId ? heartbeat.units[lastAttackerId] : undefined;
@@ -1044,7 +832,6 @@ disconnectFromGame = connect({
       tickExtras.attackingMonster = { id: attackingMonster.unit.id, distance: attackingMonster.distance, ticksLeft: lastAttackerTicksLeft };
     }
 
-    // bookkeeping: update recovery state once per tick before deciding
     if (playerHp <= 0) {
       recoveringAtHome = false;
       finishingHomeChores = false; // reset on death
@@ -1063,14 +850,8 @@ disconnectFromGame = connect({
 
     // ── Decide ──────────────────────────────────────────────────────────────
 
-    const maxCarryWeight =
-      typeof heartbeat.constants?.maxCarryWeight === "number"
-        ? heartbeat.constants.maxCarryWeight
-        : 70_000;
-    const maxCalories =
-      typeof heartbeat.constants?.maxCalories === "number"
-        ? heartbeat.constants.maxCalories
-        : 3_000;
+    const maxCarryWeight = heartbeat.constants.maxCarryWeight;
+    const maxCalories = heartbeat.constants.maxCalories;
     const playerCalories = isFiniteNumber(player.calories) ? player.calories : maxCalories;
     const cheapestFood = findCheapestFood(player.inventory ?? {}, heartbeat.items);
     const isHunting = playerCalories < maxCalories * 0.5 && cheapestFood === null;
@@ -1083,31 +864,11 @@ disconnectFromGame = connect({
     const { targets: huntTargets, radius: huntRadius } = getHuntTierInfo(huntTier);
 
     const nearbyHuntTarget = isHunting
-      ? Object.values(heartbeat.units)
-        .filter(
-          (unit) =>
-            unit.type === UNIT_TYPE.monster &&
-            isFinitePosition(unit.position) &&
-            huntTargets.includes(String((unit as any).race)) &&
-            (typeof unit.hp !== "number" || unit.hp > 0),
-        )
-        .map((unit) => ({
-          unit,
-          distance: distanceBetween(playerPosition, unit.position as { x: number; y: number }),
-        }))
-        .sort((a, b) => a.distance - b.distance)[0]
+      ? findNearbyHuntTarget(monstersFound, playerPosition, huntTargets)
       : undefined;
 
-    const nearbyThreat = isHunting
-      ? Object.values(heartbeat.units).find(
-        (unit) =>
-          unit.type === UNIT_TYPE.monster &&
-          isFinitePosition(unit.position) &&
-          !huntTargets.includes(String((unit as any).race)) &&
-          (typeof unit.hp !== "number" || unit.hp > 0) &&
-          distanceBetween(playerPosition, unit.position as { x: number; y: number }) < HUNT_THREAT_RADIUS,
-      )
-      : undefined;
+    // Computed unconditionally: safeToCraft (below) uses it regardless of hunting state.
+    const nearbyThreat = findNearbyThreat(monstersFound, playerPosition, PASSIVE_MONSTERS, HUNT_THREAT_RADIUS);
 
     if (isHunting) {
       if (nearbyHuntTarget) {
@@ -1124,83 +885,13 @@ disconnectFromGame = connect({
     }
     const inventoryWeight = getInventoryWeight(player.inventory ?? {}, heartbeat.items, player.equipment);
     const isEncumbered = inventoryWeight >= maxCarryWeight * ENCUMBRANCE_THRESHOLD;
-    // Overload starts a home visit exactly like low HP does (see shouldRecover
-    // above) — without this, atHome (recoveringAtHome/idlingAtHome/finishingHomeChores)
-    // never goes true for a purely-overweight return trip, so the bot can reach
-    // HOME_POSITION and then just idle forever: decide()'s isEncumbered branch
-    // keeps returning "return-home-overloaded" and the auto-deposit override
-    // below is gated on atHome, which was never set.
+    // Overload starts a home visit, same as low HP.
     if (isEncumbered && !finishingHomeChores) {
-      finishingHomeChores = true; // start a home visit
+      finishingHomeChores = true;
     }
-
-    // ── NPC scan (single pass) ───────────────────────────────────────────────
-    // One scan over every visible NPC, whatever its role: record its sighting,
-    // additionally record merchant trades if it's a merchant, additionally
-    // record any quests it's offering if it has any. Every other NPC-shaped
-    // list below (merchants, bankers, quest givers) is derived from this one
-    // pass instead of re-scanning heartbeat.units per role.
-    const visibleNpcs: ClientSideNPC[] = [];
-    const visibleMerchants: Array<{ unit: ClientSideUnit; selling: Record<string, { price: number; quantity: number } | undefined>; buying: Record<string, { price: number; quantity: number } | undefined> }> = [];
-    const visibleBankers: ClientSideUnit[] = [];
-    // Seeded from persisted memory so items sold by a merchant that isn't
-    // currently visible don't flicker out of the upgrade plan — live sightings
-    // below override remembered ones; remembered only fills gaps.
-    const allMerchantSelling: Record<string, { price: number; quantity: number } | undefined> = {
-      ...getAllKnownSellingOffers(memoryDb),
-    };
-    const npcScanNow = Date.now();
-    for (const unit of Object.values(heartbeat.units)) {
-      if (unit.type !== UNIT_TYPE.npc || !isFinitePosition(unit.position)) continue;
-      const npc = unit as unknown as ClientSideNPC;
-      visibleNpcs.push(npc);
-      const npcType = (unit as { npcType?: string }).npcType;
-
-      // Every NPC gets exactly one sighting call, regardless of role.
-      recordNpcSighting(memoryDb, npc, ASSUMED_SIGHT_RANGE, npcScanNow);
-
-      if (npcType === NPC_TYPE.merchant) {
-        const selling = ((unit as any).trades?.selling ?? {}) as Record<string, { price: number; quantity: number } | undefined>;
-        const buying = ((unit as any).trades?.buying ?? {}) as Record<string, { price: number; quantity: number } | undefined>;
-        if (!lastLoggedMerchants.has(unit.id)) {
-          lastLoggedMerchants.add(unit.id);
-          const seen = (tickExtras.merchantsSeen as Array<{ id: string; sells: string[] }> | undefined) ?? [];
-          seen.push({ id: unit.id, sells: Object.keys(selling) });
-          tickExtras.merchantsSeen = seen;
-        }
-        visibleMerchants.push({ unit, selling, buying });
-        Object.assign(allMerchantSelling, selling);
-        for (const [itemId, offer] of Object.entries(selling)) {
-          if (offer) rememberedMerchantSelling[itemId] = offer;
-        }
-        recordMerchantTrades(memoryDb, npc, npcScanNow);
-      } else if (npcType === NPC_TYPE.banker) {
-        visibleBankers.push(unit);
-        if (isFinitePosition(unit.position)) recordSafeLocation(memoryDb, npc.name, 'banker', unit.position, npcScanNow);
-      }
-
-      // Every NPC's quest offers are recorded the same way, regardless of role.
-      if (npc.availableQuests) {
-        for (const quest of Object.values(npc.availableQuests)) {
-          recordQuestSighting(memoryDb, npc.name, quest, npcScanNow);
-        }
-      }
-    }
-    if (visibleBankers.length > 0) {
-      tickExtras.bankersFound = visibleBankers.map(u => ({ id: u.id, pos: u.position }));
-    }
-
-    const nearbyBanker = visibleBankers
-      .map((unit) => ({
-        unit,
-        distance: distanceBetween(playerPosition, unit.position as { x: number; y: number }),
-      }))
-      .sort((a, b) => a.distance - b.distance)[0]?.unit;
 
     // ── Station detection ──────────────────────────────────────────────────────
-    // Stations (smithing, cooking, alchemy, etc.) only appear in heartbeat.gameObjects
-    // when visible, same as merchants/bankers/trees. A station-gated recipe is only
-    // craftable this tick if a matching station is currently in view.
+    // A station-gated recipe is only craftable when a matching station is in view.
     const visibleStations = collectVisibleStations(heartbeat.gameObjects ?? {});
     const availableStationTypes = getAvailableStationTypes(visibleStations);
 
@@ -1249,58 +940,19 @@ disconnectFromGame = connect({
 
     const playerCoins = (player.inventory as Record<string, number>)['copperCoin'] ?? 0;
 
-    // heartbeat.recipes is typed as Recipe[] but the server sends a Record keyed by id at runtime.
-    // filterDisabledRecipes is a preprocessing pass — every planning function
-    // below consumes recipesArray, so applying it once here means nothing
-    // downstream ever sees the disabled recipes at all (see src/plan.ts).
+    // heartbeat.recipes is a Record keyed by id at runtime, despite its Recipe[] type.
     const recipesArray: RecipeList = filterDisabledRecipes(
       Array.isArray(heartbeat.recipes) ? heartbeat.recipes : Object.values(heartbeat.recipes as any),
     );
 
-    // Determine next upgrade target per slot from all items we know how to acquire.
-    // This drives sell-protection, buy plans, and craft decisions.
-    // Merge storage + inventory so items in storage are visible for crafting/buy planning.
-    // Without this, depositing a craftable ingredient would make it disappear from the
-    // upgrade targets, dropping it from chainKeepNeeds → withdrawn to sell → deposited again
-    // → infinite cycle (e.g. rat pelts ↔ leather armor).
-    // Merge storage + inventory by summing quantities (spread overwrites, doesn't add).
-    const combinedInventory: Partial<Record<string, number>> = {};
-    for (const source of [heartbeat.player.storage, player.inventory]) {
-      if (!source) continue;
-      for (const [itemId, qty] of Object.entries(source)) {
-        if (typeof qty === 'number' && qty > 0) {
-          combinedInventory[itemId] = (combinedInventory[itemId] ?? 0) + qty;
-        }
-      }
-    }
-    // Augment combinedInventory with active quest reward items (qty=1 each if not owned)
-    // so canObtainChain treats quest-rewarded items as reachable during planning.
-    const planningInventory: Partial<Record<string, number>> = { ...combinedInventory };
-    for (const reward of Object.values(questRewards)) {
-      for (const itemId of Object.keys(reward.items ?? {})) {
-        if ((planningInventory[itemId] ?? 0) === 0) planningInventory[itemId] = 1;
-      }
-    }
+    // Merge storage + inventory so items in storage count for crafting/buy planning.
+    const combinedInventory = computeCombinedInventory(heartbeat.player.storage as Record<string, number> | undefined, player.inventory as Record<string, number> | undefined);
+    // Add active quest reward items (qty=1 if not owned).
+    const planningInventory = computePlanningInventory(combinedInventory, questRewards);
 
-    // Station knowledge for stabilizing upgrade-plan reachability across location:
-    // knownStationTypes (persisted memory) governs "obtainable in principle" so
-    // the plan doesn't flicker with visibility; availableStationTypes (this tick's
-    // visible stations, from collectVisibleStations/getAvailableStationTypes above)
-    // still correctly gates "craftable right now" — see src/plan.ts's
-    // isRecipeAvailable and the knownStationTypes/availableStationTypes split
-    // documented there.
-    const knownStationTypes = new Set(getKnownStationTypes(memoryDb));
-    // Same "known persisted, stable regardless of visibility" role as
-    // knownStationTypes, extended to the other two acquisition paths
-    // canObtainChain/computeDifficultyTier didn't previously recognize at
-    // all: a known loot/harvest source, or a known quest reward.
-    // Seeded with KNOWN_HARVESTABLE_ITEMS (ore/log items per tree/oreType) so
-    // e.g. copperOre is reachable via mining from the very first tick, before
-    // the bot has ever actually harvested one — getKnownLootItems then
-    // confirms/extends this empirically the same way it already does for
-    // monster drops (see src/harvest.ts).
-    const knownLootItems = new Set([...getKnownLootItems(memoryDb), ...Array.from(KNOWN_HARVESTABLE_ITEMS)]);
-    const knownQuestRewardItems = new Set(getKnownQuestRewardItems(memoryDb));
+    // knownStationTypes/knownLootItems/knownQuestRewardItems: persisted memory,
+    // "obtainable in principle". availableStationTypes: visible this tick only.
+    const { knownStationTypes, knownLootItems, knownQuestRewardItems } = getKnownSets(memoryDb, Array.from(KNOWN_HARVESTABLE_ITEMS));
 
     const upgradeTargets = computeUpgradeTargets({
       equipment: (player.equipment ?? {}) as Record<string, string | null | undefined>,
@@ -1314,21 +966,14 @@ disconnectFromGame = connect({
       knownStationTypes,
       availableStationTypes,
     });
-    // Update lastEquipment each tick but never clear on death: this keeps
-    // recovery materials protected across the window when equipment is empty.
-    // Skip a harvest tool temporarily occupying the weapon slot (need-based
-    // tool-switching, see resolveHarvestToolForTarget) — otherwise the real weapon
-    // it displaced (e.g. copperSword) is overwritten here, drops out of
-    // chainKeepNeeds below, and becomes sellable/droppable while it's just
-    // sitting in pocket waiting to be re-equipped.
+    // Skip harvest tools temporarily occupying the weapon slot.
     for (const [slot, itemId] of Object.entries((player.equipment ?? {}) as Record<string, string | null | undefined>)) {
       if (!itemId) continue;
       const itemType = (heartbeat.items as Record<string, { type?: string }>)[itemId]?.type;
       if (itemType && isHarvestWeaponType(itemType)) continue;
       lastEquipment[slot] = itemId;
     }
-    // Tool IDs are computed once from recipe required arrays + harvesting weapon
-    // types. Recipes and the item catalog don't change after the initial heartbeat.
+    // Computed once; recipes and the item catalog don't change after the initial heartbeat.
     if (toolItemIds === null) {
       toolItemIds = new Set<string>();
       const itemCatalog = heartbeat.items as Record<string, { type?: string }> | undefined;
@@ -1341,8 +986,7 @@ disconnectFromGame = connect({
       }
       collectHarvestToolItemIds(itemCatalog ?? {}).forEach(id => toolItemIds!.add(id));
     }
-    // Quest turn-in items need to stay in pocket (not deposited, not sold, not
-    // auto-withdrawn-to-sell).
+    // Quest turn-in items stay in pocket: not deposited, sold, or auto-withdrawn-to-sell.
     const rawQuestsForProtection = (player.quests ?? {}) as QuestMap;
     const questTurnInItems = findQuestTurnInRequiredItemIds(rawQuestsForProtection);
     const pendingQuestTurnInItems = findPendingQuestTurnInItems(
@@ -1351,12 +995,9 @@ disconnectFromGame = connect({
     );
     const atHome = recoveringAtHome || idlingAtHome || finishingHomeChores;
 
-    // The upgrade target we'd craft next from combined (storage + pocket) inventory.
-    // Drives deposit exclusion and the withdraw-for-craft override below — not
-    // location-gated, since withdrawing just needs a nearby banker (checked
-    // downstream in homeChores), not being at home.
+    // Next craft target from combined (storage + pocket) inventory.
     const activeCraft = findCraftableTarget(upgradeTargets, combinedInventory, recipesArray, availableStationTypes);
-    // Display-only — no inventory or withdraw impact (risk of death loss).
+    // Display-only.
     const nextCraftTarget = activeCraft ?? findNextCraftTarget(upgradeTargets);
 
     const missingHarvestTools = getMissingHarvestToolIds(
@@ -1364,64 +1005,40 @@ disconnectFromGame = connect({
       combinedInventory,
       heartbeat.items as Record<string, { type?: string }>,
     );
-    // All required-tool IDs in the full recipe chain for missing harvest tools
-    // (e.g. stoneCarvingKnife, stoneCutterTools). These are prerequisites that
-    // must be owned before harvest tools can be crafted.
+    // Required-tool IDs in the full recipe chain for missing harvest tools.
     const harvestChainToolIds = missingHarvestTools.length > 0
       ? collectHarvestCraftingChainToolIds(missingHarvestTools, recipesArray, knownStationTypes)
       : [];
-    // Missing chain tools that have a craftable recipe (known station type, if any) — prepended
-    // to the craft target list so they're tried before the harvest tools themselves.
     const missingCraftableChainTools = harvestChainToolIds.filter(id =>
       (combinedInventory[id] ?? 0) < 1 &&
       recipesArray.some(r => id in (r.output ?? {}) && isRecipeAvailable(r, knownStationTypes)),
     );
-    // Craftable input ingredients we're short on (e.g. pinewoodAxeHandle for
-    // stoneFellingAxe). These live in recipe.input, not recipe.required, so they
-    // don't appear in harvestChainToolIds. Computed in dependency order so
-    // sub-ingredients sort before the items that need them.
+    // Craftable ingredients we're short on, in dependency order.
     const craftableInputIngredients = collectCraftableInputIngredients(
       [...missingHarvestTools, ...harvestChainToolIds],
       combinedInventory,
       recipesArray,
       knownStationTypes,
     );
-    // Full craft target list: required-tool prerequisites → craftable input
-    // ingredients → harvest tools themselves.
+    // Required-tool prerequisites, then craftable inputs, then harvest tools.
     const allToolCraftTargets = Array.from(new Set([
       ...missingCraftableChainTools,
       ...craftableInputIngredients,
       ...missingHarvestTools,
     ]));
 
-    // Quantity bound for chain-protected materials: how many of each ingredient
-    // the equipment upgrades, equipped-gear recovery, and harvest tool chains
-    // actually consume. Anything beyond this is surplus we may sell. Without a
-    // bound, protected ingredients (e.g. ratPelt for lightLeather) accumulate
-    // in storage forever, and the storage fee grows with the hoard until the
-    // fee buffer exceeds total wealth and locks every coin.
+    // Quantity of each ingredient actually needed by active chains; the rest is sellable surplus.
     const chainTargets = [
       ...upgradeTargets.filter(t => t.recipe).map(t => t.itemId),
       ...Object.values(lastEquipment).filter((id): id is string => !!id),
       ...allToolCraftTargets,
     ];
     const chainKeepNeeds = computeChainNeeds(chainTargets, recipesArray, combinedInventory);
-    // Fallback bound for protected tools outside any currently active chain
-    // (see TOOL_KEEP_CAP) — e.g. a harvest-tool prerequisite like
-    // stoneCutterTools once its axe/pickaxe is already owned and it has
-    // dropped out of allToolCraftTargets entirely. Without this, such a tool
-    // has no chainKeepNeeds entry, stays in protectedItems via toolItemIds,
-    // and hoards indefinitely no matter how many are obtained (e.g. from a
-    // quest reward the server doesn't even list, so nothing else would flag
-    // it). A genuine higher active need always wins (Math.max).
+    // Fallback bound (TOOL_KEEP_CAP) for tools outside any active chain.
     for (const id of Array.from(toolItemIds ?? [])) {
       chainKeepNeeds[id] = Math.max(chainKeepNeeds[id] ?? 0, TOOL_KEEP_CAP);
     }
-    // Raw resource items (no recipe produces them — e.g. copperOre,
-    // pinewoodLog) that the active craft/tool chain is actually short on right
-    // now. Drives need-aware harvest targeting below: which specific node
-    // (by treeType/oreType) to walk to, instead of just the nearest one the
-    // equipped tool can work regardless of what it yields.
+    // Raw resource items (no recipe produces them) the active chain is short on.
     const neededHarvestItems = new Set(
       Object.keys(chainKeepNeeds).filter(itemId =>
         (combinedInventory[itemId] ?? 0) < (chainKeepNeeds[itemId] ?? 0) &&
@@ -1437,14 +1054,7 @@ disconnectFromGame = connect({
       playerPosition,
       neededHarvestItems,
     );
-    // Resolve the tool for the *specific* harvestTarget chosen above — keyed
-    // off that object's own type (tree/miningNode), not the whole
-    // neededHarvestItems set. getHarvestableTarget's needed-item search no
-    // longer requires the currently-equipped weapon to match, so harvestTarget
-    // can legitimately be a node the bot has no matching tool for at all; the
-    // harvestTarget branch in decide() uses harvestToolReady/harvestToolToEquip
-    // to equip the right tool, or refuse to harvest, rather than assuming a
-    // generic neededHarvestItems-wide guess lines up with this exact node.
+    // Tool resolved for the specific harvestTarget, keyed off its own type.
     const { ready: harvestToolReady, toEquip: harvestToolToEquip } = harvestTarget
       ? resolveHarvestToolForTarget(
         harvestTarget.target.type,
@@ -1456,11 +1066,7 @@ disconnectFromGame = connect({
     // Pocket-level keep bound: quantities already covered by storage don't need
     // to stay in the pocket too.
     const storageRec = (heartbeat.player.storage ?? {}) as Record<string, number>;
-    // The needed tool sitting in storage instead of pocket — e.g. previously
-    // crafted/bought then auto-deposited home. Without this, a tool stuck in
-    // storage is invisible to resolveHarvestToolForTarget (pocket-only) and
-    // never comes back out, so the bot never carries it and never harvests
-    // what it's needed for.
+    // Needed harvest tool sitting in storage instead of pocket.
     const harvestToolToWithdraw = findHarvestToolToWithdraw(
       neededHarvestItems,
       storageRec,
@@ -1474,27 +1080,16 @@ disconnectFromGame = connect({
       pocketKeepQuantities[itemId] = Math.max(0, need - inStorage);
     }
 
-    // toolToCraftFromStorage: what we'd craft next if all storage items were in pocket.
-    // Used for deposit exclusion and storage withdrawal — keeps ingredients
-    // safe. Not location-gated; withdrawal only needs a nearby banker
-    // (checked downstream in homeChores).
+    // What we'd craft next if all storage items were in pocket.
     const toolToCraftFromStorage = allToolCraftTargets.length > 0
       ? findCraftableFromList(allToolCraftTargets, combinedInventory, recipesArray, availableStationTypes)
       : null;
 
-    // Protect all ingredients needed for the full active craft — including the
-    // parent recipe's inputs when activeCraft is a sub-step (tier 0).  Without
-    // this, the parent's ingredients (e.g. stone needed for leatherChest) get
-    // deposited while we're busy pre-crafting an intermediate (leather), then
-    // re-withdrawn, causing a wasted round-trip every craft cycle.
+    // Parent recipe's inputs, protected too when activeCraft is a sub-step (tier 0).
     const activeCraftParent = activeCraft?.tier === 0
       ? upgradeTargets.find(t => t.recipe && t.slot === activeCraft.slot) ?? null
       : null;
-    // Display-only: when activeCraft is a sub-step (e.g. lightLeather), the
-    // dashboard should keep highlighting the ultimate goal (e.g.
-    // lightLeatherHelm) as "next", with the sub-step itself surfaced
-    // separately — otherwise the NEXT badge disappears from the real target
-    // for however many ticks it takes to work through its ingredient chain.
+    // Display-only: the ultimate goal item, not the sub-step, when activeCraft is a sub-step.
     const nextCraftTargetId = activeCraft?.tier === 0
       ? activeCraftParent?.itemId ?? null
       : nextCraftTarget?.itemId ?? null;
@@ -1514,9 +1109,7 @@ disconnectFromGame = connect({
       ] : []),
     ]);
 
-    // Shared "don't give this up" set — chain-protected items (equipped gear,
-    // ingredients, harvest tool chain) plus quest turn-in items. Used both for
-    // selling and for the emergency drop below (findHeaviestInventoryItem).
+    // Chain-protected items plus quest turn-in items.
     const protectedItems = new Set(Object.keys(chainKeepNeeds).concat(Array.from(questTurnInItems)));
     const toSell = computeItemsToSell({
       inventory: player.inventory ?? {},
@@ -1528,10 +1121,7 @@ disconnectFromGame = connect({
     });
     const sellOpportunity = findBestSellMerchant(visibleMerchants, toSell);
 
-    // Compute what to deposit: spare coins + keepItems currently in inventory,
-    // excluding items needed for the active craft so they aren't deposited then
-    // immediately re-withdrawn, and excluding quantities the sell plan is about
-    // to sell (depositing them would bounce surplus between pocket and storage).
+    // Spare coins + protected items, excluding active-craft and about-to-sell quantities.
     const invRecord = (player.inventory ?? {}) as Record<string, number>;
     const toDeposit: Partial<Record<string, number>> = {};
     if (playerCoins > COINS_TO_KEEP) {
@@ -1540,18 +1130,11 @@ disconnectFromGame = connect({
     for (const [itemId, qty] of Object.entries(invRecord)) {
       if (itemId === 'copperCoin' || qty <= 0) continue;
       if (!(itemId in chainKeepNeeds) || activeCraftItems.has(itemId) || questTurnInItems.has(itemId)) continue;
-      // Harvest tools (fellingAxe/pickaxe) must stay in pocket to ever get
-      // equipped — chainKeepNeeds only protects them from being sold
-      // (TOOL_KEEP_CAP), it isn't a "these belong in storage" signal. Without
-      // this, a freshly crafted/bought pickaxe gets banked away on the next
-      // home visit and resolveHarvestToolForTarget (pocket-only) never sees
-      // it again; findHarvestToolToWithdraw (src/harvest.ts) recovers one already
-      // stuck there, but the goal is to not put it there in the first place.
+      // Harvest tools must stay in pocket to be equippable.
       const toolType = (heartbeat.items as Record<string, { type?: string }>)[itemId]?.type;
       if (toolType && isHarvestWeaponType(toolType)) continue;
       const beingSold = sellOpportunity?.items[itemId] ?? 0;
-      // Don't deposit more than the chain keep target needs. Surplus stays in
-      // pocket where it can be sold directly instead of cycling through storage.
+      // Cap deposit at the chain keep target; surplus stays in pocket to sell directly.
       const alreadyStored = ((heartbeat.player.storage ?? {}) as Record<string, number>)[itemId] ?? 0;
       const roomInStorage = Math.max(0, (chainKeepNeeds[itemId] ?? 0) - alreadyStored);
       const depositQty = Math.min(qty - beingSold, roomInStorage);
@@ -1561,36 +1144,22 @@ disconnectFromGame = connect({
       ? findHeaviestInventoryItem(player.inventory ?? {}, heartbeat.items, protectedItems)
       : null;
 
-    // Compute storage fee buffer for withdrawal calculations.
     const storageRecord = heartbeat.player.storage ?? {};
     const storageCoins = typeof storageRecord.copperCoin === 'number' ? storageRecord.copperCoin : 0;
-    const storageItemsWeight = Object.entries(storageRecord)
-      .filter(([id]) => id !== 'copperCoin')
-      .reduce((sum, [id, qty]) => {
-        const defW = (heartbeat.items as Record<string, { weight?: number }> | undefined)?.[id]?.weight ?? 0;
-        return sum + defW * (typeof qty === 'number' ? qty : 1);
-      }, 0);
-    const storageWeight = storageItemsWeight + storageCoins;
-    const feePerCharge = Math.ceil(storageWeight * 0.0025);
-    // Uncapped: scales purely with storage weight. A prior half-coins cap was
-    // removed — it masked bankruptcy risk from hoarding rather than preventing
-    // it; hoarding itself is bounded elsewhere via chainKeepNeeds-driven
-    // surplus selling, not by artificially capping this buffer.
-    const minStorageCoins = feePerCharge * STORAGE_FEE_BUFFER;
-    const availableStorageWithdrawal = Math.max(0, storageCoins - minStorageCoins);
+    const {
+      feePerCharge,
+      minCoins: minStorageCoins,
+      availableWithdrawal: availableStorageWithdrawal,
+    } = getStorageFeeInfo(storageRecord, heartbeat.items as unknown as ItemMap, STORAGE_FEE_BUFFER);
 
     // Build per-merchant buy baskets using effective coins (pocket + storage beyond fee buffer).
     const effectiveCoins = playerCoins + availableStorageWithdrawal;
 
-    // Quest turn-in items we can actually act on: already in storage, or sold
-    // by a merchant we've seen (remembered stock — the merchant may be out of
-    // sight right now) at a price we can cover. Items with no acquisition path
-    // (e.g. feathers for a kill quest, with no seller) must not pin the bot at
-    // home via hasChores or block the harvest-tool quest cycle below.
+    // Quest turn-in items obtainable now: already in storage, or buyable from a known merchant.
     const actionablePendingQuestItems: Partial<Record<string, number>> = {};
     for (const [itemId, shortfall] of Object.entries(pendingQuestTurnInItems)) {
       const inStorage = (storageRec[itemId] ?? 0) > 0;
-      const offer = rememberedMerchantSelling[itemId];
+      const offer = allMerchantSelling[itemId];
       const buyable = !!offer && offer.quantity > 0 && offer.price > 0 && offer.price <= effectiveCoins;
       if (inStorage || buyable) actionablePendingQuestItems[itemId] = shortfall;
     }
@@ -1619,10 +1188,7 @@ disconnectFromGame = connect({
           );
           Object.assign(basket, toolBasket);
         }
-        // Directly buy purchasable chain tools (e.g. stoneCutterTools) that have no
-        // craftable recipe — computeCraftIngredientsToBuyFromMerchant handles them
-        // recursively via gatherNeeded, but also include them explicitly here so they
-        // appear in the buy basket even when coins are tight.
+        // Directly buy chain tools that have no craftable recipe.
         for (const chainToolId of harvestChainToolIds) {
           if ((combinedInventory[chainToolId] ?? 0) >= 1 || basket[chainToolId]) continue;
           if (recipesArray.some(r => chainToolId in (r.output ?? {}) && isRecipeAvailable(r, knownStationTypes))) continue;
@@ -1631,12 +1197,7 @@ disconnectFromGame = connect({
             basket[chainToolId] = 1;
           }
         }
-        // Buy missing quest turn-in items if this merchant sells them.
-        // Quest items are bought ON TOP of whatever the craft pass already added —
-        // do NOT subtract inBasket from the shortfall. A prior pass may have
-        // added 1 pinewoodLog for an axe handle craft, but the quest also needs
-        // its own log. Subtracting inBasket would cause the quest to take the
-        // craft's log and the craft would never get one.
+        // Quest items are bought on top of the craft basket, not subtracted from it.
         for (const [itemId, shortfall] of Object.entries(pendingQuestTurnInItems)) {
           const inBasket = basket[itemId] ?? 0;
           const have = combinedInventory[itemId] ?? 0;
@@ -1655,7 +1216,6 @@ disconnectFromGame = connect({
       upgradesPlan.sort((a, b) => Object.keys(b.items).length - Object.keys(a.items).length);
     }
 
-    // Compute total cost of the first merchant's buy basket.
     let buyCost = 0;
     if (upgradesPlan.length > 0) {
       const firstBasket = upgradesPlan[0];
@@ -1665,8 +1225,7 @@ disconnectFromGame = connect({
       }
     }
 
-    // Only keep coins in inventory if we can afford the purchase (with or without a withdrawal).
-    // If we can't afford it, deposit everything to avoid losing coins on death.
+    // Keep just enough coins in inventory to afford the purchase; deposit the rest.
     if (buyCost > 0 && toDeposit.copperCoin && toDeposit.copperCoin > 0) {
       const canAffordPurchase = playerCoins >= buyCost || availableStorageWithdrawal >= (buyCost - playerCoins);
       if (canAffordPurchase) {
@@ -1676,35 +1235,19 @@ disconnectFromGame = connect({
       }
     }
 
-    // Remove 0-value entries from toDeposit to avoid pointless no-op deposit commands.
+    // Drop 0-value entries.
     for (const [key, val] of Object.entries(toDeposit)) {
       if (val === undefined || val <= 0) delete toDeposit[key as keyof typeof toDeposit];
     }
 
-    // Not location-gated — may need to switch weapons/gear whenever mining or
-    // fighting something, not just at home.
     const gearToEquip = findGearToEquip({
       inventory: player.inventory ?? {},
       equipment: (player.equipment ?? {}) as Record<string, string | null | undefined>,
       items: heartbeat.items as unknown as ItemMap,
     });
 
-    // Craft execution is gated by safety, not location: station proximity is
-    // already required internally (via availableStationTypes/isRecipeAvailable),
-    // so the only additional gate needed is "not mid-combat" — if we can
-    // finish crafting, do it and wear/use it now.
-    //
-    // Deliberately does NOT re-run findCraftableTarget/findCraftableFromList
-    // against pocket-only inventory: that re-derives a fresh answer from
-    // scratch, and isFullyAchievableFromInventory's required-tool check
-    // (src/craft.ts) demands the *final* recipe's tool already be in pocket —
-    // which stalls every intermediate sub-step (e.g. crafting lightLeather
-    // from rat pelts) whenever that tool is sitting in storage, since the
-    // tool isn't withdrawn until the last step actually needs it. Instead,
-    // reuse activeCraft/toolToCraftFromStorage (already computed against
-    // combinedInventory, so storage-only tools/ingredients count toward
-    // reachability) and only check that *this* sub-step's own ingredients are
-    // in pocket right now — the withdraw branches above pull them in first.
+    // Reuses activeCraft/toolToCraftFromStorage (computed against combinedInventory)
+    // and checks only that this sub-step's own ingredients are in pocket now.
     const isReadyInPocket = (recipe: { input: Partial<Record<string, number>>; required: readonly string[]; station?: string | null } | null | undefined): boolean =>
       !!recipe &&
       Object.entries(recipe.input).every(([id, qty]) => (invRecord[id] ?? 0) >= (qty ?? 0)) &&
@@ -1729,10 +1272,7 @@ disconnectFromGame = connect({
 
     const upgradePlanItems: UpgradePlanItem[] = upgradeTargets.map((target, index) => {
       const equipped = (player.equipment ?? {}) as Record<string, string | null | undefined>;
-      // combinedInventory (storage + pocket), not player.inventory alone —
-      // otherwise depositing an ingredient makes the dashboard show it as
-      // freshly missing even though it's still owned and will be withdrawn
-      // when needed.
+      // combinedInventory (storage + pocket), not player.inventory alone.
       const requirements = target.recipe
         ? Object.entries(target.recipe.input).map(([itemId, qty]) => ({
           item: itemId as any,
@@ -1901,18 +1441,8 @@ disconnectFromGame = connect({
     });
 
     // ── Quest checks (computed before hasChores and overrides) ─────────────
-    // Must be before hasChores so quest state can gate finishingHomeChores.
-    // Must be before withdrawal overrides so sell-withdrawal doesn't fire
-    // while the quest NPC is visible, moving the bot away before re-accept.
     const activeQuests = rawQuestsForProtection;
-    // quest.start_npc/end_npc are raw SDK unit ids, not display names.
-    // recordQuestEndNpc resolves start_npc_id from the existing quests row
-    // (written correctly, by name, at sighting time) rather than re-deriving
-    // identity from the id. end_npc has no prior row to fall back on, so its
-    // name is resolved here via findTurnInNpc against this tick's visible
-    // NPCs; null (left untouched) when the turn-in NPC isn't currently
-    // visible. Update-only (see recordQuestEndNpc), so unconditional every
-    // tick is safe: a no-op for any quest never seen as an AvailableQuest sighting.
+    // end_npc name is resolved here from this tick's visible NPCs; left null if not visible.
     const activeQuestScanNow = Date.now();
     for (const quest of Object.values(activeQuests)) {
       const endNpcName = findTurnInNpc(quest, visibleNpcs)?.name ?? null;
@@ -1928,19 +1458,13 @@ disconnectFromGame = connect({
         : null;
     const questGivers = findQuestGivers(visibleNpcs);
     const maxActiveQuests = typeof heartbeat.constants?.maxActiveQuests === "number" ? heartbeat.constants.maxActiveQuests : 5;
-    // Items the craft chains still need — quests rewarding one of these (e.g.
-    // wood_for_stone → stone) must outrank filler quests, or the bot fills its
-    // quest slots with junk right after a turn-in and the stone loop dies.
-    // Use gross needs (not netted) so that selling existing stock doesn't make
-    // an item look "no longer needed" and restart a quest/buy loop to get more.
+    // Items the craft chains still need, using gross (not netted) needs.
     const questNeededItems = new Set(
       Object.entries(chainKeepNeeds)
         .filter(([itemId, need]) => (combinedInventory[itemId] ?? 0) < need)
         .map(([itemId]) => itemId),
     );
-    // An item is stocked when combined inventory covers the full gross chain
-    // need. TOOL_KEEP_CAP is already baked into chainKeepNeeds for tools, so
-    // no separate floor is needed here.
+    // Stocked when combined inventory covers the full gross chain need.
     const questStockedItems = new Set(
       Object.keys(chainKeepNeeds).filter(
         id => (combinedInventory[id] ?? 0) >= chainKeepNeeds[id],
@@ -1958,10 +1482,7 @@ disconnectFromGame = connect({
     if (completableQuest) tickExtras.completableQuest = { questId: completableQuest.quest.id, npcId: completableQuest.npc.id };
     if (questToAccept) tickExtras.questToAccept = { questId: questToAccept.quest.id, npcId: questToAccept.npc.id };
 
-    // Drop a stalled quest (turn-in items with no known source) to free a slot
-    // for a quest that's actually useful right now. Only fires when capacity
-    // is genuinely the bottleneck and something needed is waiting on it —
-    // never abandon just to make room for more filler.
+    // Drop a stalled quest only when capacity is the bottleneck and something needed is waiting.
     const atQuestCapacity = Object.keys(activeQuests).length >= maxActiveQuests;
     const stalledActiveQuests = atQuestCapacity
       ? findStalledQuests(activeQuests, player.inventory ?? {}, new Set(stalledQuestItems))
@@ -1972,22 +1493,15 @@ disconnectFromGame = connect({
     const questToAbandon = findQuestToAbandon(stalledActiveQuests, atQuestCapacity, bestAvailableQuest, questNeededItems);
     if (questToAbandon) tickExtras.questToAbandon = { questId: questToAbandon.id, blockedQuestId: bestAvailableQuest?.quest.id };
 
-    // Drain the whole quest log, one per tick, when the user disabled quest
-    // pursuit from the dashboard — distinct from questToAbandon above (which
-    // only ever drops a single stalled quest to free capacity for a better one).
+    // Drains the whole quest log, one per tick, when the user disabled quest pursuit.
     const questToDismiss: string | null = pursueQuestsEnabled ? null : (findQuestToDismiss(activeQuests)?.id ?? null);
     if (questToDismiss) tickExtras.questToDismiss = { questId: questToDismiss };
 
-    // Update NPC position memory whenever a quest NPC we have business with is
-    // actually visible. Used below to close the distance when they're not.
     const questNpcInRange = completableQuest?.npc ?? questToAccept?.npc ?? null;
     if (questNpcInRange && isFinitePosition(questNpcInRange.position)) {
       lastQuestNpcPosition = questNpcInRange.position as { x: number; y: number };
     }
-    // Give up on the remembered spot once we've closed to arrival distance and
-    // still have no visible NPC to act on — otherwise a stale or imprecise
-    // memory strands the bot walking into the same empty spot forever (see
-    // "No chase-to-NPC" postmortem in CONTEXT.md).
+    // Clear the remembered position once we've arrived with no NPC to act on.
     if (
       lastQuestNpcPosition !== null &&
       questNpcInRange === null &&
@@ -1995,13 +1509,6 @@ disconnectFromGame = connect({
     ) {
       lastQuestNpcPosition = null;
     }
-    // When to close the distance toward the remembered NPC position:
-    // 1. We have a completable quest (items in pocket) but the NPC is out of sight.
-    // 2. We need to re-accept a quest for harvest tools, have spare quest
-    //    capacity to do so, and have no other pending home tasks.
-    // Only actionable turn-in items block case 2: an unfulfillable quest (e.g.
-    // feathers nobody sells) must not stop the bot from walking back to the
-    // quest giver to re-accept the stone quest.
     const needQuestForHarvestTools =
       missingHarvestTools.length > 0 &&
       Object.keys(activeQuests).length < maxActiveQuests &&
@@ -2010,8 +1517,6 @@ disconnectFromGame = connect({
       upgradesPlan.length === 0 &&
       toolToCraft === null &&
       toolToCraftFromStorage === null;
-    // Not location-gated — go to the quest NPC to turn in/re-accept wherever
-    // it is, not just when already at home.
     const questNpcTarget: { x: number; y: number } | null =
       lastQuestNpcPosition !== null &&
         (completableQuestResult !== null || needQuestForHarvestTools)
@@ -2019,46 +1524,22 @@ disconnectFromGame = connect({
         : null;
     if (questNpcTarget) tickExtras.navigatingToQuestNpc = { position: questNpcTarget };
 
-    // Clear finishingHomeChores once healthy, back at home base, and all tasks done.
-    // The position check is critical: HP can heal en route while the merchant is still
-    // out of range, which would make upgradesPlan appear empty — a false "no tasks".
-    //
-    // pendingQuestTurnInItems: we still need to buy/withdraw and turn in quest items.
-    // These may not show in upgradesPlan (no visible merchant this tick) but keeping
-    // finishingHomeChores alive ensures the bot stays home to complete the cycle next tick.
+    // Clears once healthy, at home, and no chores remain.
     const nearHome = distanceBetween(playerPosition, HOME_POSITION) < HOME_CHORES_CLEAR_RADIUS;
     if (finishingHomeChores && !recoveringAtHome && playerHp >= maxHp && nearHome) {
       const hasChores =
         gearToEquip !== null ||
         recipeToCraft !== null ||
         toolToCraft !== null ||
-        // toolToCraftFromStorage covers the one-tick gap where ingredients are still in
-        // storage and toolToCraft (pocket-only) is null. Without this, finishingHomeChores
-        // clears the moment a craft completes and the next item's ingredients haven't been
-        // withdrawn yet, breaking the chain.
         toolToCraftFromStorage !== null ||
         activeCraft !== null ||
-        // A needed harvest tool is still in storage — stay home until it's
-        // withdrawn, otherwise the bot leaves before it's carried.
         harvestToolToWithdraw !== null ||
         upgradesPlan.length > 0 ||
-        // Only actionable turn-in items count as a chore. A quest needing items
-        // with no acquisition path (nobody sells them, none in storage) must not
-        // pin the bot at home forever — leaving lets it hunt/harvest, which is
-        // usually how those items are obtained anyway.
         Object.keys(actionablePendingQuestItems).length > 0 ||
-        // Sellable surplus in the pocket is a chore: finish the sale before
-        // wandering off encumbered.
         sellOpportunity !== null ||
-        // Keep alive during the quest cycle window: if there's a quest to turn
-        // in or accept right now (NPC visible), we're mid-cycle and should not
-        // clear until the quest action fires next tick.
         completableQuest !== null ||
         questToAccept !== null ||
         questToAbandon !== null ||
-        // questNpcTarget means we're closing the distance on a quest NPC to
-        // turn in or accept. It self-clears on arrival-without-resolution
-        // (QUEST_NPC_ARRIVAL_RADIUS), so this can't hold chores open forever.
         questNpcTarget !== null;
       if (!hasChores) finishingHomeChores = false;
     }
@@ -2110,8 +1591,6 @@ disconnectFromGame = connect({
     let decision = coreDecision;
 
     // ── Post-decision: sell surplus from storage ─────────────────────────────
-    // Only when at home with nothing better to do and not in a quest cycle.
-    // !depositOverride: don't clobber a pending manual dashboard deposit.
     if (atHome && nearbyBanker && !depositOverride && decision.type !== "withdraw"
       && completableQuest === null && questToAccept === null) {
       const toWithdrawFromStorage: Partial<Record<string, number>> = {};
@@ -2129,13 +1608,10 @@ disconnectFromGame = connect({
         if (itemId === 'copperCoin' || typeof qty !== 'number' || qty <= 0) continue;
         if (questTurnInItems.has(itemId)) continue;
         if (!(itemId in chainKeepNeeds)) {
-          // Not part of any active chain at all — withdraw unconditionally.
           withdrawUpTo(itemId, qty);
           continue;
         }
-        // Keep the gross chain need in storage; only withdraw the true surplus.
-        // Using gross (not netted) needs avoids selling stock that the chain
-        // still requires, which would restart quest/buy loops to replace it.
+        // Gross (not netted) chain need stays in storage; only the surplus is withdrawn.
         const surplus = qty - chainKeepNeeds[itemId];
         if (surplus <= 0) continue;
         const hasBuyer = visibleMerchants.some(({ buying }) => {
@@ -2151,14 +1627,6 @@ disconnectFromGame = connect({
     }
 
     // ── Post-decision: auto-deposit surplus ──────────────────────────────────
-    // "explore"/"return-home-idle"/"return-home-recover" are decide()'s
-    // "nothing left to do" outputs — deposit as the last thing once chores
-    // are truly finished, not narrower than that. "return-home-overloaded" is
-    // included too: decide()'s isEncumbered branch (checked before the
-    // finishingHomeChores homeChores() branch) keeps returning that decision
-    // for as long as isEncumbered is true, which stays true until a deposit
-    // actually happens — without it here, an overloaded bot with nothing
-    // sellable would arrive home and idle forever instead of depositing.
     if (atHome && nearbyBanker
       && (decision.type === "explore" || decision.type === "return-home-idle" || decision.type === "return-home-recover" || decision.type === "return-home-overloaded")
       && Object.keys(toDeposit).length > 0) {
@@ -2166,7 +1634,6 @@ disconnectFromGame = connect({
       tickExtras.autoDeposit = { items: toDeposit, banker: nearbyBanker.id };
     }
 
-    // Track decision stability for intent conflict detection.
     const prevDecision = lastDecision;
     if (decisionChanged(lastDecision, decision)) {
       decisionStableTicks = 1;
@@ -2175,9 +1642,6 @@ disconnectFromGame = connect({
       decisionStableTicks += 1;
     }
 
-    // Warn when the server's stored intent actively conflicts with our decision.
-    // "idle" is excluded — it is normal during the global cooldown (0.5s) between
-    // actions, so intent: idle while deciding attack/move is expected and not a bug.
     const decisionToIntentType = (d: Decision): string => {
       if (d.type === "attack") return "attack";
       if (d.type === "respawn") return "respawn";
@@ -2197,19 +1661,13 @@ disconnectFromGame = connect({
     const expectedIntent = decisionToIntentType(decision);
     const serverIntentType = typeof player.intent?.type === "string" ? player.intent.type : null;
 
-    // How many stable ticks to wait after a decision change before checking for
-    // intent conflicts. The server takes several ticks to acknowledge a new intent
-    // (e.g. stale 'attack' lingers after a kill, 'move' lingers on attack approach).
     const INTENT_TRANSITION_GRACE_TICKS = 8;
 
     const isConflictingIntent =
       serverIntentType !== null &&
       serverIntentType !== "idle" &&
       serverIntentType !== expectedIntent &&
-      // When attacking, the server emits intent='move' for as long as it takes
-      // to walk into attack range. This is normal — suppress it entirely.
       !(decision.type === "attack" && serverIntentType === "move") &&
-      // Selling/buying/depositing also emits intent='move' while walking to the NPC.
       !(decision.type === "sell" && serverIntentType === "move") &&
       !(decision.type === "buy" && serverIntentType === "move") &&
       !(decision.type === "deposit" && serverIntentType === "move") &&
@@ -2217,8 +1675,6 @@ disconnectFromGame = connect({
       !(decision.type === "harvest" && serverIntentType === "move") &&
       !(decision.type === "acceptQuest" && serverIntentType === "move") &&
       !(decision.type === "turnInQuest" && serverIntentType === "move") &&
-      // After any decision change, give the server time to acknowledge the new
-      // intent before treating a mismatch as a problem.
       decisionStableTicks > INTENT_TRANSITION_GRACE_TICKS;
 
     if (isConflictingIntent) {
@@ -2236,7 +1692,6 @@ disconnectFromGame = connect({
       unexpectedIdleTicks = 0;
     }
 
-    // Explain why an attack was dropped.
     let lostTargetReason: string | null = null;
     if (prevDecision?.type === "attack" && decision.type !== "attack") {
       const prevTargetId = (prevDecision as { type: "attack"; targetId: string }).targetId;
